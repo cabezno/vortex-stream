@@ -11,7 +11,7 @@ dependencies:
     sdk: flutter
   flutter_webrtc: ^1.4.1    # camera capture + WebRTC PeerConnection (WHIP publish)
                             # >=1.x: drops the removed Android v1 embedding (Registrar)
-  mobile_scanner: ^5.2.3    # QR pairing scan
+  mobile_scanner: ^7.2.0    # QR pairing scan (7.x: better Android 14/15 camera)
   http: ^1.2.2              # WHIP HTTP POST/DELETE
   permission_handler: ^11.3.1
 

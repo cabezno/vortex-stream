@@ -310,7 +310,8 @@ class _HomePageState extends State<HomePage> {
             ),
         ],
       ),
-      body: Padding(
+      body: SafeArea(
+        child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -367,6 +368,7 @@ class _HomePageState extends State<HomePage> {
             ]),
           ],
         ),
+        ),
       ),
     );
   }
@@ -386,31 +388,115 @@ extension _FirstOrNull<E> on List<E> {
   E? get firstOrNull => isEmpty ? null : first;
 }
 
-// QR scan screen
+// QR scan screen (mobile_scanner 7.x: explicit controller + lifecycle).
 class _ScanPage extends StatefulWidget {
   const _ScanPage();
   @override
   State<_ScanPage> createState() => _ScanPageState();
 }
 
-class _ScanPageState extends State<_ScanPage> {
+class _ScanPageState extends State<_ScanPage> with WidgetsBindingObserver {
+  late final MobileScannerController _controller;
   bool _done = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _controller = MobileScannerController(
+      formats: const [BarcodeFormat.qrCode],
+      detectionSpeed: DetectionSpeed.noDuplicates,
+    );
+    // start() must be called manually in 7.x; do it after the first frame
+    // so the camera texture is attached.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _controller.start());
+  }
+
+  // Pause/resume the camera with the app lifecycle (7.x does not auto-manage it).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _controller.start();
+    } else if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _controller.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    if (_done) return;
+    for (final b in capture.barcodes) {
+      final v = b.rawValue;
+      if (v != null && v.isNotEmpty) {
+        _done = true;
+        Navigator.of(context).pop(v);
+        break;
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Scan VortexEngine QR')),
-      body: MobileScanner(
-        onDetect: (capture) {
-          if (_done) return;
-          for (final b in capture.barcodes) {
-            final v = b.rawValue;
-            if (v != null && v.isNotEmpty) {
-              _done = true;
-              Navigator.of(context).pop(v);
-              break;
-            }
-          }
-        },
+      appBar: AppBar(
+        title: const Text('Escaneá el QR de VortexEngine'),
+        actions: [
+          IconButton(
+            tooltip: 'Linterna',
+            icon: const Icon(Icons.flash_on),
+            onPressed: () => _controller.toggleTorch(),
+          ),
+        ],
+      ),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          MobileScanner(
+            controller: _controller,
+            onDetect: _onDetect,
+            errorBuilder: (context, error) => Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  'No se pudo abrir la cámara:\n${error.errorCode}\n\n'
+                  'Revisá el permiso de cámara en Ajustes.',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70),
+                ),
+              ),
+            ),
+          ),
+          // Scan frame guide
+          IgnorePointer(
+            child: Center(
+              child: Container(
+                width: 240,
+                height: 240,
+                decoration: BoxDecoration(
+                  border: Border.all(color: const Color(0xFF00E5FF), width: 3),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+            ),
+          ),
+          const Positioned(
+            left: 0, right: 0, bottom: 40,
+            child: IgnorePointer(
+              child: Text(
+                'Apuntá al QR de Herramientas → Cámara de celular',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
