@@ -1,0 +1,21 @@
+name: vortexcam
+description: "VortexCam — turn your phone into a camera for VortexEngine (WHIP/WebRTC)."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.1.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_webrtc: ^0.11.7   # camera capture + WebRTC PeerConnection (WHIP publish)
+  mobile_scanner: ^5.2.3    # QR pairing scan
+  http: ^1.2.2              # WHIP HTTP POST/DELETE
+  permission_handler: ^11.3.1
+
+dev_dependencies:
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
