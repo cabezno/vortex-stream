@@ -105,7 +105,7 @@ class _HomePageState extends State<HomePage> {
   // QR scan
   // ---------------------------------------------------------------------------
   Future<void> _scan() async {
-    if (!await Permission.camera.request().isGranted) {
+    if (!(await Permission.camera.request()).isGranted) {
       _setError('Camera permission denied');
       return;
     }
@@ -132,7 +132,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _connect() async {
     final cfg = _cfg;
     if (cfg == null) return;
-    if (!await Permission.camera.request().isGranted) {
+    if (!(await Permission.camera.request()).isGranted) {
       _setError('Camera permission denied');
       return;
     }

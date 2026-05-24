@@ -59,11 +59,13 @@ jobs:
           open(man, "w", encoding="utf-8").write(s)
           print("patched manifest")
 
-          # ---- build.gradle(.kts): force minSdk 23 ----
+          # ---- build.gradle(.kts): force minSdk 23 (flutter_webrtc needs >=23) ----
+          # Just swap the flutter.minSdkVersion token; this keeps valid syntax in
+          # BOTH Groovy (`minSdkVersion 23`) and Kotlin DSL (`minSdk = 23`).
+          # Do NOT rewrite the whole assignment — that drops the `=` and breaks .kts.
           for g in glob.glob("android/app/build.gradle*"):
               t = open(g, encoding="utf-8").read()
               t = t.replace("flutter.minSdkVersion", "23")
-              t = re.sub(r"minSdk(Version)?\s*=?\s*\d+", "minSdk 23", t)
               open(g, "w", encoding="utf-8").write(t)
               print("patched", g)
           PY
