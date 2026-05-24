@@ -126,6 +126,59 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
+  // Manual pairing: type the WHIP endpoint shown as text in the VortexEngine
+  // panel (http://<ip>:8080/whip/). Lets you connect without the QR scanner.
+  Future<void> _manualEntry() async {
+    final ctrl = TextEditingController(
+      text: _cfg?.whipBase ?? 'http://192.168.1.10:8080/whip/',
+    );
+    final url = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Endpoint WHIP manual'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Copiá la URL que muestra VortexEngine en\n'
+                'Herramientas → Cámara de celular (WHIP).',
+                style: TextStyle(fontSize: 12)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                labelText: 'http://<ip>:8080/whip/',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('Usar')),
+        ],
+      ),
+    );
+    if (url == null || url.isEmpty) return;
+    setState(() {
+      _cfg = PairConfig(
+        whipBase: url,
+        host: 'Manual',
+        maxKbps: 8000,
+        width: 1280,
+        height: 720,
+        fps: 30,
+      );
+      _state = CamState.idle;
+      _status = 'Endpoint manual listo → tocá Go live';
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Connect (WHIP publish)
   // ---------------------------------------------------------------------------
@@ -366,6 +419,12 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
             ]),
+            const SizedBox(height: 4),
+            TextButton.icon(
+              onPressed: (live || connecting) ? null : _manualEntry,
+              icon: const Icon(Icons.keyboard),
+              label: const Text('Ingresar endpoint WHIP manualmente'),
+            ),
           ],
         ),
         ),
@@ -425,10 +484,24 @@ class _ScanPageState extends State<_ScanPage> {
             errorBuilder: (context, error) => Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
-                child: Text(
-                  'No se pudo abrir la cámara.\nCódigo: ${error.errorCode}',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.no_photography, color: Colors.white54, size: 48),
+                    const SizedBox(height: 12),
+                    Text(
+                      'No se pudo abrir la cámara.\n\n'
+                      'Código: ${error.errorCode}\n'
+                      'Detalle: ${error.errorDetails?.message ?? error.errorDetails?.code ?? "—"}',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white70),
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton(
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      child: const Text('Volver (usá conexión manual)'),
+                    ),
+                  ],
                 ),
               ),
             ),
