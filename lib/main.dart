@@ -388,47 +388,17 @@ extension _FirstOrNull<E> on List<E> {
   E? get firstOrNull => isEmpty ? null : first;
 }
 
-// QR scan screen (mobile_scanner 7.x: explicit controller + lifecycle).
+// QR scan screen — simple form: NO explicit controller. MobileScanner creates
+// and manages its own controller (auto start/stop with the widget lifecycle).
+// This is the canonical 7.x pattern and avoids double-start() errors.
 class _ScanPage extends StatefulWidget {
   const _ScanPage();
   @override
   State<_ScanPage> createState() => _ScanPageState();
 }
 
-class _ScanPageState extends State<_ScanPage> with WidgetsBindingObserver {
-  late final MobileScannerController _controller;
+class _ScanPageState extends State<_ScanPage> {
   bool _done = false;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _controller = MobileScannerController(
-      formats: const [BarcodeFormat.qrCode],
-      detectionSpeed: DetectionSpeed.noDuplicates,
-    );
-    // start() must be called manually in 7.x; do it after the first frame
-    // so the camera texture is attached.
-    WidgetsBinding.instance.addPostFrameCallback((_) => _controller.start());
-  }
-
-  // Pause/resume the camera with the app lifecycle (7.x does not auto-manage it).
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      _controller.start();
-    } else if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      _controller.stop();
-    }
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _controller.dispose();
-    super.dispose();
-  }
 
   void _onDetect(BarcodeCapture capture) {
     if (_done) return;
@@ -445,28 +415,18 @@ class _ScanPageState extends State<_ScanPage> with WidgetsBindingObserver {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Escaneá el QR de VortexEngine'),
-        actions: [
-          IconButton(
-            tooltip: 'Linterna',
-            icon: const Icon(Icons.flash_on),
-            onPressed: () => _controller.toggleTorch(),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('Escaneá el QR de VortexEngine')),
+      backgroundColor: Colors.black,
       body: Stack(
         fit: StackFit.expand,
         children: [
           MobileScanner(
-            controller: _controller,
             onDetect: _onDetect,
             errorBuilder: (context, error) => Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
                 child: Text(
-                  'No se pudo abrir la cámara:\n${error.errorCode}\n\n'
-                  'Revisá el permiso de cámara en Ajustes.',
+                  'No se pudo abrir la cámara.\nCódigo: ${error.errorCode}',
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white70),
                 ),
