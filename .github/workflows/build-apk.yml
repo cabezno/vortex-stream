@@ -68,6 +68,17 @@ jobs:
               t = t.replace("flutter.minSdkVersion", "23")
               open(g, "w", encoding="utf-8").write(t)
               print("patched", g)
+
+          # ---- gradle.properties: use the UNBUNDLED (Play Services) ML Kit model ----
+          # The default *bundled* barcode model NPEs on some devices ("genericError":
+          # null object reference inside ML Kit). The unbundled model is delivered
+          # per-device by Google Play Services and avoids that crash (also smaller).
+          gp = "android/gradle.properties"
+          props = open(gp, encoding="utf-8").read() if os.path.exists(gp) else ""
+          if "useUnbundled" not in props:
+              with open(gp, "a", encoding="utf-8") as f:
+                  f.write("\ndev.steenbakker.mobile_scanner.useUnbundled=true\n")
+              print("patched gradle.properties: unbundled ML Kit")
           PY
 
       - name: Get dependencies
