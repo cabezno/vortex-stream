@@ -466,6 +466,13 @@ class _ScanPageState extends State<_ScanPage> {
       backgroundColor: Colors.black,
       body: ReaderWidget(
         // ReaderWidget brings its own camera preview + scan overlay.
+        // Defaults only scan the centre 50% (cropPercent 0.5) with tryHarder off,
+        // so a dense pairing QR that fills the frame often won't decode. Widen the
+        // scan area and let ZXing work harder.
+        cropPercent: 0.9,
+        tryHarder: true,
+        tryInverted: true,
+        scanDelay: const Duration(milliseconds: 400),
         onScan: (code) async {
           if (_done) return;
           final v = code.text;
