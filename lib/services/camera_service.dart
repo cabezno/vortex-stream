@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
-import 'package:camera/camera.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+
+enum CameraFacing { front, back }
 
 // =============================================================================
 // CameraService — manages device camera and MediaStream for WebRTC

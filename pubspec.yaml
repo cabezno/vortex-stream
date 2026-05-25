@@ -10,9 +10,6 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # Camera HAL access (CameraFacing enum + torch)
-  camera: ^0.10.0
-
   # WebRTC — WHIP publish (phone → VortexEngine)
   # >=1.x drops the removed Android v1 embedding (Registrar)
   flutter_webrtc: ^1.4.1
