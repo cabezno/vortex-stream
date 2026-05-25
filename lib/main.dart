@@ -228,7 +228,8 @@ class _HomePageState extends State<HomePage> {
 
       // 5) POST the offer to <whipBase><deviceName>
       final dev = _deviceNameCtrl.text.trim().isEmpty ? 'phone' : _deviceNameCtrl.text.trim();
-      final url = cfg.whipBase.endsWith('/') ? '${cfg.whipBase}$dev' : '${cfg.whipBase}/$dev';
+      final base = _normalizeWhipBase(cfg.whipBase);
+      final url = '$base$dev';
       setState(() => _status = 'Connecting to $url ...');
       final res = await http.post(
         Uri.parse(url),
@@ -296,6 +297,19 @@ class _HomePageState extends State<HomePage> {
           !c.isCompleted) c.complete();
     };
     await c.future.timeout(const Duration(seconds: 3), onTimeout: () {});
+  }
+
+  // Make a typed/scanned WHIP base robust: trim, drop stray leading slashes or
+  // spaces, ensure an http:// scheme and a trailing slash. Fixes inputs like
+  // "/http://ip:8080/whip/" (the "No host specified in URI" error).
+  String _normalizeWhipBase(String raw) {
+    var s = raw.trim();
+    s = s.replaceFirst(RegExp(r'^[/\s]+'), '');
+    if (!s.startsWith('http://') && !s.startsWith('https://')) {
+      s = 'http://$s';
+    }
+    if (!s.endsWith('/')) s = '$s/';
+    return s;
   }
 
   String _resolveLocation(String base, String location) {
