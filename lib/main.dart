@@ -7,6 +7,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // Clipboard
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -87,10 +88,79 @@ class _HomePageState extends State<HomePage> {
   MediaStream? _localStream;
   String? _resourceUrl; // WHIP resource (for DELETE)
 
+  // On-screen diagnostic log (newest first). Tap the log icon to view + copy.
+  final List<String> _logs = [];
+  void _log(String m) {
+    final n = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    final t = '${two(n.hour)}:${two(n.minute)}:${two(n.second)}';
+    debugPrint('VCAM [$t] $m');
+    if (mounted) setState(() => _logs.insert(0, '[$t] $m'));
+  }
+
+  void _showLogs() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF101418),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                const Text('Registro',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                const Spacer(),
+                TextButton.icon(
+                  icon: const Icon(Icons.copy, size: 18),
+                  label: const Text('Copiar'),
+                  onPressed: () {
+                    Clipboard.setData(
+                        ClipboardData(text: _logs.reversed.join('\n')));
+                    ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(
+                        content: Text('Log copiado al portapapeles')));
+                  },
+                ),
+                IconButton(
+                  tooltip: 'Limpiar',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () {
+                    setState(() => _logs.clear());
+                    Navigator.pop(ctx);
+                  },
+                ),
+              ],
+            ),
+            const Divider(height: 8),
+            SizedBox(
+              height: 380,
+              child: _logs.isEmpty
+                  ? const Center(
+                      child: Text('Sin eventos todavía',
+                          style: TextStyle(color: Colors.white38)))
+                  : ListView.builder(
+                      itemCount: _logs.length,
+                      itemBuilder: (_, i) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: SelectableText(_logs[i],
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.white70)),
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
     _localRenderer.initialize();
+    _log('App iniciada (v0.2.3)');
   }
 
   @override
@@ -105,24 +175,34 @@ class _HomePageState extends State<HomePage> {
   // QR scan
   // ---------------------------------------------------------------------------
   Future<void> _scan() async {
+    _log('Scan QR: pidiendo permiso de cámara...');
     if (!(await Permission.camera.request()).isGranted) {
-      _setError('Camera permission denied');
+      _log('Permiso de cámara DENEGADO');
+      _setError('Permiso de cámara denegado');
       return;
     }
     if (!mounted) return;
+    _log('Abriendo escáner ZXing...');
     final raw = await Navigator.of(context).push<String>(
       MaterialPageRoute(builder: (_) => const _ScanPage()),
     );
-    if (raw == null) return;
-    final cfg = PairConfig.tryParse(raw);
-    if (cfg == null) {
-      _setError('Not a VortexCam pairing code');
+    if (raw == null) {
+      _log('Escáner cerrado sin leer ningún QR');
       return;
     }
+    final preview = raw.length > 70 ? raw.substring(0, 70) : raw;
+    _log('QR leído (${raw.length} chars): $preview');
+    final cfg = PairConfig.tryParse(raw);
+    if (cfg == null) {
+      _log('El QR NO es un código de emparejamiento VortexCam');
+      _setError('El QR no es un código VortexCam');
+      return;
+    }
+    _log('Emparejado. whip=${cfg.whipBase}');
     setState(() {
       _cfg = cfg;
       _state = CamState.idle;
-      _status = 'Paired with ${cfg.host}';
+      _status = 'Emparejado con ${cfg.host}';
     });
   }
 
@@ -130,7 +210,7 @@ class _HomePageState extends State<HomePage> {
   // panel (http://<ip>:8080/whip/). Lets you connect without the QR scanner.
   Future<void> _manualEntry() async {
     final ctrl = TextEditingController(
-      text: _cfg?.whipBase ?? 'http://192.168.1.10:8080/whip/',
+      text: _cfg?.whipBase ?? 'http://192.168.1.2:8080/whip/',
     );
     final url = await showDialog<String>(
       context: context,
@@ -165,6 +245,7 @@ class _HomePageState extends State<HomePage> {
       ),
     );
     if (url == null || url.isEmpty) return;
+    _log('Endpoint manual ingresado: $url');
     setState(() {
       _cfg = PairConfig(
         whipBase: url,
@@ -184,16 +265,23 @@ class _HomePageState extends State<HomePage> {
   // ---------------------------------------------------------------------------
   Future<void> _connect() async {
     final cfg = _cfg;
-    if (cfg == null) return;
+    if (cfg == null) {
+      _log('Go live SIN endpoint (escaneá o ingresá manual primero)');
+      _setError('Primero escaneá el QR o ingresá el endpoint');
+      return;
+    }
+    _log('Go live: pidiendo permisos...');
     if (!(await Permission.camera.request()).isGranted) {
-      _setError('Camera permission denied');
+      _log('Permiso de cámara DENEGADO');
+      _setError('Permiso de cámara denegado');
       return;
     }
     await Permission.microphone.request(); // optional (audio added later)
 
-    setState(() { _state = CamState.connecting; _status = 'Starting camera...'; });
+    setState(() { _state = CamState.connecting; _status = 'Iniciando cámara...'; });
     try {
       // 1) Camera
+      _log('getUserMedia (${cfg.width}x${cfg.height}@${cfg.fps})...');
       _localStream = await navigator.mediaDevices.getUserMedia({
         'audio': false,
         'video': {
@@ -204,22 +292,25 @@ class _HomePageState extends State<HomePage> {
         },
       });
       _localRenderer.srcObject = _localStream;
+      _log('Cámara OK (${_localStream!.getVideoTracks().length} pista video)');
 
       // 2) PeerConnection (sendonly video)
       _pc = await createPeerConnection({
         'iceServers': [{'urls': 'stun:stun.l.google.com:19302'}],
         'sdpSemantics': 'unified-plan',
       });
+      _log('PeerConnection creada');
       for (final track in _localStream!.getTracks()) {
         await _pc!.addTrack(track, _localStream!);
       }
 
-      setState(() => _status = 'Negotiating...');
+      setState(() => _status = 'Negociando...');
 
       // 3) Offer → force H.264 (engine decoder is H.264)
       final offer = await _pc!.createOffer({});
       final munged = _preferH264(offer.sdp ?? '');
       await _pc!.setLocalDescription(RTCSessionDescription(munged, 'offer'));
+      _log('Offer creada, esperando ICE...');
 
       // 4) Wait for ICE gathering to complete (non-trickle WHIP)
       await _waitIceComplete(_pc!);
@@ -230,24 +321,27 @@ class _HomePageState extends State<HomePage> {
       final dev = _deviceNameCtrl.text.trim().isEmpty ? 'phone' : _deviceNameCtrl.text.trim();
       final base = _normalizeWhipBase(cfg.whipBase);
       final url = '$base$dev';
-      setState(() => _status = 'Connecting to $url ...');
+      _log('POST $url (SDP ${localSdp.length} bytes)...');
+      setState(() => _status = 'Conectando a $url ...');
       final res = await http.post(
         Uri.parse(url),
         headers: {'Content-Type': 'application/sdp'},
         body: localSdp,
-      );
+      ).timeout(const Duration(seconds: 12));
+      _log('HTTP ${res.statusCode} (respuesta ${res.body.length} bytes)');
       if (res.statusCode != 201 && res.statusCode != 200) {
-        throw 'Server replied ${res.statusCode}';
+        throw 'El servidor respondió ${res.statusCode}';
       }
       // 6) Apply the SDP answer
       await _pc!.setRemoteDescription(RTCSessionDescription(res.body, 'answer'));
       _resourceUrl = res.headers['location'] != null
           ? _resolveLocation(url, res.headers['location']!)
           : url;
-
-      setState(() { _state = CamState.live; _status = 'LIVE → ${cfg.host}'; });
+      _log('Answer aplicada → EN VIVO');
+      setState(() { _state = CamState.live; _status = 'EN VIVO → ${cfg.host}'; });
     } catch (e) {
-      _setError('Connect failed: $e');
+      _log('ERROR: $e');
+      _setError('Falló la conexión: $e');
       await _disconnect();
     }
   }
@@ -375,6 +469,11 @@ class _HomePageState extends State<HomePage> {
               icon: Icon(_useFrontCamera ? Icons.camera_front : Icons.camera_rear),
               onPressed: () async { await _flipCamera(); },
             ),
+          IconButton(
+            tooltip: 'Registro / log',
+            icon: const Icon(Icons.article_outlined),
+            onPressed: _showLogs,
+          ),
         ],
       ),
       body: SafeArea(
@@ -395,7 +494,16 @@ class _HomePageState extends State<HomePage> {
                 child: (_localStream != null)
                     ? RTCVideoView(_localRenderer, mirror: _useFrontCamera,
                         objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
-                    : const Center(child: Text('No preview', style: TextStyle(color: Colors.white38))),
+                    : const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(20),
+                          child: Text(
+                            'Sin video aún.\nEscaneá el QR (o ingresá el endpoint) y tocá Go live.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(color: Colors.white38),
+                          ),
+                        ),
+                      ),
               ),
             ),
             const SizedBox(height: 12),
