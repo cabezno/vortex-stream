@@ -8,7 +8,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:flutter_zxing/flutter_zxing.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:http/http.dart' as http;
 
@@ -447,9 +447,9 @@ extension _FirstOrNull<E> on List<E> {
   E? get firstOrNull => isEmpty ? null : first;
 }
 
-// QR scan screen — simple form: NO explicit controller. MobileScanner creates
-// and manages its own controller (auto start/stop with the widget lifecycle).
-// This is the canonical 7.x pattern and avoids double-start() errors.
+// QR scan screen — ZXing (flutter_zxing). Decodes with the ZXing C++ library
+// via FFI; uses the `camera` plugin for the preview. No ML Kit / Play Services,
+// so it sidesteps the ML Kit init crash on devices where mobile_scanner failed.
 class _ScanPage extends StatefulWidget {
   const _ScanPage();
   @override
@@ -459,77 +459,21 @@ class _ScanPage extends StatefulWidget {
 class _ScanPageState extends State<_ScanPage> {
   bool _done = false;
 
-  void _onDetect(BarcodeCapture capture) {
-    if (_done) return;
-    for (final b in capture.barcodes) {
-      final v = b.rawValue;
-      if (v != null && v.isNotEmpty) {
-        _done = true;
-        Navigator.of(context).pop(v);
-        break;
-      }
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('Escaneá el QR de VortexEngine')),
       backgroundColor: Colors.black,
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          MobileScanner(
-            onDetect: _onDetect,
-            errorBuilder: (context, error) => Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.no_photography, color: Colors.white54, size: 48),
-                    const SizedBox(height: 12),
-                    Text(
-                      'No se pudo abrir la cámara.\n\n'
-                      'Código: ${error.errorCode}\n'
-                      'Detalle: ${error.errorDetails?.message ?? error.errorDetails?.code ?? "—"}',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.white70),
-                    ),
-                    const SizedBox(height: 16),
-                    FilledButton(
-                      onPressed: () => Navigator.of(context).maybePop(),
-                      child: const Text('Volver (usá conexión manual)'),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          // Scan frame guide
-          IgnorePointer(
-            child: Center(
-              child: Container(
-                width: 240,
-                height: 240,
-                decoration: BoxDecoration(
-                  border: Border.all(color: const Color(0xFF00E5FF), width: 3),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-              ),
-            ),
-          ),
-          const Positioned(
-            left: 0, right: 0, bottom: 40,
-            child: IgnorePointer(
-              child: Text(
-                'Apuntá al QR de Herramientas → Cámara de celular',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white70),
-              ),
-            ),
-          ),
-        ],
+      body: ReaderWidget(
+        // ReaderWidget brings its own camera preview + scan overlay.
+        onScan: (code) async {
+          if (_done) return;
+          final v = code.text;
+          if (code.isValid && v != null && v.isNotEmpty) {
+            _done = true;
+            if (mounted) Navigator.of(context).pop(v);
+          }
+        },
       ),
     );
   }
