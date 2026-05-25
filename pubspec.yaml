@@ -1,7 +1,7 @@
 name: vortexcam
 description: "VortexCam — turn your phone into a camera for VortexEngine (WHIP/WebRTC)."
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.3.0+1
 
 environment:
   sdk: '>=3.1.0 <4.0.0'
@@ -9,14 +9,32 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  flutter_webrtc: ^1.4.1    # camera capture + WebRTC PeerConnection (WHIP publish)
-                            # >=1.x: drops the removed Android v1 embedding (Registrar)
-  flutter_zxing: ^2.3.0     # QR pairing scan via ZXing (C++/FFI) — no ML Kit /
-                            # Play Services, avoids the ML Kit init NPE on some devices
-  http: ^1.2.2              # WHIP HTTP POST/DELETE
+
+  # Camera HAL access (CameraFacing enum + torch)
+  camera: ^0.10.0
+
+  # WebRTC — WHIP publish (phone → VortexEngine)
+  # >=1.x drops the removed Android v1 embedding (Registrar)
+  flutter_webrtc: ^1.4.1
+
+  # HTTP — WHIP signaling POST/DELETE
+  http: ^1.2.2
+
+  # State management
+  provider: ^6.1.2
+
+  # Settings persistence
+  shared_preferences: ^2.2.3
+
+  # UI
+  cupertino_icons: ^1.0.8
+
+  # Permissions
   permission_handler: ^11.3.1
 
 dev_dependencies:
+  flutter_test:
+    sdk: flutter
   flutter_lints: ^4.0.0
 
 flutter:

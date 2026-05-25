@@ -46,6 +46,7 @@ jobs:
               "android.permission.RECORD_AUDIO",
               "android.permission.INTERNET",
               "android.permission.ACCESS_NETWORK_STATE",
+              "android.permission.FLASHLIGHT",
           ]
           inject = "".join(
               f'    <uses-permission android:name="{p}"/>\n' for p in perms
