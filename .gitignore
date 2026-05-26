@@ -9,8 +9,7 @@ build/
 *.iml
 *.log
 
-# Generated platform dirs (CI regenera con `flutter create`)
-/android/
+# Generated platform dirs (excluding android since we have custom config)
 /ios/
 /linux/
 /macos/
