@@ -25,6 +25,9 @@ dependencies:
   # Settings persistence
   shared_preferences: ^2.2.3
 
+  # QR scanner — pairing with VortexEngine
+  flutter_zxing: ^1.6.1
+
   # UI extras
   cupertino_icons: ^1.0.6
   permission_handler: ^11.3.1
