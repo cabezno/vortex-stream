@@ -28,16 +28,15 @@ class _CameraScreenState extends State<CameraScreen> {
     final cam = context.read<CameraService>();
     if (cam.stream != null) _renderer.srcObject = cam.stream;
 
-    // Allow all orientations — lock to landscape causes a rebuild mid-animation
-    // where the Stack collapses because it briefly has no tight constraints.
-    // The RTCVideoView + objectFitCover handles any orientation correctly.
+    // Lock to portrait: getUserMedia always delivers landscape pixels (1280×720)
+    // with CVO metadata for orientation. Allowing landscape rotation triggers
+    // OrientationBuilder rebuilds that destroy/recreate the RTCVideoView —
+    // during that transition the Cover-fitted preview deforms. Locked portrait
+    // means the full CVO-corrected frame is always visible without cropping.
     SystemChrome.setPreferredOrientations([
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
       DeviceOrientation.portraitUp,
       DeviceOrientation.portraitDown,
     ]);
-    // Hide system bars so the video fills the full screen edge-to-edge.
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   }
 
@@ -46,8 +45,7 @@ class _CameraScreenState extends State<CameraScreen> {
     _renderer.dispose();
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
+      DeviceOrientation.portraitDown,
     ]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();

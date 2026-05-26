@@ -9,11 +9,10 @@ import 'screens/connect_screen.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Lock to landscape+portrait (user chooses per session)
+  // Lock to portrait globally. CameraScreen also sets portrait in initState.
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
+    DeviceOrientation.portraitDown,
   ]);
 
   // Immersive mode — no status bar distracting during live
