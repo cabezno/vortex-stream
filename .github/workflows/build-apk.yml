@@ -18,24 +18,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Pin ANDROID_NDK_ROOT to NDK 25 before Flutter / Gradle run.
-      # flutter_zxing 1.x vendors ZXing-C++ that uses
-      # std::basic_string_view<unsigned char> — removed from NDK 28 libc++.
-      # Setting ANDROID_NDK_ROOT here overrides the default NDK 28 for ALL
-      # cmake builds, including plugin builds (ndkVersion in app/build.gradle
-      # only controls the app module, not plugin modules).
-      - name: Pin NDK to r25 (flutter_zxing incompatible with NDK 28)
-        run: |
-          NDK_DIR=/usr/local/lib/android/sdk/ndk
-          NDK_25=$(ls "$NDK_DIR" | grep "^25\." | sort | tail -1)
-          if [ -z "$NDK_25" ]; then
-            echo "NDK 25 not found, available: $(ls $NDK_DIR)"; exit 1
-          fi
-          echo "Using NDK: $NDK_25"
-          echo "ANDROID_NDK_ROOT=$NDK_DIR/$NDK_25" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$NDK_DIR/$NDK_25" >> "$GITHUB_ENV"
-          echo "NDK_HOME=$NDK_DIR/$NDK_25"          >> "$GITHUB_ENV"
-
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -90,15 +72,6 @@ jobs:
               open(g, "w", encoding="utf-8").write(t)
               print("patched", g)
 
-          # ---- local.properties: also set ndk.dir so Gradle uses the pinned NDK ----
-          ndk_root = os.environ.get("ANDROID_NDK_ROOT", "")
-          lp = "android/local.properties"
-          props = open(lp, encoding="utf-8").read() if os.path.exists(lp) else ""
-          if ndk_root and "ndk.dir" not in props:
-              with open(lp, "a", encoding="utf-8") as f:
-                  f.write(f"\nndk.dir={ndk_root}\n")
-              print(f"patched local.properties: ndk.dir={ndk_root}")
-
           # ---- gradle.properties: unbundled ML Kit model ----
           gp = "android/gradle.properties"
           props = open(gp, encoding="utf-8").read() if os.path.exists(gp) else ""
@@ -110,6 +83,19 @@ jobs:
 
       - name: Get dependencies
         run: flutter pub get
+
+      # flutter_zxing 1.x vendors ZXing-C++ that defines utf8_t as
+      # std::basic_string_view<unsigned char>. NDK 26+ removed the
+      # char_traits<unsigned char> specialization from libc++ (it was never
+      # in the C++ standard). The fix used in newer ZXing-C++ versions is to
+      # change the typedef to std::basic_string_view<char> — semantically
+      # identical for UTF-8 byte processing.
+      - name: Patch flutter_zxing ZXing-C++ source for NDK 26+
+        run: |
+          find "$HOME/.pub-cache" -name "Utf.h" -path "*/flutter_zxing*" | while read f; do
+            sed -i 's/basic_string_view<unsigned char>/basic_string_view<char>/g' "$f"
+            echo "Patched: $f"
+          done
 
       - name: Build release APK
         run: flutter build apk --release
