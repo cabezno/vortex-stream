@@ -511,8 +511,14 @@ class _HomePageState extends State<HomePage> {
                 ),
                 clipBehavior: Clip.antiAlias,
                 child: (_localStream != null)
-                    ? RTCVideoView(_localRenderer, mirror: _useFrontCamera,
-                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)
+                    ? OrientationBuilder(
+                        builder: (context, orientation) => RTCVideoView(
+                          _localRenderer,
+                          key: ValueKey(orientation),
+                          mirror: _useFrontCamera,
+                          objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                        ),
+                      )
                     : const Center(
                         child: Padding(
                           padding: EdgeInsets.all(20),
