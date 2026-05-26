@@ -33,10 +33,6 @@ jobs:
           rm -rf android
           flutter create --platforms=android --org com.vortexengine --project-name vortexcam .
 
-      # Create asset directories declared in pubspec.yaml
-      - name: Create asset directories
-        run: mkdir -p assets/icons
-
       # Inject runtime permissions + allow cleartext (the WHIP URL is http:// on LAN)
       # and force minSdk 23 (required by flutter_webrtc).
       - name: Patch manifest + gradle
@@ -87,15 +83,29 @@ jobs:
       # flutter_zxing 1.x vendors ZXing-C++ that defines utf8_t as
       # std::basic_string_view<unsigned char>. NDK 26+ removed the
       # char_traits<unsigned char> specialization from libc++ (it was never
-      # in the C++ standard). The fix used in newer ZXing-C++ versions is to
-      # change the typedef to std::basic_string_view<char> — semantically
-      # identical for UTF-8 byte processing.
+      # in the C++ standard). The fix: change the typedef to
+      # std::basic_string_view<char> — semantically identical for UTF-8.
+      # We also delete any stale cmake .cxx cache so the patched header
+      # is actually picked up by the NDK compiler.
       - name: Patch flutter_zxing ZXing-C++ source for NDK 26+
         run: |
-          find "$HOME/.pub-cache" -name "Utf.h" -path "*/flutter_zxing*" | while read f; do
-            sed -i 's/basic_string_view<unsigned char>/basic_string_view<char>/g' "$f"
-            echo "Patched: $f"
-          done
+          set -e
+          ZXING_PKG=$(find "$HOME/.pub-cache/hosted/pub.dev" \
+                          -maxdepth 1 -name "flutter_zxing-*" -type d \
+                          | sort -V | tail -1)
+          echo "flutter_zxing package: $ZXING_PKG"
+          UTH="$ZXING_PKG/src/zxing/core/src/Utf.h"
+          if [ ! -f "$UTH" ]; then
+            echo "ERROR: Utf.h not found at expected path; scanning:"
+            find "$HOME/.pub-cache" -name "Utf.h" 2>/dev/null
+            exit 1
+          fi
+          sed -i 's/basic_string_view<unsigned char>/basic_string_view<char>/g' "$UTH"
+          echo "Patched $UTH"
+          grep -n "utf8_t\|string_view" "$UTH" | head -5
+          # Remove cmake cache so NDK recompiles with the patched header.
+          rm -rf "$ZXING_PKG/android/.cxx/" || true
+          echo "cmake cache cleared"
 
       - name: Build release APK
         run: flutter build apk --release
