@@ -19,6 +19,7 @@ enum ConnectionState { disconnected, connecting, connected, error }
 class ConnectionService extends ChangeNotifier {
   ConnectionState _state = ConnectionState.disconnected;
   String _engineIp       = '';
+  int    _enginePort     = 8080;
   String _sourceId       = 'cam1';
   String _sourceName     = 'Mobile Cam';
   String _errorMessage   = '';
@@ -34,6 +35,7 @@ class ConnectionService extends ChangeNotifier {
   ConnectionState get state        => _state;
   bool            get isConnected  => _state == ConnectionState.connected;
   String          get engineIp     => _engineIp;
+  int             get enginePort   => _enginePort;
   String          get sourceId     => _sourceId;
   String          get sourceName   => _sourceName;
   String          get errorMessage => _errorMessage;
@@ -44,6 +46,7 @@ class ConnectionService extends ChangeNotifier {
   Future<void> loadSaved() async {
     final prefs = await SharedPreferences.getInstance();
     _engineIp   = prefs.getString('engine_ip')   ?? '';
+    _enginePort = prefs.getInt('engine_port')     ?? 8080;
     _sourceId   = prefs.getString('source_id')   ?? 'cam1';
     _sourceName = prefs.getString('source_name') ?? 'Mobile Cam';
     notifyListeners();
@@ -52,6 +55,7 @@ class ConnectionService extends ChangeNotifier {
   Future<void> saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('engine_ip',   _engineIp);
+    await prefs.setInt('engine_port',    _enginePort);
     await prefs.setString('source_id',   _sourceId);
     await prefs.setString('source_name', _sourceName);
   }
@@ -59,11 +63,13 @@ class ConnectionService extends ChangeNotifier {
   // ---- Connect ----
   Future<void> connect({
     required String engineIp,
+    required int    enginePort,
     required String sourceId,
     required String sourceName,
     required MediaStream stream,
   }) async {
     _engineIp   = engineIp;
+    _enginePort = enginePort;
     _sourceId   = sourceId;
     _sourceName = sourceName;
     _localStream = stream;
@@ -134,7 +140,7 @@ class ConnectionService extends ChangeNotifier {
     if (localDesc == null) throw Exception('Failed to get local SDP');
 
     // WHIP POST — send offer to VortexEngine
-    final url = Uri.parse('http://$_engineIp:8080/whip/$_sourceId');
+    final url = Uri.parse('http://$_engineIp:$_enginePort/whip/$_sourceId');
     final response = await http.post(
       url,
       headers: {
@@ -236,7 +242,7 @@ class ConnectionService extends ChangeNotifier {
       try {
         final t0 = DateTime.now().millisecondsSinceEpoch;
         final r = await http.get(
-          Uri.parse('http://$_engineIp:8080/status'),
+          Uri.parse('http://$_engineIp:$_enginePort/status'),
         ).timeout(const Duration(seconds: 3));
         if (r.statusCode == 200) {
           _latencyMs = DateTime.now().millisecondsSinceEpoch - t0;
@@ -266,7 +272,7 @@ class ConnectionService extends ChangeNotifier {
     // WHIP DELETE to notify engine
     try {
       await http.delete(
-        Uri.parse('http://$_engineIp:8080/whip/$_sourceId'),
+        Uri.parse('http://$_engineIp:$_enginePort/whip/$_sourceId'),
       ).timeout(const Duration(seconds: 3));
     } catch (_) {}
 

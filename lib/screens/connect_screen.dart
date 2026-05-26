@@ -19,6 +19,7 @@ class ConnectScreen extends StatefulWidget {
 
 class _ConnectScreenState extends State<ConnectScreen> {
   final _ipCtrl   = TextEditingController(text: '192.168.1.');
+  final _portCtrl = TextEditingController(text: '8080');
   final _nameCtrl = TextEditingController(text: 'Mobile Cam 1');
   final _idCtrl   = TextEditingController(text: 'cam1');
   bool  _connecting = false;
@@ -30,6 +31,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
       if (!mounted) return;
       final conn = context.read<ConnectionService>();
       if (conn.engineIp.isNotEmpty) _ipCtrl.text = conn.engineIp;
+      _portCtrl.text = conn.enginePort.toString();
       _nameCtrl.text = conn.sourceName;
       _idCtrl.text   = conn.sourceId;
     });
@@ -63,7 +65,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
         // Extract IP from URL (http://ip:port/...)
         final uri = Uri.tryParse(whipUrl);
         if (uri != null && uri.host.isNotEmpty) {
-          setState(() => _ipCtrl.text = uri.host);
+          setState(() {
+            _ipCtrl.text   = uri.host;
+            if (uri.port != 0) _portCtrl.text = uri.port.toString();
+          });
         }
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -73,10 +78,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
       }
     } catch (_) {}
 
-    // Fallback: treat raw text as a plain IP address
+    // Fallback: treat raw text as a plain IP or http URL
     final uri = Uri.tryParse(raw);
     if (uri != null && uri.host.isNotEmpty) {
-      setState(() => _ipCtrl.text = uri.host);
+      setState(() {
+        _ipCtrl.text = uri.host;
+        if (uri.port != 0) _portCtrl.text = uri.port.toString();
+      });
     } else if (RegExp(r'^\d+\.\d+\.\d+\.\d+$').hasMatch(raw.trim())) {
       setState(() => _ipCtrl.text = raw.trim());
     } else {
@@ -100,6 +108,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
     await conn.connect(
       engineIp:   _ipCtrl.text.trim(),
+      enginePort: int.tryParse(_portCtrl.text.trim()) ?? 8080,
       sourceId:   _idCtrl.text.trim(),
       sourceName: _nameCtrl.text.trim(),
       stream:     cam.stream!,
@@ -161,9 +170,21 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   style: TextStyle(color: Colors.white54, fontSize: 13)),
               const SizedBox(height: 32),
 
-              _field('Engine IP Address', _ipCtrl,
-                  hint: '192.168.1.100',
-                  keyboard: TextInputType.number),
+              Row(children: [
+                Expanded(
+                  flex: 3,
+                  child: _field('Engine IP Address', _ipCtrl,
+                      hint: '192.168.1.100',
+                      keyboard: TextInputType.number),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 1,
+                  child: _field('Port', _portCtrl,
+                      hint: '8080',
+                      keyboard: TextInputType.number),
+                ),
+              ]),
               const SizedBox(height: 16),
 
               _field('Camera Name', _nameCtrl, hint: 'Mobile Cam 1'),
@@ -261,6 +282,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
   @override
   void dispose() {
     _ipCtrl.dispose();
+    _portCtrl.dispose();
     _nameCtrl.dispose();
     _idCtrl.dispose();
     super.dispose();
