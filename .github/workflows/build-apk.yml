@@ -3,7 +3,7 @@ name: Build VortexCam APK
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:
+  workflow_dispatch:        # manual "Run workflow" button
 
 jobs:
   build-apk:
@@ -23,13 +23,72 @@ jobs:
         with:
           channel: stable
 
-      - name: Get dependencies
+      - name: Flutter version
+        run: flutter --version
+
+      # Generate the android/ platform scaffolding. flutter create does NOT
+      # overwrite our existing lib/main.dart or pubspec.yaml.
+      - name: Scaffold android project
         run: |
-          flutter pub get
+          rm -rf android
+          flutter create --platforms=android --org com.vortexengine --project-name vortexcam .
+
+      # Inject runtime permissions + allow cleartext (the WHIP URL is http:// on LAN)
+      # and force minSdk 23 (required by flutter_webrtc).
+      - name: Patch manifest + gradle
+        run: |
+          python3 - <<'PY'
+          import re, glob, io, os
+
+          # ---- AndroidManifest.xml ----
+          man = "android/app/src/main/AndroidManifest.xml"
+          s = open(man, encoding="utf-8").read()
+          perms = [
+              "android.permission.CAMERA",
+              "android.permission.RECORD_AUDIO",
+              "android.permission.INTERNET",
+              "android.permission.ACCESS_NETWORK_STATE",
+              "android.permission.FLASHLIGHT",
+          ]
+          inject = "".join(
+              f'    <uses-permission android:name="{p}"/>\n' for p in perms
+              if p not in s
+          )
+          if inject:
+              s = s.replace("<application", inject + "    <application", 1)
+          # allow cleartext HTTP (LAN WHIP endpoint)
+          if "usesCleartextTraffic" not in s:
+              s = s.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
+          open(man, "w", encoding="utf-8").write(s)
+          print("patched manifest")
+
+          # ---- build.gradle(.kts): force minSdk 23 (flutter_webrtc needs >=23) ----
+          # Just swap the flutter.minSdkVersion token; this keeps valid syntax in
+          # BOTH Groovy (`minSdkVersion 23`) and Kotlin DSL (`minSdk = 23`).
+          # Do NOT rewrite the whole assignment — that drops the `=` and breaks .kts.
+          for g in glob.glob("android/app/build.gradle*"):
+              t = open(g, encoding="utf-8").read()
+              t = t.replace("flutter.minSdkVersion", "23")
+              open(g, "w", encoding="utf-8").write(t)
+              print("patched", g)
+
+          # ---- gradle.properties: use the UNBUNDLED (Play Services) ML Kit model ----
+          # The default *bundled* barcode model NPEs on some devices ("genericError":
+          # null object reference inside ML Kit). The unbundled model is delivered
+          # per-device by Google Play Services and avoids that crash (also smaller).
+          gp = "android/gradle.properties"
+          props = open(gp, encoding="utf-8").read() if os.path.exists(gp) else ""
+          if "useUnbundled" not in props:
+              with open(gp, "a", encoding="utf-8") as f:
+                  f.write("\ndev.steenbakker.mobile_scanner.useUnbundled=true\n")
+              print("patched gradle.properties: unbundled ML Kit")
+          PY
+
+      - name: Get dependencies
+        run: flutter pub get
 
       - name: Build release APK
-        run: |
-          flutter build apk --release
+        run: flutter build apk --release
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
