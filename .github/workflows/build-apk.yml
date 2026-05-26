@@ -80,13 +80,16 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      # flutter_zxing 1.x vendors ZXing-C++ that defines utf8_t as
-      # std::basic_string_view<unsigned char>. NDK 26+ removed the
-      # char_traits<unsigned char> specialization from libc++ (it was never
-      # in the C++ standard). The fix: change the typedef to
-      # std::basic_string_view<char> — semantically identical for UTF-8.
-      # We also delete any stale cmake .cxx cache so the patched header
-      # is actually picked up by the NDK compiler.
+      # flutter_zxing 1.x bundles ZXing-C++ whose Utf.cpp defines:
+      #   #if __cplusplus <= 201703L
+      #   using char8_t = uint8_t;   // uint8_t == unsigned char
+      #   #endif
+      #   using utf8_t = std::basic_string_view<char8_t>;
+      #
+      # NDK 26+ libc++ removed char_traits<unsigned char>, so
+      # basic_string_view<uint8_t/unsigned char> fails to compile.
+      # Fix: change the C++17 shim from uint8_t to char — utf8_t then
+      # resolves to basic_string_view<char>, which has a valid char_traits.
       - name: Patch flutter_zxing ZXing-C++ source for NDK 26+
         run: |
           set -e
@@ -94,16 +97,16 @@ jobs:
                           -maxdepth 1 -name "flutter_zxing-*" -type d \
                           | sort -V | tail -1)
           echo "flutter_zxing package: $ZXING_PKG"
-          UTH="$ZXING_PKG/src/zxing/core/src/Utf.h"
-          if [ ! -f "$UTH" ]; then
-            echo "ERROR: Utf.h not found at expected path; scanning:"
-            find "$HOME/.pub-cache" -name "Utf.h" 2>/dev/null
+          UTC="$ZXING_PKG/src/zxing/core/src/Utf.cpp"
+          if [ ! -f "$UTC" ]; then
+            echo "ERROR: Utf.cpp not found; scanning pub-cache:"
+            find "$HOME/.pub-cache" -name "Utf.cpp" 2>/dev/null
             exit 1
           fi
-          sed -i 's/basic_string_view<unsigned char>/basic_string_view<char>/g' "$UTH"
-          echo "Patched $UTH"
-          grep -n "utf8_t\|string_view" "$UTH" | head -5
-          # Remove cmake cache so NDK recompiles with the patched header.
+          echo "=== BEFORE ===" && grep -n "char8_t\|utf8_t\|uint8_t" "$UTC" | head -10
+          sed -i 's/using char8_t = uint8_t;/using char8_t = char;/' "$UTC"
+          echo "=== AFTER ===" && grep -n "char8_t\|utf8_t\|uint8_t" "$UTC" | head -10
+          # Remove cmake cache so NDK recompiles with the patched source.
           rm -rf "$ZXING_PKG/android/.cxx/" || true
           echo "cmake cache cleared"
 
