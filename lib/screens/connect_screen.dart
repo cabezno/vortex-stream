@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide ConnectionState;
 import 'package:provider/provider.dart';
 import '../services/connection_service.dart';
 import '../services/camera_service.dart';
