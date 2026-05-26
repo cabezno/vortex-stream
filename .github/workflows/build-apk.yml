@@ -63,12 +63,26 @@ jobs:
           print("patched manifest")
 
           # ---- build.gradle(.kts): force minSdk 23 (flutter_webrtc needs >=23) ----
-          # Just swap the flutter.minSdkVersion token; this keeps valid syntax in
-          # BOTH Groovy (`minSdkVersion 23`) and Kotlin DSL (`minSdk = 23`).
-          # Do NOT rewrite the whole assignment — that drops the `=` and breaks .kts.
+          # Also pin ndkVersion to 25.2.9519653 (r25c): flutter_zxing 1.x vendors
+          # ZXing-C++ code that uses std::basic_string_view<unsigned char>, which
+          # was removed from NDK 28's strict libc++. NDK 25 still accepts it.
+          import subprocess, json
+          # Find an available NDK 25 on the runner
+          ndk_root = "/usr/local/lib/android/sdk/ndk"
+          try:
+              ndks = os.listdir(ndk_root)
+              ndk25 = next((n for n in sorted(ndks) if n.startswith("25.")), None)
+              ndk_ver = ndk25 if ndk25 else "25.2.9519653"
+          except Exception:
+              ndk_ver = "25.2.9519653"
+          print(f"Using NDK version: {ndk_ver}")
+
           for g in glob.glob("android/app/build.gradle*"):
               t = open(g, encoding="utf-8").read()
               t = t.replace("flutter.minSdkVersion", "23")
+              # Inject ndkVersion inside the android { } block if not present
+              if "ndkVersion" not in t:
+                  t = t.replace("compileSdk", f'ndkVersion "{ndk_ver}"\n        compileSdk', 1)
               open(g, "w", encoding="utf-8").write(t)
               print("patched", g)
 
