@@ -18,6 +18,24 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Pin ANDROID_NDK_ROOT to NDK 25 before Flutter / Gradle run.
+      # flutter_zxing 1.x vendors ZXing-C++ that uses
+      # std::basic_string_view<unsigned char> — removed from NDK 28 libc++.
+      # Setting ANDROID_NDK_ROOT here overrides the default NDK 28 for ALL
+      # cmake builds, including plugin builds (ndkVersion in app/build.gradle
+      # only controls the app module, not plugin modules).
+      - name: Pin NDK to r25 (flutter_zxing incompatible with NDK 28)
+        run: |
+          NDK_DIR=/usr/local/lib/android/sdk/ndk
+          NDK_25=$(ls "$NDK_DIR" | grep "^25\." | sort | tail -1)
+          if [ -z "$NDK_25" ]; then
+            echo "NDK 25 not found, available: $(ls $NDK_DIR)"; exit 1
+          fi
+          echo "Using NDK: $NDK_25"
+          echo "ANDROID_NDK_ROOT=$NDK_DIR/$NDK_25" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_DIR/$NDK_25" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$NDK_DIR/$NDK_25"          >> "$GITHUB_ENV"
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -33,12 +51,16 @@ jobs:
           rm -rf android
           flutter create --platforms=android --org com.vortexengine --project-name vortexcam .
 
+      # Create asset directories declared in pubspec.yaml
+      - name: Create asset directories
+        run: mkdir -p assets/icons
+
       # Inject runtime permissions + allow cleartext (the WHIP URL is http:// on LAN)
       # and force minSdk 23 (required by flutter_webrtc).
       - name: Patch manifest + gradle
         run: |
           python3 - <<'PY'
-          import re, glob, io, os
+          import re, glob, os
 
           # ---- AndroidManifest.xml ----
           man = "android/app/src/main/AndroidManifest.xml"
@@ -56,40 +78,28 @@ jobs:
           )
           if inject:
               s = s.replace("<application", inject + "    <application", 1)
-          # allow cleartext HTTP (LAN WHIP endpoint)
           if "usesCleartextTraffic" not in s:
               s = s.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
           open(man, "w", encoding="utf-8").write(s)
           print("patched manifest")
 
-          # ---- build.gradle(.kts): force minSdk 23 (flutter_webrtc needs >=23) ----
-          # Also pin ndkVersion to 25.2.9519653 (r25c): flutter_zxing 1.x vendors
-          # ZXing-C++ code that uses std::basic_string_view<unsigned char>, which
-          # was removed from NDK 28's strict libc++. NDK 25 still accepts it.
-          import subprocess, json
-          # Find an available NDK 25 on the runner
-          ndk_root = "/usr/local/lib/android/sdk/ndk"
-          try:
-              ndks = os.listdir(ndk_root)
-              ndk25 = next((n for n in sorted(ndks) if n.startswith("25.")), None)
-              ndk_ver = ndk25 if ndk25 else "25.2.9519653"
-          except Exception:
-              ndk_ver = "25.2.9519653"
-          print(f"Using NDK version: {ndk_ver}")
-
+          # ---- build.gradle(.kts): force minSdk 23 ----
           for g in glob.glob("android/app/build.gradle*"):
               t = open(g, encoding="utf-8").read()
               t = t.replace("flutter.minSdkVersion", "23")
-              # Inject ndkVersion inside the android { } block if not present
-              if "ndkVersion" not in t:
-                  t = t.replace("compileSdk", f'ndkVersion "{ndk_ver}"\n        compileSdk', 1)
               open(g, "w", encoding="utf-8").write(t)
               print("patched", g)
 
-          # ---- gradle.properties: use the UNBUNDLED (Play Services) ML Kit model ----
-          # The default *bundled* barcode model NPEs on some devices ("genericError":
-          # null object reference inside ML Kit). The unbundled model is delivered
-          # per-device by Google Play Services and avoids that crash (also smaller).
+          # ---- local.properties: also set ndk.dir so Gradle uses the pinned NDK ----
+          ndk_root = os.environ.get("ANDROID_NDK_ROOT", "")
+          lp = "android/local.properties"
+          props = open(lp, encoding="utf-8").read() if os.path.exists(lp) else ""
+          if ndk_root and "ndk.dir" not in props:
+              with open(lp, "a", encoding="utf-8") as f:
+                  f.write(f"\nndk.dir={ndk_root}\n")
+              print(f"patched local.properties: ndk.dir={ndk_root}")
+
+          # ---- gradle.properties: unbundled ML Kit model ----
           gp = "android/gradle.properties"
           props = open(gp, encoding="utf-8").read() if os.path.exists(gp) else ""
           if "useUnbundled" not in props:
