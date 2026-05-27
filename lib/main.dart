@@ -262,7 +262,26 @@ class _HomePageState extends State<HomePage> {
       });
       _log('PeerConnection creada');
       for (final track in _localStream!.getTracks()) {
-        await _pc!.addTrack(track, _localStream!);
+        if (track.kind == 'video') {
+          // addTransceiver with scaleResolutionDownBy=1.0 prevents Android's
+          // quality scaler from reducing resolution when RTCP REMB is absent.
+          await _pc!.addTransceiver(
+            track: track,
+            kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+            init: RTCRtpTransceiverInit(
+              direction: TransceiverDirection.SendOnly,
+              sendEncodings: [
+                RTCRtpEncoding(
+                  maxBitrate:            8000000,
+                  maxFramerate:          60,
+                  scaleResolutionDownBy: 1.0,
+                ),
+              ],
+            ),
+          );
+        } else {
+          await _pc!.addTrack(track, _localStream!);
+        }
       }
 
       setState(() => _status = 'Negociando...');
