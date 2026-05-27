@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'camera_service.dart';
 
 // =============================================================================
 // ConnectionService — manages WebRTC/WHIP connection to VortexEngine
@@ -12,22 +13,30 @@ import 'package:shared_preferences/shared_preferences.dart';
 //   POST http://{engine_ip}:8080/whip/{source_id}
 //   Body: SDP offer
 //   Response: SDP answer
+//
+// Control channel: a WebRTC data channel 'vortex-control' (created by phone
+// as offerer) carries JSON messages both ways:
+//   Engine → Phone: {"type":"set_resolution","width":W,"height":H}
+//   Engine → Phone: {"type":"on_air","active":true/false}
+//   Engine → Phone: {"type":"pong","sentMs":T}
 // =============================================================================
 
 enum ConnectionState { disconnected, connecting, connected, error }
 
 class ConnectionService extends ChangeNotifier {
-  ConnectionState _state = ConnectionState.disconnected;
-  String _engineIp       = '';
-  int    _enginePort     = 8080;
-  String _sourceId       = 'cam1';
-  String _sourceName     = 'Mobile Cam';
-  String _errorMessage   = '';
-  int    _latencyMs      = 0;
-  bool   _isOnAir        = false;   // set by engine when this cam is active
+  ConnectionState _state        = ConnectionState.disconnected;
+  String _engineIp              = '';
+  int    _enginePort            = 8080;
+  String _sourceId              = 'cam1';
+  String _sourceName            = 'Mobile Cam';
+  String _errorMessage          = '';
+  int    _latencyMs             = 0;
+  bool   _isOnAir               = false;
 
   RTCPeerConnection?  _peerConnection;
+  RTCDataChannel?     _controlChannel;
   MediaStream?        _localStream;
+  CameraService?      _cameraService;
   Timer?              _statsTimer;
   Timer?              _heartbeatTimer;
 
@@ -67,14 +76,16 @@ class ConnectionService extends ChangeNotifier {
     required String sourceId,
     required String sourceName,
     required MediaStream stream,
+    required CameraService cameraService,
   }) async {
-    _engineIp   = engineIp;
-    _enginePort = enginePort;
-    _sourceId   = sourceId;
-    _sourceName = sourceName;
-    _localStream = stream;
-    _state      = ConnectionState.connecting;
-    _errorMessage = '';
+    _engineIp      = engineIp;
+    _enginePort    = enginePort;
+    _sourceId      = sourceId;
+    _sourceName    = sourceName;
+    _localStream   = stream;
+    _cameraService = cameraService;
+    _state         = ConnectionState.connecting;
+    _errorMessage  = '';
     notifyListeners();
 
     try {
@@ -92,7 +103,6 @@ class ConnectionService extends ChangeNotifier {
   Future<void> _createPeerConnection(MediaStream stream) async {
     final config = <String, dynamic>{
       'iceServers': [
-        // Local LAN — no STUN needed. For internet use, add STUN/TURN.
         {'urls': 'stun:stun.l.google.com:19302'},
       ],
       'sdpSemantics': 'unified-plan',
@@ -100,10 +110,8 @@ class ConnectionService extends ChangeNotifier {
 
     _peerConnection = await createPeerConnection(config);
 
-    // Add tracks. For video: use addTransceiver with scaleResolutionDownBy=1.0 so
-    // the Android WebRTC quality scaler cannot downgrade resolution when the engine
-    // sends no REMB/transport-cc feedback (without feedback BWE stays at minimum,
-    // causing the encoder to emit 320×192 indefinitely).
+    // Add video track via addTransceiver with scaleResolutionDownBy=1.0 so
+    // the Android quality scaler never downgrades without REMB feedback.
     for (final track in stream.getTracks()) {
       if (track.kind == 'video') {
         await _peerConnection!.addTransceiver(
@@ -113,9 +121,9 @@ class ConnectionService extends ChangeNotifier {
             direction: TransceiverDirection.SendOnly,
             sendEncodings: [
               RTCRtpEncoding(
-                maxBitrate: 4000000,       // 4 Mbps — enough headroom for 1080p
-                maxFramerate: 60,
-                scaleResolutionDownBy: 1.0, // never downscale
+                maxBitrate:            8000000,  // 8 Mbps cap
+                maxFramerate:          60,
+                scaleResolutionDownBy: 1.0,       // never downscale
               ),
             ],
           ),
@@ -125,21 +133,39 @@ class ConnectionService extends ChangeNotifier {
       }
     }
 
+    // Control data channel — phone creates as offerer so it appears in the
+    // SDP offer. The engine receives it via onDataChannel and stores it to
+    // send resolution/on-air commands.
+    _controlChannel = await _peerConnection!.createDataChannel(
+      'vortex-control',
+      RTCDataChannelInit()
+        ..ordered = true
+        ..maxRetransmits = 5,
+    );
+    _controlChannel!.onMessage = (msg) {
+      if (msg.text != null) _handleEngineMessage(msg.text!);
+    };
+    _controlChannel!.onDataChannelState = (state) {
+      debugPrint('[VortexCam] control channel: $state');
+    };
+
     // Create SDP offer
-    final offer = await _peerConnection!.createOffer({
+    final offer  = await _peerConnection!.createOffer({
       'offerToReceiveAudio': false,
       'offerToReceiveVideo': false,
     });
     final munged = _preferH264(offer.sdp ?? '');
     await _peerConnection!.setLocalDescription(RTCSessionDescription(munged, 'offer'));
 
-    // Wait for ICE gathering (with timeout)
+    // Wait for ICE gathering (with 5-second timeout)
     await _waitForIceGathering();
 
     final localDesc = await _peerConnection!.getLocalDescription();
     if (localDesc == null) throw Exception('Failed to get local SDP');
 
     // WHIP POST — send offer to VortexEngine
+    // Timeout is 30 s: DTLS cert generation on first run can take up to 8 s,
+    // plus ICE gathering (1-3 s) and Vulkan pipeline init (1-2 s).
     final url = Uri.parse('http://$_engineIp:$_enginePort/whip/$_sourceId');
     final response = await http.post(
       url,
@@ -148,19 +174,18 @@ class ConnectionService extends ChangeNotifier {
         'X-Source-Name': Uri.encodeComponent(_sourceName),
       },
       body: localDesc.sdp,
-    ).timeout(const Duration(seconds: 10));
+    ).timeout(const Duration(seconds: 30));
 
     if (response.statusCode != 201 && response.statusCode != 200) {
       throw Exception('WHIP rejected: HTTP ${response.statusCode} — ${response.body}');
     }
 
-    // Parse SDP answer
-    final answerSdp = response.body;
+    // Apply SDP answer
     await _peerConnection!.setRemoteDescription(
-      RTCSessionDescription(answerSdp, 'answer'),
+      RTCSessionDescription(response.body, 'answer'),
     );
 
-    // ICE connection state monitoring
+    // ICE connection state → update UI
     _peerConnection!.onIceConnectionState = (state) {
       debugPrint('[VortexCam] ICE: $state');
       if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
@@ -171,15 +196,10 @@ class ConnectionService extends ChangeNotifier {
         _startHeartbeat();
       } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
                  state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-        _state = ConnectionState.error;
+        _state        = ConnectionState.error;
         _errorMessage = 'WebRTC connection lost (ICE $state)';
         notifyListeners();
       }
-    };
-
-    // Data channel for bidirectional control (engine → phone: "you're live!")
-    _peerConnection!.onDataChannel = (channel) {
-      channel.onMessage = (msg) => _handleEngineMessage(msg.text);
     };
 
     debugPrint('[VortexCam] WHIP handshake complete → waiting for ICE...');
@@ -189,10 +209,9 @@ class ConnectionService extends ChangeNotifier {
     if (_peerConnection!.iceGatheringState ==
         RTCIceGatheringState.RTCIceGatheringStateComplete) return;
     final completer = Completer<void>();
-    Timer timeout = Timer(const Duration(seconds: 5), () {
+    final timeout   = Timer(const Duration(seconds: 5), () {
       if (!completer.isCompleted) completer.complete();
     });
-
     _peerConnection!.onIceGatheringState = (state) {
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
         timeout.cancel();
@@ -202,15 +221,23 @@ class ConnectionService extends ChangeNotifier {
     await completer.future;
   }
 
-  // ---- Engine → Phone messages (data channel) ----
+  // ---- Engine → Phone control messages (via data channel) ----
   void _handleEngineMessage(String json) {
     try {
       final msg = jsonDecode(json) as Map<String, dynamic>;
       switch (msg['type']) {
+        case 'set_resolution':
+          final w = (msg['width']  as num?)?.toInt() ?? 1280;
+          final h = (msg['height'] as num?)?.toInt() ?? 720;
+          debugPrint('[VortexCam] engine → set_resolution ${w}x$h');
+          _cameraService?.applyResolutionFromEngine(w, h);
+          break;
+
         case 'on_air':
           _isOnAir = msg['active'] as bool? ?? false;
           notifyListeners();
           break;
+
         case 'pong':
           final sentMs = msg['sentMs'] as int? ?? 0;
           _latencyMs = DateTime.now().millisecondsSinceEpoch - sentMs;
@@ -227,44 +254,62 @@ class ConnectionService extends ChangeNotifier {
       final stats = await _peerConnection!.getStats();
       for (final report in stats) {
         if (report.type == 'outbound-rtp' && report.values['mediaType'] == 'video') {
-          // Could extract bitrate, FPS, packets sent here
           break;
         }
       }
     });
   }
 
-  // ---- Heartbeat (keep-alive + latency measurement) ----
+  // ---- Heartbeat via data channel (latency + keep-alive) ----
   void _startHeartbeat() {
-    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!isConnected) return;
-      // Simple HTTP ping to engine status endpoint
-      try {
-        final t0 = DateTime.now().millisecondsSinceEpoch;
-        final r = await http.get(
-          Uri.parse('http://$_engineIp:$_enginePort/status'),
-        ).timeout(const Duration(seconds: 3));
-        if (r.statusCode == 200) {
-          _latencyMs = DateTime.now().millisecondsSinceEpoch - t0;
-          // Check if we're on air
+      final dc = _controlChannel;
+      if (dc != null && dc.state == RTCDataChannelState.RTCDataChannelOpen) {
+        // Ping via data channel — engine echoes back {"type":"pong","sentMs":T}
+        final ping = jsonEncode({
+          'type':   'ping',
+          'sentMs': DateTime.now().millisecondsSinceEpoch,
+        });
+        try { dc.send(RTCDataChannelMessage(ping)); } catch (_) {}
+      } else {
+        // Fallback: HTTP ping if data channel not open yet
+        _httpPing();
+      }
+    });
+  }
+
+  Future<void> _httpPing() async {
+    try {
+      final t0 = DateTime.now().millisecondsSinceEpoch;
+      final r  = await http.get(
+        Uri.parse('http://$_engineIp:$_enginePort/status'),
+      ).timeout(const Duration(seconds: 3));
+      if (r.statusCode == 200) {
+        _latencyMs = DateTime.now().millisecondsSinceEpoch - t0;
+        try {
           final body = jsonDecode(r.body) as Map<String, dynamic>;
           _isOnAir = body['active_source'] == _sourceId;
-          notifyListeners();
-        }
-      } catch (_) { /* ignore — connection handles its own state */ }
-    });
+        } catch (_) {}
+        notifyListeners();
+      }
+    } catch (_) {}
   }
 
   // ---- Disconnect ----
   Future<void> disconnect() async {
     _statsTimer?.cancel();
     _heartbeatTimer?.cancel();
-    _statsTimer = null;
+    _statsTimer     = null;
     _heartbeatTimer = null;
+
+    _controlChannel?.close();
+    _controlChannel = null;
 
     await _peerConnection?.close();
     _peerConnection = null;
     _localStream    = null;
+    _cameraService  = null;
     _state          = ConnectionState.disconnected;
     _isOnAir        = false;
     notifyListeners();
@@ -279,39 +324,35 @@ class ConnectionService extends ChangeNotifier {
     debugPrint('[VortexCam] Disconnected from engine.');
   }
 
-  // Keep only H.264 (and its RTX) payload types in the video m-line so the
-  // engine (which decodes H.264) always receives a compatible stream.
+  // Keep only H.264 (and its RTX) payload types in the video m-line.
   String _preferH264(String sdp) {
-    final lines = sdp.split(RegExp(r'\r\n|\n'));
-    int mIdx = lines.indexWhere((l) => l.startsWith('m=video'));
+    final lines  = sdp.split(RegExp(r'\r\n|\n'));
+    final mIdx   = lines.indexWhere((l) => l.startsWith('m=video'));
     if (mIdx < 0) return sdp;
 
-    // payload type → codec name; rtx apt mapping
-    final rtpmap = <String, String>{};
-    final apt = <String, String>{}; // rtx pt → referenced pt
-    final reFmtpApt = RegExp(r'a=fmtp:(\d+).*apt=(\d+)');
-    final reRtpmap = RegExp(r'a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/');
+    final rtpmap     = <String, String>{};
+    final apt        = <String, String>{};
+    final reFmtpApt  = RegExp(r'a=fmtp:(\d+).*apt=(\d+)');
+    final reRtpmap   = RegExp(r'a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/');
     for (final l in lines) {
       final m = reRtpmap.firstMatch(l);
       if (m != null) rtpmap[m.group(1)!] = m.group(2)!.toUpperCase();
       final a = reFmtpApt.firstMatch(l);
       if (a != null) apt[a.group(1)!] = a.group(2)!;
     }
-    // H.264 payload types (+ their rtx)
+
     final keep = <String>{};
     rtpmap.forEach((pt, name) { if (name == 'H264') keep.add(pt); });
-    if (keep.isEmpty) return sdp; // no H264 offered — leave as-is
+    if (keep.isEmpty) return sdp;
     apt.forEach((rtxPt, refPt) { if (keep.contains(refPt)) keep.add(rtxPt); });
 
-    // Rewrite m=video line: "m=video <port> <proto> <pt...>"
-    final parts = lines[mIdx].split(' ');
+    final parts  = lines[mIdx].split(' ');
     final header = parts.sublist(0, 3);
-    final kept = parts.sublist(3).where(keep.contains).toList();
-    lines[mIdx] = ([...header, ...kept]).join(' ');
+    final kept   = parts.sublist(3).where(keep.contains).toList();
+    lines[mIdx]  = ([...header, ...kept]).join(' ');
 
-    // Drop a=rtpmap/fmtp/rtcp-fb lines for non-kept payload types.
     final rePt = RegExp(r'a=(rtpmap|fmtp|rtcp-fb):(\d+)');
-    final out = <String>[];
+    final out  = <String>[];
     for (final l in lines) {
       final m = rePt.firstMatch(l);
       if (m != null && !keep.contains(m.group(2))) continue;

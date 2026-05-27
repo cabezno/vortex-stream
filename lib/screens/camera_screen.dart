@@ -86,7 +86,7 @@ class _CameraScreenState extends State<CameraScreen> {
               Positioned(
                 top: 16,
                 right: 16,
-                child: _statusBar(conn),
+                child: _statusBar(conn, cam),
               ),
 
               // ---- Controls overlay ----
@@ -126,7 +126,7 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   // ---- Status bar (latency, resolution) ----
-  Widget _statusBar(ConnectionService conn) {
+  Widget _statusBar(ConnectionService conn, CameraService cam) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
@@ -136,7 +136,6 @@ class _CameraScreenState extends State<CameraScreen> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Connection dot
           Container(width: 7, height: 7,
               decoration: BoxDecoration(
                 color: conn.isConnected ? const Color(0xFF00BBDD) : Colors.orange,
@@ -145,6 +144,9 @@ class _CameraScreenState extends State<CameraScreen> {
           const SizedBox(width: 6),
           Text(conn.isConnected ? '${conn.latencyMs}ms' : 'reconnecting',
               style: const TextStyle(color: Colors.white, fontSize: 11)),
+          const SizedBox(width: 8),
+          Text(cam.resolutionLabel,
+              style: const TextStyle(color: Colors.white54, fontSize: 11)),
         ],
       ),
     );

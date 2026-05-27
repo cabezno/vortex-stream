@@ -107,11 +107,12 @@ class _ConnectScreenState extends State<ConnectScreen> {
     if (!cam.isInitialized) await cam.initialize();
 
     await conn.connect(
-      engineIp:   _ipCtrl.text.trim(),
-      enginePort: int.tryParse(_portCtrl.text.trim()) ?? 8080,
-      sourceId:   _idCtrl.text.trim(),
-      sourceName: _nameCtrl.text.trim(),
-      stream:     cam.stream!,
+      engineIp:      _ipCtrl.text.trim(),
+      enginePort:    int.tryParse(_portCtrl.text.trim()) ?? 8080,
+      sourceId:      _idCtrl.text.trim(),
+      sourceName:    _nameCtrl.text.trim(),
+      stream:        cam.stream!,
+      cameraService: cam,
     );
 
     setState(() => _connecting = false);
