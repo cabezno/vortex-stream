@@ -119,3 +119,17 @@ jobs:
           name: vortexcam-apk
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+
+      - name: Publish to GitHub Release (latest)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: VortexCam — Latest Build
+          body: |
+            Descargá el APK e instalalo en tu Android.
+            Activá "Instalar apps de fuentes desconocidas" en Ajustes si es necesario.
+          files: build/app/outputs/flutter-apk/app-release.apk
+          prerelease: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

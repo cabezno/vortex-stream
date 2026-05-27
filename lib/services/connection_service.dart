@@ -154,7 +154,7 @@ class ConnectionService extends ChangeNotifier {
       'offerToReceiveAudio': false,
       'offerToReceiveVideo': false,
     });
-    final munged = _preferH264(offer.sdp ?? '');
+    final munged = _mungeH264Bitrate(_preferH264(offer.sdp ?? ''));
     await _peerConnection!.setLocalDescription(RTCSessionDescription(munged, 'offer'));
 
     // Wait for ICE gathering (with 5-second timeout)
@@ -322,6 +322,19 @@ class ConnectionService extends ChangeNotifier {
     } catch (_) {}
 
     debugPrint('[VortexCam] Disconnected from engine.');
+  }
+
+  // Inject x-google-min/max-bitrate into every H264 a=fmtp line so GCC cannot
+  // drop the sender bitrate below 2 Mbps on lossy WiFi.  Values are in kbps.
+  String _mungeH264Bitrate(String sdp) {
+    return sdp.replaceAllMapped(
+      RegExp(r'(a=fmtp:\d+ [^\r\n]*packetization-mode[^\r\n]*)'),
+      (m) {
+        final line = m.group(1)!;
+        if (line.contains('x-google-min-bitrate')) return line;
+        return '$line;x-google-min-bitrate=2000;x-google-max-bitrate=6000;x-google-start-bitrate=3000';
+      },
+    );
   }
 
   // Keep only H.264 (and its RTX) payload types in the video m-line.
