@@ -110,8 +110,13 @@ class ConnectionService extends ChangeNotifier {
 
     _peerConnection = await createPeerConnection(config);
 
-    // Add video track via addTransceiver with scaleResolutionDownBy=1.0 so
-    // the Android quality scaler never downgrades without REMB feedback.
+    // Add video track via addTransceiver.
+    // scaleResolutionDownBy=1.0 — prevents Android quality scaler from reducing
+    //   resolution in response to GCC bandwidth drops.
+    // minBitrate=1_500_000 — SDP floor: prevents GCC from dropping below 1.5 Mbps,
+    //   which shortens the 320×192 ramp-up period at initial connect.
+    // maxBitrate=6_000_000 — stays under the engine's REMB target (5 Mbps) so GCC
+    //   converges quickly without overshooting and oscillating.
     for (final track in stream.getTracks()) {
       if (track.kind == 'video') {
         await _peerConnection!.addTransceiver(
@@ -121,9 +126,10 @@ class ConnectionService extends ChangeNotifier {
             direction: TransceiverDirection.SendOnly,
             sendEncodings: [
               RTCRtpEncoding(
-                maxBitrate:            8000000,  // 8 Mbps cap
+                minBitrate:            1500000,  // 1.5 Mbps floor
+                maxBitrate:            6000000,  // 6 Mbps cap
                 maxFramerate:          60,
-                scaleResolutionDownBy: 1.0,       // never downscale
+                scaleResolutionDownBy: 1.0,       // never downscale resolution
               ),
             ],
           ),
@@ -324,15 +330,18 @@ class ConnectionService extends ChangeNotifier {
     debugPrint('[VortexCam] Disconnected from engine.');
   }
 
-  // Inject x-google-min/max-bitrate into every H264 a=fmtp line so GCC cannot
-  // drop the sender bitrate below 2 Mbps on lossy WiFi.  Values are in kbps.
+  // Inject x-google-{min,max,start}-bitrate into every H264 a=fmtp line.
+  // These SDP attributes inform Android's GCC (congestion controller):
+  //   min=1500  kbps — floor prevents the 320×192 startup ramp from dragging on
+  //   max=6000  kbps — cap below REMB target (5 Mbps) so GCC converges fast
+  //   start=3000 kbps — opener estimate; GCC ramps up instead of down from here
   String _mungeH264Bitrate(String sdp) {
     return sdp.replaceAllMapped(
       RegExp(r'(a=fmtp:\d+ [^\r\n]*packetization-mode[^\r\n]*)'),
       (m) {
         final line = m.group(1)!;
         if (line.contains('x-google-min-bitrate')) return line;
-        return '$line;x-google-min-bitrate=2000;x-google-max-bitrate=6000;x-google-start-bitrate=3000';
+        return '$line;x-google-min-bitrate=1500;x-google-max-bitrate=6000;x-google-start-bitrate=3000';
       },
     );
   }
