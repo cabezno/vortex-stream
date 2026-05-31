@@ -357,7 +357,7 @@ class _HomePageState extends State<_HomePage> {
         final conn = context.read<ConnectionService>();
         _renderer.srcObject = null;
         await conn.disconnect();
-        await context.read<CameraService>().dispose();
+        context.read<CameraService>().dispose();
       case Transport.srt:
         await context.read<SrtConnectionService>().stop();
       case Transport.rtmp:

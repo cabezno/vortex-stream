@@ -31,7 +31,7 @@ class RtmpConnectionService extends ChangeNotifier {
 
   int    _width      = 1280;
   int    _height     = 720;
-  int    _bitrateBps = 4_000_000;
+  int    _bitrateBps = 4000000;
   int    _keyframeMs = 2000;
 
   void configure({
