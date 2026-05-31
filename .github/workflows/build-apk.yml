@@ -37,7 +37,6 @@ jobs:
           PLUGIN_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
           mkdir -p /tmp/vortex_plugins
           cp "$PLUGIN_DIR/VortexCamPlugin.kt" /tmp/vortex_plugins/
-          cp "$PLUGIN_DIR/SrtStreamPlugin.kt" /tmp/vortex_plugins/
           cp "$PLUGIN_DIR/MainActivity.kt"    /tmp/vortex_plugins/
 
           rm -rf android
@@ -46,7 +45,6 @@ jobs:
           DST_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
           mkdir -p "$DST_DIR"
           cp /tmp/vortex_plugins/VortexCamPlugin.kt "$DST_DIR/"
-          cp /tmp/vortex_plugins/SrtStreamPlugin.kt "$DST_DIR/"
           cp /tmp/vortex_plugins/MainActivity.kt    "$DST_DIR/"
 
       # Inject runtime permissions + allow cleartext (the WHIP URL is http:// on LAN)
