@@ -4,6 +4,7 @@ import 'package:flutter_zxing/flutter_zxing.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:provider/provider.dart';
 import '../services/connection_service.dart';
+import '../services/srt_connection_service.dart';
 import '../services/camera_service.dart';
 
 // =============================================================================
@@ -18,11 +19,13 @@ class ConnectScreen extends StatefulWidget {
 }
 
 class _ConnectScreenState extends State<ConnectScreen> {
-  final _ipCtrl   = TextEditingController(text: '192.168.1.');
-  final _portCtrl = TextEditingController(text: '8080');
-  final _nameCtrl = TextEditingController(text: 'Mobile Cam 1');
-  final _idCtrl   = TextEditingController(text: 'cam1');
+  final _ipCtrl    = TextEditingController(text: '192.168.137.1'); // hotspot default
+  final _portCtrl  = TextEditingController(text: '8080');
+  final _srtPortCtrl = TextEditingController(text: '9000');
+  final _nameCtrl  = TextEditingController(text: 'Mobile Cam 1');
+  final _idCtrl    = TextEditingController(text: 'cam1');
   bool  _connecting = false;
+  String _transport = 'srt';  // 'srt' | 'whip'
 
   @override
   void initState() {
@@ -101,27 +104,42 @@ class _ConnectScreenState extends State<ConnectScreen> {
   Future<void> _connect() async {
     setState(() => _connecting = true);
 
-    final cam  = context.read<CameraService>();
-    final conn = context.read<ConnectionService>();
-
+    final cam = context.read<CameraService>();
     if (!cam.isInitialized) await cam.initialize();
 
-    await conn.connect(
-      engineIp:      _ipCtrl.text.trim(),
-      enginePort:    int.tryParse(_portCtrl.text.trim()) ?? 8080,
-      sourceId:      _idCtrl.text.trim(),
-      sourceName:    _nameCtrl.text.trim(),
-      stream:        cam.stream!,
-      cameraService: cam,
-    );
-
-    setState(() => _connecting = false);
-
-    if (conn.state == ConnectionState.error && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text('Connection failed: ${conn.errorMessage}'),
-        backgroundColor: Colors.red.shade800,
-      ));
+    if (_transport == 'srt') {
+      // SRT transport — H.265 HW, LAN-optimized
+      final srt = context.read<SrtConnectionService>();
+      srt.configure(width: 1280, height: 720, targetBitrateBps: 6000000, srtLatencyMs: 80);
+      await srt.connectTo(
+        _ipCtrl.text.trim(),
+        port: int.tryParse(_srtPortCtrl.text.trim()) ?? 9000,
+      );
+      setState(() => _connecting = false);
+      if (srt.state == SrtState.error && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('SRT connection failed: ${srt.errorMsg}'),
+          backgroundColor: Colors.red.shade800,
+        ));
+      }
+    } else {
+      // WHIP/WebRTC transport — H.264, works over internet
+      final conn = context.read<ConnectionService>();
+      await conn.connect(
+        engineIp:      _ipCtrl.text.trim(),
+        enginePort:    int.tryParse(_portCtrl.text.trim()) ?? 8080,
+        sourceId:      _idCtrl.text.trim(),
+        sourceName:    _nameCtrl.text.trim(),
+        stream:        cam.stream!,
+        cameraService: cam,
+      );
+      setState(() => _connecting = false);
+      if (conn.state == ConnectionState.error && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('WHIP connection failed: ${conn.errorMessage}'),
+          backgroundColor: Colors.red.shade800,
+        ));
+      }
     }
   }
 
@@ -171,6 +189,59 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   style: TextStyle(color: Colors.white54, fontSize: 13)),
               const SizedBox(height: 32),
 
+              // Transport selector
+              Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1A1A1A),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                padding: const EdgeInsets.all(4),
+                child: Row(children: [
+                  _transportBtn('SRT', 'srt',
+                      subtitle: 'H.265 · LAN · ≤100ms'),
+                  _transportBtn('WHIP', 'whip',
+                      subtitle: 'H.264 · Internet / LAN'),
+                ]),
+              ),
+              const SizedBox(height: 16),
+
+              if (_transport == 'srt') ...[
+                // SRT: show discover button + IP
+                Row(children: [
+                  Expanded(
+                    flex: 3,
+                    child: _field('Engine IP (hotspot: 192.168.137.1)', _ipCtrl,
+                        hint: '192.168.137.1',
+                        keyboard: TextInputType.number),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 1,
+                    child: _field('SRT Port', _srtPortCtrl,
+                        hint: '9000',
+                        keyboard: TextInputType.number),
+                  ),
+                ]),
+                const SizedBox(height: 8),
+                OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF00BBDD),
+                    side: const BorderSide(color: Color(0xFF00BBDD)),
+                  ),
+                  onPressed: busy ? null : () async {
+                    final srt = context.read<SrtConnectionService>();
+                    await srt.discoverAndConnect(
+                        fallbackIp: _ipCtrl.text.trim(),
+                        fallbackPort: int.tryParse(_srtPortCtrl.text.trim()) ?? 9000);
+                  },
+                  icon: const Icon(Icons.wifi_find, size: 16),
+                  label: const Text('Auto-discover engine (mDNS)',
+                      style: TextStyle(fontSize: 13)),
+                ),
+                const SizedBox(height: 24),
+              ],
+
+              if (_transport == 'whip') ...[
               Row(children: [
                 Expanded(
                   flex: 3,
@@ -194,7 +265,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
               _field('Source ID', _idCtrl,
                   hint: 'cam1',
                   helper: 'Must match source slot in VortexEngine'),
-              const SizedBox(height: 32),
+              const SizedBox(height: 24),
+              ], // end if (_transport == 'whip')
+
+              const SizedBox(height: 8),
 
               SizedBox(
                 width: double.infinity,
@@ -238,6 +312,37 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   style: TextStyle(color: Colors.white24, fontSize: 11),
                 ),
               ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _transportBtn(String label, String value, {String subtitle = ''}) {
+    final selected = _transport == value;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _transport = value),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFF00BBDD) : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Column(
+            children: [
+              Text(label, textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: selected ? Colors.black : Colors.white60,
+                    fontWeight: FontWeight.w600, fontSize: 14,
+                  )),
+              if (subtitle.isNotEmpty)
+                Text(subtitle, textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: selected ? Colors.black87 : Colors.white30,
+                      fontSize: 10,
+                    )),
             ],
           ),
         ),

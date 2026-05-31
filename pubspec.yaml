@@ -1,6 +1,6 @@
 name: vortex_cam
-description: VortexCam — Use your phone as a professional camera for VortexEngine
-version: 0.1.0+1
+description: VortexCam — Professional multi-transport camera app for VortexEngine
+version: 0.5.0+5
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -10,34 +10,31 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # WebRTC — for WHIP protocol (phone → VortexEngine)
+  # WebRTC — WHIP protocol (phone → VortexEngine)
   flutter_webrtc: ^1.4.1
 
-  # HTTP — for WHIP signaling POST
+  # HTTP — WHIP signaling POST
   http: ^1.2.0
 
   # State management
   provider: ^6.1.2
 
-  # Network discovery (find VortexEngine on LAN)
-  multicast_dns: ^0.3.2+5
-
-  # Settings persistence
+  # Settings persistence (last-used engine IP, camera name)
   shared_preferences: ^2.2.3
 
-  # QR scanner — pairing with VortexEngine
+  # QR scanner — ZXing C++/FFI, no ML Kit (avoids NPE on some devices)
   flutter_zxing: ^1.6.1
 
-  # UI extras
-  cupertino_icons: ^1.0.6
+  # Permissions
   permission_handler: ^11.3.1
+
+  # UI
+  cupertino_icons: ^1.0.6
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^3.0.0
-  integration_test:
-    sdk: flutter
 
 flutter:
   uses-material-design: true

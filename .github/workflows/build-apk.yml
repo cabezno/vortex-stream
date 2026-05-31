@@ -30,10 +30,24 @@ jobs:
 
       # Generate the android/ platform scaffolding. flutter create does NOT
       # overwrite our existing lib/main.dart or pubspec.yaml.
+      # We preserve our custom native plugins (.kt) before deleting android/,
+      # then restore them after flutter create regenerates the build scaffolding.
       - name: Scaffold android project
         run: |
+          PLUGIN_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
+          mkdir -p /tmp/vortex_plugins
+          cp "$PLUGIN_DIR/VortexCamPlugin.kt" /tmp/vortex_plugins/
+          cp "$PLUGIN_DIR/SrtStreamPlugin.kt" /tmp/vortex_plugins/
+          cp "$PLUGIN_DIR/MainActivity.kt"    /tmp/vortex_plugins/
+
           rm -rf android
-          flutter create --platforms=android --org com.vortexengine --project-name vortexcam .
+          flutter create --platforms=android --org com.vortex --project-name vortexcam .
+
+          DST_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
+          mkdir -p "$DST_DIR"
+          cp /tmp/vortex_plugins/VortexCamPlugin.kt "$DST_DIR/"
+          cp /tmp/vortex_plugins/SrtStreamPlugin.kt "$DST_DIR/"
+          cp /tmp/vortex_plugins/MainActivity.kt    "$DST_DIR/"
 
       # Inject runtime permissions + allow cleartext (the WHIP URL is http:// on LAN)
       # and force minSdk 23 (required by flutter_webrtc).
@@ -70,13 +84,7 @@ jobs:
               open(g, "w", encoding="utf-8").write(t)
               print("patched", g)
 
-          # ---- gradle.properties: unbundled ML Kit model ----
-          gp = "android/gradle.properties"
-          props = open(gp, encoding="utf-8").read() if os.path.exists(gp) else ""
-          if "useUnbundled" not in props:
-              with open(gp, "a", encoding="utf-8") as f:
-                  f.write("\ndev.steenbakker.mobile_scanner.useUnbundled=true\n")
-              print("patched gradle.properties: unbundled ML Kit")
+          # (mobile_scanner removed — flutter_zxing used instead; no ML Kit patch needed)
           PY
 
       - name: Get dependencies
