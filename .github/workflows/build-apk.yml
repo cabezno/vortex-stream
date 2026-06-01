@@ -88,21 +88,22 @@ jobs:
           for g in glob.glob("android/app/build.gradle*"):
               t = open(g, encoding="utf-8").read()
               t = t.replace("flutter.minSdkVersion", "23")
-              # Inject CMake externalNativeBuild block if not already present.
-              # Built as a single \n-joined string so no .yml line dips below the
-              # run-block base indentation (that breaks the YAML literal scalar).
+              # Inject CMake externalNativeBuild block (Kotlin DSL syntax — the
+              # file is build.gradle.kts). Kotlin needs '=' and file()/listOf()
+              # instead of Groovy's bare-string calls. Built as a \n-joined
+              # string so no .yml line dips below the run-block base indentation.
               if "externalNativeBuild" not in t and "android {" in t:
                   cmake_block = (
                       "\n    externalNativeBuild {\n"
                       "        cmake {\n"
-                      "            path \"src/main/cpp/CMakeLists.txt\"\n"
-                      "            version \"3.22.1\"\n"
+                      "            path = file(\"src/main/cpp/CMakeLists.txt\")\n"
+                      "            version = \"3.22.1\"\n"
                       "        }\n"
                       "    }\n"
                       "    defaultConfig {\n"
                       "        externalNativeBuild {\n"
                       "            cmake {\n"
-                      "                abiFilters \"arm64-v8a\"\n"
+                      "                abiFilters += listOf(\"arm64-v8a\")\n"
                       "            }\n"
                       "        }\n"
                       "    }\n"
