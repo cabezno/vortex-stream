@@ -117,20 +117,23 @@ class _HomePageState extends State<_HomePage> {
     await p.setString('device_name', _deviceCtrl.text.trim());
   }
 
-  // ---- Transport label ----
-  String get _transportLabel => switch (_transport) {
+  // ---- Transport label / color (single source of truth) ----
+  static String labelFor(Transport t) => switch (t) {
     Transport.whip => 'WHIP',
     Transport.srt  => 'SRT',
     Transport.rtmp => 'RTMP',
     Transport.omt  => 'OMT',
   };
 
-  Color get _transportColor => switch (_transport) {
+  static Color colorFor(Transport t) => switch (t) {
     Transport.whip => const Color(0xFF00BBDD),
     Transport.srt  => const Color(0xFF34D399),
     Transport.rtmp => const Color(0xFFF59E0B),
     Transport.omt  => const Color(0xFFB57BFF),
   };
+
+  String get _transportLabel => labelFor(_transport);
+  Color  get _transportColor => colorFor(_transport);
 
   // ---- QR scan ----
   Future<void> _scan() async {
@@ -568,16 +571,8 @@ class _HomePageState extends State<_HomePage> {
       const SizedBox(height: 6),
       Row(children: _transportOptions.map((t) {
         final active = _transport == t;
-        final color  = switch (t) {
-          Transport.whip => const Color(0xFF00BBDD),
-          Transport.srt  => const Color(0xFF34D399),
-          Transport.rtmp => const Color(0xFFF59E0B),
-        };
-        final label = switch (t) {
-          Transport.whip => 'WHIP',
-          Transport.srt  => 'SRT',
-          Transport.rtmp => 'RTMP',
-        };
+        final color  = colorFor(t);
+        final label  = labelFor(t);
         return Padding(
           padding: const EdgeInsets.only(right: 8),
           child: GestureDetector(
