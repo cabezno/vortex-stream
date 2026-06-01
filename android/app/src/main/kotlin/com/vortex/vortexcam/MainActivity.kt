@@ -10,5 +10,6 @@ class MainActivity : FlutterActivity() {
 
         // Register native streaming plugins
         VortexCamPlugin.registerWith(this, flutterEngine)
+        OmtStreamPlugin.registerWith(this, flutterEngine)
     }
 }

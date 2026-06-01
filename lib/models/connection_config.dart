@@ -15,7 +15,13 @@ import 'dart:convert';
 // }
 // =============================================================================
 
-enum Transport { whip, srt, rtmp }
+enum Transport { whip, srt, rtmp, omt }
+
+class OmtConfig {
+  final int    port;
+  final int    quality;   // 0=Low 1=Med 2=High
+  const OmtConfig({this.port = 5960, this.quality = 2});
+}
 
 class WhipConfig {
   final String url;
@@ -54,6 +60,7 @@ class ConnectionConfig {
   final WhipConfig? whip;
   final SrtConfig?  srt;
   final RtmpConfig? rtmp;
+  final OmtConfig?  omt;
   final VideoConfig video;
 
   const ConnectionConfig({
@@ -61,11 +68,13 @@ class ConnectionConfig {
     this.whip,
     this.srt,
     this.rtmp,
+    this.omt,
     this.video = const VideoConfig(),
   });
 
-  /// Returns the preferred transport in priority order: SRT > WHIP > RTMP
+  /// Returns the preferred transport: OMT (LAN) > SRT > WHIP > RTMP
   Transport get preferredTransport {
+    if (omt  != null) return Transport.omt;
     if (srt  != null) return Transport.srt;
     if (whip != null) return Transport.whip;
     if (rtmp != null) return Transport.rtmp;
@@ -75,6 +84,7 @@ class ConnectionConfig {
   bool get hasSrt  => srt  != null;
   bool get hasWhip => whip != null;
   bool get hasRtmp => rtmp != null;
+  bool get hasOmt  => omt  != null;
 
   static ConnectionConfig? tryParse(String raw) {
     try {

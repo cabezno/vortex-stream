@@ -36,16 +36,24 @@ jobs:
         run: |
           PLUGIN_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
           mkdir -p /tmp/vortex_plugins
-          cp "$PLUGIN_DIR/VortexCamPlugin.kt" /tmp/vortex_plugins/
-          cp "$PLUGIN_DIR/MainActivity.kt"    /tmp/vortex_plugins/
+          cp "$PLUGIN_DIR/VortexCamPlugin.kt"  /tmp/vortex_plugins/
+          cp "$PLUGIN_DIR/OmtStreamPlugin.kt"  /tmp/vortex_plugins/
+          cp "$PLUGIN_DIR/MainActivity.kt"     /tmp/vortex_plugins/
+          # Preserve JNI/C++ sources and prebuilt .so files
+          cp -r "android/app/src/main/cpp"         /tmp/vortex_cpp       2>/dev/null || true
+          cp -r "android/app/src/main/jniLibs"     /tmp/vortex_jniLibs   2>/dev/null || true
 
           rm -rf android
           flutter create --platforms=android --org com.vortex --project-name vortexcam .
 
           DST_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
           mkdir -p "$DST_DIR"
-          cp /tmp/vortex_plugins/VortexCamPlugin.kt "$DST_DIR/"
-          cp /tmp/vortex_plugins/MainActivity.kt    "$DST_DIR/"
+          cp /tmp/vortex_plugins/VortexCamPlugin.kt  "$DST_DIR/"
+          cp /tmp/vortex_plugins/OmtStreamPlugin.kt  "$DST_DIR/"
+          cp /tmp/vortex_plugins/MainActivity.kt     "$DST_DIR/"
+          # Restore JNI sources and prebuilt libraries
+          cp -r /tmp/vortex_cpp     "android/app/src/main/"  2>/dev/null || true
+          cp -r /tmp/vortex_jniLibs "android/app/src/main/"  2>/dev/null || true
 
       # Inject runtime permissions + allow cleartext (the WHIP URL is http:// on LAN)
       # and force minSdk 23 (required by flutter_webrtc).
@@ -75,10 +83,29 @@ jobs:
           open(man, "w", encoding="utf-8").write(s)
           print("patched manifest")
 
-          # ---- build.gradle(.kts): force minSdk 23 ----
+          # ---- build.gradle(.kts): force minSdk 23 + wire CMake for JNI ----
+          import os
           for g in glob.glob("android/app/build.gradle*"):
               t = open(g, encoding="utf-8").read()
               t = t.replace("flutter.minSdkVersion", "23")
+              # Inject CMake externalNativeBuild block if not already present
+              if "externalNativeBuild" not in t and "android {" in t:
+                  cmake_block = '''
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+    defaultConfig {
+        externalNativeBuild {
+            cmake {
+                abiFilters "arm64-v8a"
+            }
+        }
+    }
+'''
+                  t = t.replace("android {", "android {" + cmake_block, 1)
               open(g, "w", encoding="utf-8").write(t)
               print("patched", g)
 

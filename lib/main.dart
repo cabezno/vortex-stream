@@ -24,6 +24,7 @@ import 'models/connection_config.dart';
 import 'services/connection_service.dart';
 import 'services/srt_connection_service.dart';
 import 'services/rtmp_connection_service.dart';
+import 'services/omt_connection_service.dart';
 import 'services/camera_service.dart';
 
 void main() => runApp(
@@ -33,6 +34,7 @@ void main() => runApp(
       ChangeNotifierProvider(create: (_) => ConnectionService()),
       ChangeNotifierProvider(create: (_) => SrtConnectionService()),
       ChangeNotifierProvider(create: (_) => RtmpConnectionService()),
+      ChangeNotifierProvider(create: (_) => OmtConnectionService()),
     ],
     child: const VortexCamApp(),
   ),
@@ -119,12 +121,14 @@ class _HomePageState extends State<_HomePage> {
     Transport.whip => 'WHIP',
     Transport.srt  => 'SRT',
     Transport.rtmp => 'RTMP',
+    Transport.omt  => 'OMT',
   };
 
   Color get _transportColor => switch (_transport) {
     Transport.whip => const Color(0xFF00BBDD),
     Transport.srt  => const Color(0xFF34D399),
     Transport.rtmp => const Color(0xFFF59E0B),
+    Transport.omt  => const Color(0xFFB57BFF),
   };
 
   // ---- QR scan ----
@@ -239,6 +243,7 @@ class _HomePageState extends State<_HomePage> {
       case Transport.whip: await _connectWhip(cfg);
       case Transport.srt:  await _connectSrt(cfg);
       case Transport.rtmp: await _connectRtmp(cfg);
+      case Transport.omt:  await _connectOmt(cfg);
     }
   }
 
@@ -280,6 +285,39 @@ class _HomePageState extends State<_HomePage> {
       _log('WHIP error: $e');
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       await conn.disconnect();
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // OMT — Camera2 + VMX (libvmx ARM64) → OMT TCP server
+  // -----------------------------------------------------------------------
+  Future<void> _connectOmt(ConnectionConfig cfg) async {
+    final omtCfg = cfg.omt;
+    final port   = omtCfg?.port ?? 5960;
+
+    _log('OMT: iniciando sender...');
+    final omt = context.read<OmtConnectionService>();
+    omt.configure(
+      width:   cfg.video.width,
+      height:  cfg.video.height,
+      fps:     cfg.video.fps,
+      quality: omtCfg?.quality ?? 2,
+      name:    _deviceCtrl.text.trim().isEmpty ? 'VortexCam' : _deviceCtrl.text.trim(),
+    );
+
+    try {
+      await omt.start(port: port);
+      setState(() { _live = true; });
+      _log('OMT sender activo → escuchando en :$port');
+      _log('VortexEngine: Herramientas → Fuentes OMT → IP del cel → Conectar OMT');
+
+      Timer.periodic(const Duration(seconds: 2), (t) {
+        if (!_live) { t.cancel(); return; }
+        if (mounted) setState(() {});
+      });
+    } catch (e) {
+      _log('OMT error: $e');
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     }
   }
 
@@ -363,6 +401,8 @@ class _HomePageState extends State<_HomePage> {
       case Transport.rtmp:
         await context.read<RtmpConnectionService>().stopCamera();
         _nativeTexId = null;
+      case Transport.omt:
+        await context.read<OmtConnectionService>().stop();
     }
     _log('Desconectado');
   }
@@ -379,6 +419,8 @@ class _HomePageState extends State<_HomePage> {
             .connectTo('', port: 0);  // stub — flip via plugin
       case Transport.rtmp:
         await context.read<RtmpConnectionService>().flipCamera();
+      case Transport.omt:
+        break; // camera flip handled internally by OmtStreamPlugin
     }
   }
 
@@ -394,6 +436,8 @@ class _HomePageState extends State<_HomePage> {
             .invokeMethod('setTorch', {'on': _torchOn});
       case Transport.rtmp:
         await context.read<RtmpConnectionService>().setTorch(_torchOn);
+      case Transport.omt:
+        break; // torch not yet wired for OMT
     }
   }
 
@@ -498,6 +542,7 @@ class _HomePageState extends State<_HomePage> {
   List<Transport> get _transportOptions {
     if (_config == null) return Transport.values;
     return [
+      if (_config!.hasOmt)  Transport.omt,
       if (_config!.hasSrt)  Transport.srt,
       if (_config!.hasWhip) Transport.whip,
       if (_config!.hasRtmp) Transport.rtmp,
@@ -550,9 +595,10 @@ class _HomePageState extends State<_HomePage> {
     children: const [
       Divider(),
       SizedBox(height: 4),
-      _LegendRow(color: Color(0xFF34D399), label: 'SRT',  desc: 'LAN, H.265, máxima calidad'),
+      _LegendRow(color: Color(0xFFB57BFF), label: 'OMT',  desc: 'LAN, VMX 4:2:2, ~16ms, máxima calidad'),
+      _LegendRow(color: Color(0xFF34D399), label: 'SRT',  desc: 'LAN, H.265, baja latencia'),
       _LegendRow(color: Color(0xFF00BBDD), label: 'WHIP', desc: 'LAN + internet, H.264, WebRTC'),
-      _LegendRow(color: Color(0xFFF59E0B), label: 'RTMP', desc: 'LAN + internet, H.264, compatible con todo'),
+      _LegendRow(color: Color(0xFFF59E0B), label: 'RTMP', desc: 'LAN + internet, H.264, compatible'),
     ],
   );
 
@@ -579,6 +625,10 @@ class _HomePageState extends State<_HomePage> {
         final rtmp = context.watch<RtmpConnectionService>();
         bitrate = rtmp.bitrateMbps;
         latency = rtmp.latencyMs;
+      case Transport.omt:
+        final omt = context.watch<OmtConnectionService>();
+        bitrate = omt.mbpsSent;
+        onAir   = omt.connected;
     }
 
     Widget preview;
@@ -595,6 +645,34 @@ class _HomePageState extends State<_HomePage> {
         preview = texId != null
             ? Texture(textureId: texId)
             : const Center(child: CircularProgressIndicator());
+      case Transport.omt:
+        // OMT uses Camera2 directly in native code — show status overlay
+        final omt = context.watch<OmtConnectionService>();
+        preview = Container(
+          color: Colors.black,
+          child: Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.videocam,
+                  size: 64,
+                  color: omt.connected ? const Color(0xFFB57BFF) : Colors.white24),
+              const SizedBox(height: 12),
+              Text(
+                omt.connected ? 'OMT — VortexEngine conectado' : 'OMT — esperando receptor...',
+                style: TextStyle(
+                  color: omt.connected ? const Color(0xFFB57BFF) : Colors.white38,
+                  fontSize: 14,
+                ),
+              ),
+              if (omt.isStreaming) ...[
+                const SizedBox(height: 8),
+                Text('Puerto :${omt.listenPort}   ${omt.mbpsSent.toStringAsFixed(1)} Mbps',
+                    style: const TextStyle(color: Colors.white38, fontSize: 12)),
+                Text('${omt.framesSent} frames enviados',
+                    style: const TextStyle(color: Colors.white24, fontSize: 11)),
+              ],
+            ]),
+          ),
+        );
     }
 
     return Scaffold(
