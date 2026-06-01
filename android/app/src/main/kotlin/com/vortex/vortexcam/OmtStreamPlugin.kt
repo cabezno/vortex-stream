@@ -50,7 +50,27 @@ class OmtStreamPlugin(
 ) : MethodChannel.MethodCallHandler {
 
     companion object {
-        init { System.loadLibrary("vmxjni") }
+        // Whether the native VMX bridge loaded successfully. If false, OMT is
+        // unavailable but the app still runs (WHIP/SRT/RTMP keep working).
+        @JvmStatic var nativeAvailable = false
+            private set
+
+        init {
+            // MUST NOT throw from a static initializer: an exception here makes
+            // the whole class fail to load, and since MainActivity.onCreate
+            // touches OmtStreamPlugin, that crashes the entire app at launch.
+            // Load defensively; if libvmx/vmxjni is missing just disable OMT.
+            try {
+                // Load libvmx first so vmxjni's dlopen finds it already mapped.
+                try { System.loadLibrary("vmx") } catch (_: Throwable) {}
+                System.loadLibrary("vmxjni")
+                nativeAvailable = true
+                Log.i(TAG, "vmxjni loaded — OMT available")
+            } catch (t: Throwable) {
+                nativeAvailable = false
+                Log.e(TAG, "vmxjni load failed — OMT disabled: $t")
+            }
+        }
 
         @JvmStatic external fun nativeCreateEncoder(w: Int, h: Int, quality: Int, colorSpace: Int): Long
         @JvmStatic external fun nativeDestroyEncoder(handle: Long)
@@ -106,6 +126,11 @@ class OmtStreamPlugin(
 
     // ── Start ────────────────────────────────────────────────────────────────
     private fun startOmt(call: MethodCall, result: MethodChannel.Result) {
+        if (!nativeAvailable) {
+            result.error("OMT_UNAVAILABLE",
+                "El códec VMX nativo no está disponible en este dispositivo. Usá WHIP o SRT.", null)
+            return
+        }
         width    = call.argument<Int>("width")    ?: 1920
         height   = call.argument<Int>("height")   ?: 1080
         fpsN     = call.argument<Int>("fps")      ?: 30
