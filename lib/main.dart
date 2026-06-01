@@ -71,6 +71,7 @@ class _HomePageState extends State<_HomePage> {
   bool              _torchOn   = false;
   bool              _onAir     = false;
   bool              _live      = false;
+  bool              _connecting = false;  // guard against double-tap → duplicate POST
   bool              _showCtrl  = true;
 
   final _deviceCtrl = TextEditingController(text: 'cam1');
@@ -228,22 +229,30 @@ class _HomePageState extends State<_HomePage> {
 
   // ---- Go live ----
   Future<void> _connect() async {
+    // Guard against double-tap: a second tap while still connecting would fire
+    // a duplicate WHIP POST, which the engine then had to reject. Block re-entry.
+    if (_connecting || _live) { _log('Ya conectando/conectado — ignorando'); return; }
     final cfg = _config;
     if (cfg == null) { _log('Sin configuración'); return; }
 
-    if (!(await Permission.camera.request()).isGranted) {
-      _log('Permiso denegado'); return;
-    }
-    await Permission.microphone.request();
-    await _saveName();
+    setState(() => _connecting = true);
+    try {
+      if (!(await Permission.camera.request()).isGranted) {
+        _log('Permiso denegado'); return;
+      }
+      await Permission.microphone.request();
+      await _saveName();
 
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-    switch (_transport) {
-      case Transport.whip: await _connectWhip(cfg);
-      case Transport.srt:  await _connectSrt(cfg);
-      case Transport.rtmp: await _connectRtmp(cfg);
-      case Transport.omt:  await _connectOmt(cfg);
+      switch (_transport) {
+        case Transport.whip: await _connectWhip(cfg);
+        case Transport.srt:  await _connectSrt(cfg);
+        case Transport.rtmp: await _connectRtmp(cfg);
+        case Transport.omt:  await _connectOmt(cfg);
+      }
+    } finally {
+      if (mounted) setState(() => _connecting = false);
     }
   }
 
@@ -516,9 +525,12 @@ class _HomePageState extends State<_HomePage> {
             const SizedBox(width: 12),
             Expanded(
               child: FilledButton.icon(
-                onPressed: configured ? _connect : null,
-                icon: const Icon(Icons.videocam),
-                label: Text('Go live  $_transportLabel'),
+                onPressed: (configured && !_connecting) ? _connect : null,
+                icon: _connecting
+                    ? const SizedBox(width: 18, height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.videocam),
+                label: Text(_connecting ? 'Conectando...' : 'Go live  $_transportLabel'),
                 style: FilledButton.styleFrom(backgroundColor: _transportColor),
               ),
             ),
