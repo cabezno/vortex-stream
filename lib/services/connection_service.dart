@@ -160,7 +160,13 @@ class ConnectionService extends ChangeNotifier {
       'offerToReceiveAudio': false,
       'offerToReceiveVideo': false,
     });
-    final munged = _mungeH264Bitrate(_preferH264(offer.sdp ?? ''));
+    // Pipeline: prefer H.264 → munge bitrate → force send-only direction.
+    // _forceSendOnly() is critical: some flutter_webrtc builds emit the video
+    // m-line as a=recvonly even with a SendOnly transceiver, which makes the
+    // engine wait for media that never arrives (black video). Rewriting the
+    // direction attribute to sendonly guarantees the phone advertises it sends.
+    final munged = _forceSendOnly(_mungeH264Bitrate(_preferH264(offer.sdp ?? '')));
+    debugPrint('[VortexCam] offer SDP:\n$munged');
     await _peerConnection!.setLocalDescription(RTCSessionDescription(munged, 'offer'));
 
     // Wait for ICE gathering (with 5-second timeout)
@@ -381,6 +387,28 @@ class ConnectionService extends ChangeNotifier {
       out.add(l);
     }
     return out.join('\r\n');
+  }
+
+  // Force the video m-section to advertise a=sendonly.
+  // Walks the SDP line by line: once inside the m=video block, any
+  // a=sendrecv / a=recvonly / a=inactive line becomes a=sendonly.
+  // The audio/application sections are left untouched.
+  String _forceSendOnly(String sdp) {
+    final lines = sdp.split(RegExp(r'\r\n|\n'));
+    bool inVideo = false;
+    for (int i = 0; i < lines.length; i++) {
+      final l = lines[i];
+      if (l.startsWith('m=')) {
+        inVideo = l.startsWith('m=video');
+        continue;
+      }
+      if (inVideo) {
+        if (l == 'a=sendrecv' || l == 'a=recvonly' || l == 'a=inactive') {
+          lines[i] = 'a=sendonly';
+        }
+      }
+    }
+    return lines.join('\r\n');
   }
 
   @override
