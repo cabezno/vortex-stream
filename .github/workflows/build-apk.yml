@@ -39,9 +39,13 @@ jobs:
           cp "$PLUGIN_DIR/VortexCamPlugin.kt"  /tmp/vortex_plugins/
           cp "$PLUGIN_DIR/OmtStreamPlugin.kt"  /tmp/vortex_plugins/
           cp "$PLUGIN_DIR/MainActivity.kt"     /tmp/vortex_plugins/
-          # Preserve JNI/C++ sources and prebuilt .so files
-          cp -r "android/app/src/main/cpp"         /tmp/vortex_cpp       2>/dev/null || true
-          cp -r "android/app/src/main/jniLibs"     /tmp/vortex_jniLibs   2>/dev/null || true
+          # Preserve JNI/C++ sources and prebuilt .so files.
+          # Copy the CONTENTS into a temp dir (trailing /.) so restore lands them
+          # back as cpp/ and jniLibs/ — not as a nested vortex_cpp/ folder.
+          rm -rf /tmp/vortex_cpp /tmp/vortex_jniLibs
+          mkdir -p /tmp/vortex_cpp /tmp/vortex_jniLibs
+          cp -r android/app/src/main/cpp/.     /tmp/vortex_cpp/     2>/dev/null || true
+          cp -r android/app/src/main/jniLibs/. /tmp/vortex_jniLibs/ 2>/dev/null || true
 
           rm -rf android
           flutter create --platforms=android --org com.vortex --project-name vortexcam .
@@ -51,9 +55,12 @@ jobs:
           cp /tmp/vortex_plugins/VortexCamPlugin.kt  "$DST_DIR/"
           cp /tmp/vortex_plugins/OmtStreamPlugin.kt  "$DST_DIR/"
           cp /tmp/vortex_plugins/MainActivity.kt     "$DST_DIR/"
-          # Restore JNI sources and prebuilt libraries
-          cp -r /tmp/vortex_cpp     "android/app/src/main/"  2>/dev/null || true
-          cp -r /tmp/vortex_jniLibs "android/app/src/main/"  2>/dev/null || true
+          # Restore JNI sources and prebuilt libraries into their real paths
+          mkdir -p android/app/src/main/cpp android/app/src/main/jniLibs
+          cp -r /tmp/vortex_cpp/.     android/app/src/main/cpp/
+          cp -r /tmp/vortex_jniLibs/. android/app/src/main/jniLibs/
+          echo "=== cpp/ contents ===" && ls -la android/app/src/main/cpp/
+          echo "=== jniLibs/ contents ===" && ls -laR android/app/src/main/jniLibs/
 
       # Inject runtime permissions + allow cleartext (the WHIP URL is http:// on LAN)
       # and force minSdk 23 (required by flutter_webrtc).
