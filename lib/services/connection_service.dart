@@ -110,16 +110,15 @@ class ConnectionService extends ChangeNotifier {
 
     _peerConnection = await createPeerConnection(config);
 
-    // Add video track via addTransceiver.
-    // scaleResolutionDownBy=1.0 — prevents Android quality scaler from reducing
-    //   resolution in response to GCC bandwidth drops.
-    // minBitrate=1_500_000 — SDP floor: prevents GCC from dropping below 1.5 Mbps,
-    //   which shortens the 320×192 ramp-up period at initial connect.
-    // maxBitrate=6_000_000 — stays under the engine's REMB target (5 Mbps) so GCC
-    //   converges quickly without overshooting and oscillating.
+    // Publish video (and audio) as SEND-ONLY. We use addTransceiver with an
+    // explicit SendOnly direction. Critically we also keep a reference to the
+    // video transceiver so we can re-assert its direction right before creating
+    // the offer — some flutter_webrtc builds otherwise emit a=recvonly, which
+    // makes the engine wait for media the phone never sends (black video).
+    RTCRtpTransceiver? videoTransceiver;
     for (final track in stream.getTracks()) {
       if (track.kind == 'video') {
-        await _peerConnection!.addTransceiver(
+        videoTransceiver = await _peerConnection!.addTransceiver(
           track: track,
           kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
           init: RTCRtpTransceiverInit(
@@ -135,7 +134,25 @@ class ConnectionService extends ChangeNotifier {
           ),
         );
       } else {
-        await _peerConnection!.addTrack(track, stream);
+        // Audio also send-only (the phone sends audio, never receives).
+        await _peerConnection!.addTransceiver(
+          track: track,
+          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+          init: RTCRtpTransceiverInit(
+            direction: TransceiverDirection.SendOnly,
+          ),
+        );
+      }
+    }
+
+    // Re-assert SendOnly on the video transceiver. On some flutter_webrtc
+    // versions the direction set in addTransceiver's init is not honoured and
+    // the offer comes out as recvonly; setting it explicitly here fixes that.
+    if (videoTransceiver != null) {
+      try {
+        await videoTransceiver.setDirection(TransceiverDirection.SendOnly);
+      } catch (e) {
+        debugPrint('[VortexCam] setDirection failed (non-fatal): $e');
       }
     }
 
@@ -155,18 +172,11 @@ class ConnectionService extends ChangeNotifier {
       debugPrint('[VortexCam] control channel: $state');
     };
 
-    // Create SDP offer
-    final offer  = await _peerConnection!.createOffer({
-      'offerToReceiveAudio': false,
-      'offerToReceiveVideo': false,
-    });
-    // Pipeline: prefer H.264 → munge bitrate → force send-only direction.
-    // _forceSendOnly() is critical: some flutter_webrtc builds emit the video
-    // m-line as a=recvonly even with a SendOnly transceiver, which makes the
-    // engine wait for media that never arrives (black video). Rewriting the
-    // direction attribute to sendonly guarantees the phone advertises it sends.
+    // Create SDP offer. Do NOT pass offerToReceive* — those are legacy Plan-B
+    // options that, under unified-plan, can override the transceiver directions
+    // and force recvonly. The SendOnly transceivers above already define intent.
+    final offer  = await _peerConnection!.createOffer();
     final munged = _forceSendOnly(_mungeH264Bitrate(_preferH264(offer.sdp ?? '')));
-    debugPrint('[VortexCam] offer SDP:\n$munged');
     await _peerConnection!.setLocalDescription(RTCSessionDescription(munged, 'offer'));
 
     // Wait for ICE gathering (with 5-second timeout)
@@ -174,6 +184,12 @@ class ConnectionService extends ChangeNotifier {
 
     final localDesc = await _peerConnection!.getLocalDescription();
     if (localDesc == null) throw Exception('Failed to get local SDP');
+
+    // CRITICAL: getLocalDescription() returns WebRTC's regenerated SDP, which
+    // can revert our a=sendonly back to a=recvonly. Re-apply _forceSendOnly to
+    // the bytes we actually POST so the engine sees sendonly and forwards RTP.
+    final offerToSend = _forceSendOnly(localDesc.sdp ?? '');
+    debugPrint('[VortexCam] offer POSTed:\n$offerToSend');
 
     // WHIP POST — send offer to VortexEngine
     // Timeout is 30 s: DTLS cert generation on first run can take up to 8 s,
@@ -185,7 +201,7 @@ class ConnectionService extends ChangeNotifier {
         'Content-Type': 'application/sdp',
         'X-Source-Name': Uri.encodeComponent(_sourceName),
       },
-      body: localDesc.sdp,
+      body: offerToSend,
     ).timeout(const Duration(seconds: 30));
 
     if (response.statusCode != 201 && response.statusCode != 200) {
