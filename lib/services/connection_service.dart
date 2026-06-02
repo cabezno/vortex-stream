@@ -110,49 +110,39 @@ class ConnectionService extends ChangeNotifier {
 
     _peerConnection = await createPeerConnection(config);
 
-    // Publish video (and audio) as SEND-ONLY. We use addTransceiver with an
-    // explicit SendOnly direction. Critically we also keep a reference to the
-    // video transceiver so we can re-assert its direction right before creating
-    // the offer — some flutter_webrtc builds otherwise emit a=recvonly, which
-    // makes the engine wait for media the phone never sends (black video).
-    RTCRtpTransceiver? videoTransceiver;
+    // CRITICAL: use addTrack(), NOT addTransceiver() with sendEncodings.
+    //
+    // addTransceiver with a sendEncodings list does NOT emit an a=ssrc line for
+    // the video m-section in this flutter_webrtc build. Without a=ssrc the
+    // engine's libdatachannel silently drops every video RTP packet → ICE
+    // connects, the track opens, but no frame ever arrives → black video.
+    // (The audio track, added without encodings, kept its ssrc — that mismatch
+    // is what pinned the bug.)
+    //
+    // addTrack always assigns an ssrc and is the path that worked originally.
+    // Bitrate is shaped afterwards via setParameters() + SDP x-google-* munging.
+    RTCRtpSender? videoSender;
     for (final track in stream.getTracks()) {
-      if (track.kind == 'video') {
-        videoTransceiver = await _peerConnection!.addTransceiver(
-          track: track,
-          kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
-          init: RTCRtpTransceiverInit(
-            direction: TransceiverDirection.SendOnly,
-            sendEncodings: [
-              RTCRtpEncoding(
-                minBitrate:            1500000,  // 1.5 Mbps floor
-                maxBitrate:            6000000,  // 6 Mbps cap
-                maxFramerate:          60,
-                scaleResolutionDownBy: 1.0,       // never downscale resolution
-              ),
-            ],
-          ),
-        );
-      } else {
-        // Audio also send-only (the phone sends audio, never receives).
-        await _peerConnection!.addTransceiver(
-          track: track,
-          kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
-          init: RTCRtpTransceiverInit(
-            direction: TransceiverDirection.SendOnly,
-          ),
-        );
-      }
+      final sender = await _peerConnection!.addTrack(track, stream);
+      if (track.kind == 'video') videoSender = sender;
     }
 
-    // Re-assert SendOnly on the video transceiver. On some flutter_webrtc
-    // versions the direction set in addTransceiver's init is not honoured and
-    // the offer comes out as recvonly; setting it explicitly here fixes that.
-    if (videoTransceiver != null) {
+    // Shape the video encoding AFTER the sender exists (this keeps the ssrc
+    // that addTrack assigned, unlike sendEncodings in addTransceiver).
+    if (videoSender != null) {
       try {
-        await videoTransceiver.setDirection(TransceiverDirection.SendOnly);
+        final params = videoSender.parameters;
+        if (params.encodings != null && params.encodings!.isNotEmpty) {
+          for (final enc in params.encodings!) {
+            enc.minBitrate            = 1500000;  // 1.5 Mbps floor
+            enc.maxBitrate            = 6000000;  // 6 Mbps cap
+            enc.maxFramerate          = 60;
+            enc.scaleResolutionDownBy = 1.0;       // never downscale
+          }
+          await videoSender.setParameters(params);
+        }
       } catch (e) {
-        debugPrint('[VortexCam] setDirection failed (non-fatal): $e');
+        debugPrint('[VortexCam] setParameters failed (non-fatal): $e');
       }
     }
 
