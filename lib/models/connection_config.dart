@@ -3,19 +3,33 @@ import 'dart:convert';
 // =============================================================================
 // ConnectionConfig — parsed from the QR JSON produced by VortexEngine
 //
-// QR format:
+// QR format (all fields optional except "app"):
 // {
 //   "v": 1,
 //   "app": "vortexcam",
 //   "host": "VortexEngine",
+//   "wifi":  { "ssid": "VortexHotspot", "password": "vortex1234" },  // only when PC hotspot active
 //   "whip":  { "url": "http://192.168.x.x:8080/whip/" },
 //   "srt":   { "host": "192.168.x.x", "port": 9000, "latencyMs": 80 },
 //   "rtmp":  { "url": "rtmp://192.168.x.x:1935/live/vortexcam" },
 //   "video": { "codec": "h264", "w": 1920, "h": 1080, "fps": 60, "maxKbps": 8000 }
 // }
+//
+// Layers:
+//   wifi  = NETWORK layer — how to reach the PC's network (optional, hotspot only)
+//   whip/srt/rtmp = TRANSPORT layer — how to send video (can coexist, user/auto picks one)
 // =============================================================================
 
 enum Transport { whip, srt, rtmp, omt }
+
+/// Network layer — credentials for the PC's WiFi hotspot.
+/// Present only when VortexEngine is running its own hotspot.
+/// The app connects to this network BEFORE initiating the video transport.
+class WifiConfig {
+  final String ssid;
+  final String password;
+  const WifiConfig({required this.ssid, required this.password});
+}
 
 class OmtConfig {
   final int    port;
@@ -57,6 +71,7 @@ class VideoConfig {
 
 class ConnectionConfig {
   final String     host;
+  final WifiConfig? wifi;   // network layer (optional, only with PC hotspot)
   final WhipConfig? whip;
   final SrtConfig?  srt;
   final RtmpConfig? rtmp;
@@ -65,6 +80,7 @@ class ConnectionConfig {
 
   const ConnectionConfig({
     required this.host,
+    this.wifi,
     this.whip,
     this.srt,
     this.rtmp,
@@ -81,20 +97,35 @@ class ConnectionConfig {
     return Transport.whip;
   }
 
+  bool get hasWifi => wifi != null;
   bool get hasSrt  => srt  != null;
   bool get hasWhip => whip != null;
   bool get hasRtmp => rtmp != null;
   bool get hasOmt  => omt  != null;
+
+  /// Available video transports (network layer not included).
+  List<Transport> get availableTransports => [
+    if (hasOmt)  Transport.omt,
+    if (hasSrt)  Transport.srt,
+    if (hasWhip) Transport.whip,
+    if (hasRtmp) Transport.rtmp,
+  ];
 
   static ConnectionConfig? tryParse(String raw) {
     try {
       final j = jsonDecode(raw);
       if (j is! Map || j['app'] != 'vortexcam') return null;
 
+      WifiConfig? wifi;
       WhipConfig? whip;
       SrtConfig?  srt;
       RtmpConfig? rtmp;
 
+      if (j['wifi'] is Map) {
+        final ssid = (j['wifi']['ssid'] ?? '').toString();
+        final pass = (j['wifi']['password'] ?? '').toString();
+        if (ssid.isNotEmpty) wifi = WifiConfig(ssid: ssid, password: pass);
+      }
       if (j['whip'] is Map) {
         final url = (j['whip']['url'] ?? '').toString();
         if (url.isNotEmpty) whip = WhipConfig(url: url);
@@ -123,6 +154,7 @@ class ConnectionConfig {
 
       return ConnectionConfig(
         host:  (j['host'] ?? 'VortexEngine').toString(),
+        wifi:  wifi,
         whip:  whip,
         srt:   srt,
         rtmp:  rtmp,

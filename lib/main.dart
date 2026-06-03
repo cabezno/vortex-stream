@@ -17,6 +17,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:wifi_iot/wifi_iot.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -153,7 +154,48 @@ class _HomePageState extends State<_HomePage> {
       _config    = cfg;
       _transport = cfg.preferredTransport;
     });
-    _log('Emparejado con ${cfg.host} — transporte: $_transportLabel');
+
+    // Network layer: if the QR includes WiFi credentials (PC hotspot active),
+    // connect to that network automatically before the user taps Go Live.
+    if (cfg.wifi != null) {
+      await _connectWifi(cfg.wifi!);
+    }
+
+    _log('Emparejado con ${cfg.host} — ${cfg.hasWifi ? "WiFi+${_transportLabel}" : _transportLabel}');
+  }
+
+  String _wifiStatus = '';
+  bool   _wifiConnecting = false;
+
+  Future<void> _connectWifi(WifiConfig wifi) async {
+    setState(() { _wifiConnecting = true; _wifiStatus = 'Conectando a "${wifi.ssid}"...'; });
+    _log('WiFi: conectando a "${wifi.ssid}"...');
+    try {
+      final granted = await Permission.location.request();
+      if (!granted.isGranted) {
+        setState(() { _wifiStatus = 'Permiso de ubicación requerido para WiFi'; _wifiConnecting = false; });
+        return;
+      }
+      final ok = await WifiIoT.connect(
+        wifi.ssid,
+        password: wifi.password,
+        security: NetworkSecurity.WPA,
+        joinOnce: false,
+      );
+      if (ok) {
+        await WifiIoT.forceWifiUsage(true);
+        setState(() { _wifiStatus = '✓ Conectado a "${wifi.ssid}"'; });
+        _log('WiFi: conectado a "${wifi.ssid}"');
+      } else {
+        setState(() { _wifiStatus = 'No se pudo conectar a "${wifi.ssid}" — verificá la contraseña'; });
+        _log('WiFi: falló la conexión a "${wifi.ssid}"');
+      }
+    } catch (e) {
+      setState(() { _wifiStatus = 'Error WiFi: $e'; });
+      _log('WiFi error: $e');
+    } finally {
+      setState(() { _wifiConnecting = false; });
+    }
   }
 
   // ---- Manual entry ----
@@ -476,7 +518,7 @@ class _HomePageState extends State<_HomePage> {
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
 
-          // Status
+          // Status card
           if (_config != null) ...[
             Container(
               padding: const EdgeInsets.all(10),
@@ -485,13 +527,38 @@ class _HomePageState extends State<_HomePage> {
                 borderRadius: BorderRadius.circular(8),
                 border: Border.all(color: _transportColor.withOpacity(0.3)),
               ),
-              child: Row(children: [
-                Icon(Icons.check_circle, color: _transportColor, size: 18),
-                const SizedBox(width: 8),
-                Expanded(child: Text(
-                  '${_config!.host}  •  $_transportLabel',
-                  style: TextStyle(color: _transportColor, fontWeight: FontWeight.w600),
-                )),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Icon(Icons.check_circle, color: _transportColor, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text(
+                    '${_config!.host}  •  $_transportLabel',
+                    style: TextStyle(color: _transportColor, fontWeight: FontWeight.w600),
+                  )),
+                ]),
+                // WiFi status row (only when hotspot credentials present)
+                if (_config!.hasWifi) ...[
+                  const SizedBox(height: 6),
+                  Row(children: [
+                    if (_wifiConnecting)
+                      const SizedBox(width: 14, height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    else
+                      Icon(
+                        _wifiStatus.startsWith('✓') ? Icons.wifi : Icons.wifi_off,
+                        size: 14,
+                        color: _wifiStatus.startsWith('✓') ? Colors.green : Colors.orange,
+                      ),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(
+                      _wifiStatus.isEmpty ? 'WiFi: ${_config!.wifi!.ssid}' : _wifiStatus,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: _wifiStatus.startsWith('✓') ? Colors.green : Colors.orange[300],
+                      ),
+                    )),
+                  ]),
+                ],
               ]),
             ),
             const SizedBox(height: 12),
@@ -528,12 +595,12 @@ class _HomePageState extends State<_HomePage> {
             const SizedBox(width: 12),
             Expanded(
               child: FilledButton.icon(
-                onPressed: (configured && !_connecting) ? _connect : null,
+                onPressed: (configured && !_connecting && !_wifiConnecting) ? _connect : null,
                 icon: _connecting
                     ? const SizedBox(width: 18, height: 18,
                         child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
                     : const Icon(Icons.videocam),
-                label: Text(_connecting ? 'Conectando...' : 'Go live  $_transportLabel'),
+                label: Text(_wifiConnecting ? 'Conectando WiFi...' : _connecting ? 'Conectando...' : 'Go live  $_transportLabel'),
                 style: FilledButton.styleFrom(backgroundColor: _transportColor),
               ),
             ),
