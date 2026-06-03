@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
 
-    <!-- WiFi — required by wifi_iot for hotspot auto-connect -->
+    <!-- WiFi — required for WifiNetworkSpecifier hotspot auto-connect -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE"/>
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE"/>

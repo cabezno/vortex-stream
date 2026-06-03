@@ -17,7 +17,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'package:wifi_iot/wifi_iot.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -167,23 +166,17 @@ class _HomePageState extends State<_HomePage> {
   String _wifiStatus = '';
   bool   _wifiConnecting = false;
 
+  static const _nativeChannel = MethodChannel('com.vortex.vortexcam/native');
+
   Future<void> _connectWifi(WifiConfig wifi) async {
     setState(() { _wifiConnecting = true; _wifiStatus = 'Conectando a "${wifi.ssid}"...'; });
     _log('WiFi: conectando a "${wifi.ssid}"...');
     try {
-      final granted = await Permission.location.request();
-      if (!granted.isGranted) {
-        setState(() { _wifiStatus = 'Permiso de ubicación requerido para WiFi'; _wifiConnecting = false; });
-        return;
-      }
-      final ok = await WifiIoT.connect(
-        wifi.ssid,
-        password: wifi.password,
-        security: NetworkSecurity.WPA,
-        joinOnce: false,
-      );
+      final ok = await _nativeChannel.invokeMethod<bool>('connectWifi', {
+        'ssid':     wifi.ssid,
+        'password': wifi.password,
+      });
       if (ok == true) {
-        await WifiIoT.forceWifiUsage(true);
         setState(() { _wifiStatus = '✓ Conectado a "${wifi.ssid}"'; });
         _log('WiFi: conectado a "${wifi.ssid}"');
       } else {

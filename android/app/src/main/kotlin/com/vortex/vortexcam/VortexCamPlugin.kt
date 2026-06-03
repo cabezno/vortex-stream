@@ -20,8 +20,14 @@ import android.hardware.camera2.*
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.net.wifi.WifiNetworkSpecifier
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
@@ -108,6 +114,7 @@ class VortexCamPlugin(
             "getStats"     -> result.success(mapOf("bitrateMbps" to bitrateMbps, "rttMs" to rttMs))
 
             "discoverSrt"  -> discoverSrt(call, result)
+            "connectWifi"  -> connectWifi(call, result)
 
             else -> result.notImplemented()
         }
@@ -426,6 +433,60 @@ class VortexCamPlugin(
             bitrateMbps = bytesSent.getAndSet(0L) * 8.0 / elapsed * 1000.0
             rttMs       = srtSocket?.getRttMs() ?: 0
             lastStatNs  = now
+        }
+    }
+
+    // ====================================================================
+    // WiFi connect (Android 10+ WifiNetworkSpecifier; graceful on older)
+    // ====================================================================
+    private var wifiCallback: ConnectivityManager.NetworkCallback? = null
+
+    private fun connectWifi(call: MethodCall, result: MethodChannel.Result) {
+        val ssid     = call.argument<String>("ssid")     ?: return result.success(false)
+        val password = call.argument<String>("password") ?: return result.success(false)
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            // Android 9 and below: no programmatic WPA2 connect without deprecated API.
+            result.success(false)
+            return
+        }
+
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+        // Release previous request if any.
+        wifiCallback?.let { try { cm.unregisterNetworkCallback(it) } catch (_: Exception) {} }
+
+        val specifier = WifiNetworkSpecifier.Builder()
+            .setSsid(ssid)
+            .setWpa2Passphrase(password)
+            .build()
+
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .setNetworkSpecifier(specifier)
+            .build()
+
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            private var responded = false
+            override fun onAvailable(network: Network) {
+                if (responded) return; responded = true
+                cm.bindProcessToNetwork(network)
+                wifiCallback = null
+                result.success(true)
+            }
+            override fun onUnavailable() {
+                if (responded) return; responded = true
+                wifiCallback = null
+                result.success(false)
+            }
+        }
+        wifiCallback = cb
+
+        try {
+            cm.requestNetwork(request, cb, 10_000 /* 10s timeout */)
+        } catch (e: Exception) {
+            Log.e(TAG, "connectWifi: $e")
+            result.success(false)
         }
     }
 

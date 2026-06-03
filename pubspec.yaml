@@ -28,9 +28,6 @@ dependencies:
   # Permissions
   permission_handler: ^11.3.1
 
-  # WiFi — auto-connect to PC hotspot when credentials are in the QR
-  wifi_iot: ^0.3.19+2
-
   # UI
   cupertino_icons: ^1.0.6
 
