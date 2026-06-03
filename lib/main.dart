@@ -182,7 +182,7 @@ class _HomePageState extends State<_HomePage> {
         security: NetworkSecurity.WPA,
         joinOnce: false,
       );
-      if (ok) {
+      if (ok == true) {
         await WifiIoT.forceWifiUsage(true);
         setState(() { _wifiStatus = '✓ Conectado a "${wifi.ssid}"'; });
         _log('WiFi: conectado a "${wifi.ssid}"');

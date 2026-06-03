@@ -120,6 +120,7 @@ class ConnectionConfig {
       WhipConfig? whip;
       SrtConfig?  srt;
       RtmpConfig? rtmp;
+      OmtConfig?  omt;
 
       if (j['wifi'] is Map) {
         final ssid = (j['wifi']['ssid'] ?? '').toString();
@@ -141,7 +142,13 @@ class ConnectionConfig {
         if (url.isNotEmpty) rtmp = RtmpConfig(url: url);
       }
 
-      if (whip == null && srt == null && rtmp == null) return null;
+      if (j['omt'] is Map) {
+        final port    = (j['omt']['port']    as num?)?.toInt() ?? 5960;
+        final quality = (j['omt']['quality'] as num?)?.toInt() ?? 2;
+        omt = OmtConfig(port: port, quality: quality);
+      }
+
+      if (whip == null && srt == null && rtmp == null && omt == null) return null;
 
       final v = j['video'] is Map ? j['video'] as Map : <String, dynamic>{};
       final video = VideoConfig(
@@ -158,6 +165,7 @@ class ConnectionConfig {
         whip:  whip,
         srt:   srt,
         rtmp:  rtmp,
+        omt:   omt,
         video: video,
       );
     } catch (_) {
