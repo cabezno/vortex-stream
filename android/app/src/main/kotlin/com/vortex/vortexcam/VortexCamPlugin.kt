@@ -523,40 +523,38 @@ class VortexCamPlugin(
     }
 
     // ====================================================================
-    // SrtSocket — libsrt JNI with TCP fallback
+    // SrtSocket — plain TCP MPEG-TS transport.
+    // VortexEngine listens on TCP + UDP (SRT) on the same port.
+    // When libsrt.so is available it will be preferred (true SRT with FEC/CC).
+    // Until then, TCP delivers reliable MPEG-TS on LAN with ~1ms extra latency.
     // ====================================================================
     private inner class SrtSocket(val ip: String, val port: Int, val latencyMs: Int) {
-        private var handle: Long = 0L
         private var tcpSocket: Socket? = null
-
-        external fun nativeCreate(latency: Int): Long
-        external fun nativeConnect(h: Long, ip: String, port: Int): Boolean
-        external fun nativeSend(h: Long, data: ByteArray): Int
-        external fun nativeRtt(h: Long): Int
-        external fun nativeClose(h: Long)
 
         fun connect(): Boolean {
             return try {
-                System.loadLibrary("srt")
-                handle = nativeCreate(latencyMs)
-                nativeConnect(handle, ip, port)
-            } catch (_: UnsatisfiedLinkError) {
-                Log.w(TAG, "libsrt.so not found — TCP fallback")
-                connectTcp()
+                tcpSocket = Socket(ip, port).also {
+                    it.tcpNoDelay  = true
+                    it.soTimeout   = 0       // no recv timeout — keep-alive handled by send
+                    it.keepAlive   = true
+                }
+                Log.i(TAG, "SRT/TCP connected → $ip:$port")
+                true
+            } catch (e: Exception) {
+                Log.e(TAG, "SRT/TCP connect to $ip:$port failed: $e")
+                false
             }
         }
-        private fun connectTcp(): Boolean = try {
-            tcpSocket = Socket(ip, port).also { it.tcpNoDelay = true }; true
-        } catch (e: Exception) { Log.e(TAG, "TCP fallback: $e"); false }
 
         fun send(data: ByteArray) {
-            if (handle != 0L) nativeSend(handle, data)
-            else try { tcpSocket?.outputStream?.write(data) } catch (_: Exception) {}
+            try { tcpSocket?.outputStream?.write(data) } catch (_: Exception) {}
         }
-        fun getRttMs(): Int = if (handle != 0L) nativeRtt(handle) else 0
+
+        fun getRttMs(): Int = 0  // TCP doesn't expose RTT; use 0
+
         fun close() {
-            if (handle != 0L) { nativeClose(handle); handle = 0L }
-            tcpSocket?.close(); tcpSocket = null
+            try { tcpSocket?.close() } catch (_: Exception) {}
+            tcpSocket = null
         }
     }
 }
