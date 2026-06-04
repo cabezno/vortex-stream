@@ -20,6 +20,8 @@ import android.hardware.camera2.*
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
+import android.view.Surface
+import android.view.WindowManager
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
@@ -236,6 +238,27 @@ class VortexCamPlugin(
     // ====================================================================
     // Shared encode setup
     // ====================================================================
+    // Returns the rotation angle (0/90/180/270) to apply to the encoder so that
+    // VortexEngine receives upright video regardless of how the phone is held.
+    private fun encoderRotationDegrees(): Int {
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val rotation = if (android.os.Build.VERSION.SDK_INT >= 30)
+            context.display?.rotation ?: Surface.ROTATION_0
+        else
+            @Suppress("DEPRECATION") wm.defaultDisplay.rotation
+        val sensorOrientation = cameraManager
+            ?.getCameraCharacteristics(getCameraId(cameraFacing) ?: "0")
+            ?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+        // Compensate for sensor orientation + display rotation so output is always upright.
+        val displayDegrees = when (rotation) {
+            Surface.ROTATION_90  -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else                 -> 0
+        }
+        return (sensorOrientation - displayDegrees + 360) % 360
+    }
+
     private fun setupEncoder(
         codec: String, width: Int, height: Int,
         bitrateBps: Int, keyframeMs: Int,
@@ -243,7 +266,12 @@ class VortexCamPlugin(
         return try {
             val mime = if (codec == "hevc") MediaFormat.MIMETYPE_VIDEO_HEVC
                        else MediaFormat.MIMETYPE_VIDEO_AVC
-            val fmt = MediaFormat.createVideoFormat(mime, width, height).apply {
+            val rotation = encoderRotationDegrees()
+            // Swap width/height for portrait (90° or 270°) so the encoded
+            // resolution matches the upright frame dimensions.
+            val encW = if (rotation == 90 || rotation == 270) height else width
+            val encH = if (rotation == 90 || rotation == 270) width  else height
+            val fmt = MediaFormat.createVideoFormat(mime, encW, encH).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE,         bitrateBps)
                 setInteger(MediaFormat.KEY_FRAME_RATE,       30)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, keyframeMs / 1000)
@@ -253,6 +281,8 @@ class VortexCamPlugin(
                 setInteger(MediaFormat.KEY_OPERATING_RATE,   120)
                 if (android.os.Build.VERSION.SDK_INT >= 30)
                     setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                if (rotation != 0)
+                    setInteger(MediaFormat.KEY_ROTATION, rotation)
             }
             encoder = MediaCodec.createEncoderByType(mime)
             encoder!!.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
