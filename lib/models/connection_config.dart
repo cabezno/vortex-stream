@@ -112,6 +112,23 @@ class ConnectionConfig {
   ];
 
   static ConnectionConfig? tryParse(String raw) {
+    // Plain srt:// URL — emitted by VortexEngine SRT QR codes
+    final trimmed = raw.trim();
+    if (trimmed.startsWith('srt://')) {
+      try {
+        final uri  = Uri.parse(trimmed);
+        final host = uri.host;
+        final port = uri.hasPort ? uri.port : 9000;
+        if (host.isNotEmpty) {
+          return ConnectionConfig(
+            host: host,
+            srt:  SrtConfig(host: host, port: port),
+          );
+        }
+      } catch (_) {}
+      return null;
+    }
+
     try {
       final j = jsonDecode(raw);
       if (j is! Map || j['app'] != 'vortexcam') return null;
