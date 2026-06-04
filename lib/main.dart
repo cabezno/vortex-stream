@@ -375,16 +375,21 @@ class _HomePageState extends State<_HomePage> {
     final srtCfg = cfg.srt;
     if (srtCfg == null) { _log('Sin config SRT'); return; }
 
-    _log('SRT: iniciando plugin nativo...');
     final srt = context.read<SrtConnectionService>();
     srt.configure(
-      width:          cfg.video.width,
-      height:         cfg.video.height,
+      width:            cfg.video.width,
+      height:           cfg.video.height,
       targetBitrateBps: cfg.video.maxKbps * 1000,
-      srtLatencyMs:   srtCfg.latencyMs,
+      srtLatencyMs:     srtCfg.latencyMs,
     );
 
     try {
+      // Open camera first — encoder needs the camera surface to get frames.
+      _log('SRT: iniciando cámara...');
+      await srt.startCamera(frontCamera: _frontCam);
+      _nativeTexId = srt.textureId;
+
+      _log('SRT: conectando a ${srtCfg.host}:${srtCfg.port}...');
       await srt.connectTo(srtCfg.host, port: srtCfg.port);
       setState(() { _live = true; });
       _log('SRT conectado → ${srtCfg.host}:${srtCfg.port}');

@@ -39,6 +39,8 @@ class SrtConnectionService extends ChangeNotifier {
   int    _keyframeIntervalS = 2;
   int    _srtLatencyMs     = 80;       // LAN-optimized buffer
 
+  int?     _textureId;
+
   SrtState get state          => _state;
   bool     get isStreaming     => _state == SrtState.streaming;
   String   get engineIp        => _engineIp;
@@ -49,6 +51,22 @@ class SrtConnectionService extends ChangeNotifier {
   bool     get isOnAir         => _isOnAir;
   int      get width           => _width;
   int      get height          => _height;
+  int?     get textureId       => _textureId;
+
+  Future<void> startCamera({bool frontCamera = false}) async {
+    try {
+      final result = await _channel.invokeMethod<Map>('startCamera', {
+        'facing': frontCamera ? 'front' : 'back',
+      });
+      _textureId = result?['textureId'] as int?;
+      notifyListeners();
+    } catch (e) {
+      _state    = SrtState.error;
+      _errorMsg = 'Camera failed: $e';
+      notifyListeners();
+      rethrow;
+    }
+  }
 
   // Configure video parameters before connecting
   void configure({
