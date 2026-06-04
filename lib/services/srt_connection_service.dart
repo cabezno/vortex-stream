@@ -124,12 +124,13 @@ class SrtConnectionService extends ChangeNotifier {
       'bitrateBps':      _targetBitrateBps,
       'keyframeMs':      _keyframeIntervalS * 1000,
       'srtLatencyMs':    _srtLatencyMs,
-      // H.265 low-latency encoder params
-      'codec':           'hevc',   // MediaCodec HEVC (H.265)
-      'lowLatency':      true,     // KEY_LOW_LATENCY = 1
-      'bitrateMode':     'cbr',    // BITRATE_MODE_CBR
-      'priority':        0,        // KEY_PRIORITY = 0 (realtime)
-      'operatingRate':   120,      // KEY_OPERATING_RATE hint
+      // H.264 — VortexEngine SRT demuxer handles 0x1B (H.264) only.
+      // H.265 (0x24) is silently discarded by the MPEG-TS parser.
+      'codec':           'h264',
+      'lowLatency':      true,
+      'bitrateMode':     'cbr',
+      'priority':        0,
+      'operatingRate':   120,
     });
 
     _state = SrtState.streaming;
