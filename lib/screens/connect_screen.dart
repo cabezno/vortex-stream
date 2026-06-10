@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../services/connection_service.dart';
 import '../services/srt_connection_service.dart';
 import '../services/camera_service.dart';
+import '../widgets/samba_logo.dart';
 
 // =============================================================================
 // ConnectScreen — scan pairing QR or enter engine IP manually, then connect
@@ -59,7 +60,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     );
     if (raw == null || raw.isEmpty) return;
 
-    // Parse VortexCam pairing payload:
+    // Parse Samba Air pairing payload:
     // {"app":"vortexcam","host":"...","whip":{"url":"http://ip:8080/whip/"},"video":{...}}
     try {
       final j = jsonDecode(raw);
@@ -75,7 +76,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
         }
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('Paired with ${j['host'] ?? 'VortexEngine'}')));
+              content: Text('Paired with ${j['host'] ?? 'SAMBA'}')));
         }
         return;
       }
@@ -93,7 +94,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
     } else {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('QR not recognised as a VortexCam code')));
+            const SnackBar(content: Text('QR not recognised as a Samba Air code')));
       }
     }
   }
@@ -161,14 +162,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
             children: [
               // Header
               Row(children: [
-                Container(
-                  width: 8, height: 8,
-                  decoration: const BoxDecoration(
-                    color: Color(0xFF00BBDD), shape: BoxShape.circle,
-                  ),
-                ),
+                const SambaLogo(state: SambaLogoState.idle, size: 38),
                 const SizedBox(width: 10),
-                const Text('VortexCam',
+                const Text('Samba Air',
                     style: TextStyle(color: Colors.white, fontSize: 22,
                         fontWeight: FontWeight.w600)),
                 const Spacer(),
@@ -185,7 +181,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                 ),
               ]),
               const SizedBox(height: 4),
-              const Text('Connect to VortexEngine',
+              const Text('Connect to SAMBA',
                   style: TextStyle(color: Colors.white54, fontSize: 13)),
               const SizedBox(height: 32),
 
@@ -264,7 +260,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
 
               _field('Source ID', _idCtrl,
                   hint: 'cam1',
-                  helper: 'Must match source slot in VortexEngine'),
+                  helper: 'Must match source slot in SAMBA'),
               const SizedBox(height: 24),
               ], // end if (_transport == 'whip')
 
@@ -307,7 +303,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
               const Spacer(),
               const Center(
                 child: Text(
-                  'Make sure VortexEngine is running on the same network',
+                  'Make sure SAMBA is running on the same network',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Colors.white24, fontSize: 11),
                 ),
@@ -411,7 +407,7 @@ class _QRScanPageState extends State<_QRScanPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Scan VortexEngine QR'),
+        title: const Text('Scan SAMBA QR'),
         backgroundColor: Colors.black,
         foregroundColor: Colors.white,
       ),

@@ -4,6 +4,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:provider/provider.dart';
 import '../services/connection_service.dart';
 import '../services/camera_service.dart';
+import '../widgets/samba_logo.dart';
 
 // =============================================================================
 // CameraScreen — live camera preview + controls
@@ -106,23 +107,7 @@ class _CameraScreenState extends State<CameraScreen> {
 
   // ---- ON AIR badge ----
   Widget _onAirBadge() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: Colors.red,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(width: 8, height: 8,
-              decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle)),
-          const SizedBox(width: 6),
-          const Text('ON AIR', style: TextStyle(color: Colors.white, fontSize: 12,
-              fontWeight: FontWeight.w800, letterSpacing: 1)),
-        ],
-      ),
-    );
+    return const SambaLogo(state: SambaLogoState.streaming, size: 56);
   }
 
   // ---- Status bar (latency, resolution) ----
