@@ -1,13 +1,14 @@
 // =============================================================================
-// VortexCam v0.5.0 — Multi-transport camera app for VortexEngine
+// Samba Air v0.6.0 — Multi-transport camera app for SAMBA
 //
 // Transportes:
+//   SBL   — H.264, protocolo nativo SAMBA, máxima prioridad LAN.
 //   WHIP  — WebRTC/H.264, funciona en LAN e internet. Engine: WHIPServer.
 //   SRT   — H.265 HW, LAN solo, máxima calidad, mínima latencia.
 //   RTMP  — H.264, compatible con cualquier servidor, LAN o internet.
 //
-// Pairing: escanear QR de VortexEngine → auto-selecciona transporte óptimo.
-// Preview: RTCVideoView (WHIP) o Texture nativa (SRT/RTMP).
+// Pairing: escanear QR de SAMBA → auto-selecciona transporte óptimo.
+// Preview: RTCVideoView (WHIP) o Texture nativa (SRT/RTMP/SBL).
 // Tally:   pantalla pulsa roja cuando la fuente está al aire (ON AIR).
 // =============================================================================
 import 'dart:async';
@@ -25,26 +26,50 @@ import 'services/connection_service.dart';
 import 'services/srt_connection_service.dart';
 import 'services/rtmp_connection_service.dart';
 import 'services/omt_connection_service.dart';
+import 'services/sbl_connection_service.dart';
 import 'services/camera_service.dart';
+import 'services/log_service.dart';
 
-void main() => runApp(
-  MultiProvider(
-    providers: [
-      ChangeNotifierProvider(create: (_) => CameraService()),
-      ChangeNotifierProvider(create: (_) => ConnectionService()),
-      ChangeNotifierProvider(create: (_) => SrtConnectionService()),
-      ChangeNotifierProvider(create: (_) => RtmpConnectionService()),
-      ChangeNotifierProvider(create: (_) => OmtConnectionService()),
-    ],
-    child: const VortexCamApp(),
-  ),
-);
+void main() {
+  // runZonedGuarded + FlutterError.onError capture BOTH framework errors and any
+  // uncaught async error, route them to the on-device log, and ship that log to
+  // the PC — so a crash that closes the app still leaves its trail for analysis.
+  runZonedGuarded(() async {
+    WidgetsFlutterBinding.ensureInitialized();
+    await LogService.instance.init();
 
-class VortexCamApp extends StatelessWidget {
-  const VortexCamApp({super.key});
+    final prev = FlutterError.onError;
+    FlutterError.onError = (details) {
+      prev?.call(details);
+      LogService.instance.add('[FlutterError] ${details.exceptionAsString()}');
+      LogService.instance.shipToPc(reason: 'flutter_error');
+    };
+
+    runApp(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider(create: (_) => CameraService()),
+          ChangeNotifierProvider(create: (_) => ConnectionService()),
+          ChangeNotifierProvider(create: (_) => SrtConnectionService()),
+          ChangeNotifierProvider(create: (_) => RtmpConnectionService()),
+          ChangeNotifierProvider(create: (_) => OmtConnectionService()),
+          ChangeNotifierProvider(create: (_) => SblConnectionService()),
+        ],
+        child: const SambaAirApp(),
+      ),
+    );
+  }, (error, stack) {
+    LogService.instance.add('[UNCAUGHT] $error');
+    LogService.instance.add(stack.toString());
+    LogService.instance.shipToPc(reason: 'crash');
+  });
+}
+
+class SambaAirApp extends StatelessWidget {
+  const SambaAirApp({super.key});
   @override
   Widget build(BuildContext context) => MaterialApp(
-    title: 'VortexCam',
+    title: 'Samba Air',
     debugShowCheckedModeBanner: false,
     theme: ThemeData.dark(useMaterial3: true).copyWith(
       colorScheme: const ColorScheme.dark(primary: Color(0xFF00BBDD)),
@@ -64,7 +89,7 @@ class _HomePage extends StatefulWidget {
   State<_HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<_HomePage> {
+class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   ConnectionConfig? _config;
   Transport         _transport = Transport.whip;
   bool              _frontCam  = false;
@@ -85,16 +110,28 @@ class _HomePageState extends State<_HomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _renderer.initialize();
     _loadSaved();
-    _log('VortexCam v0.5.0 iniciado');
+    _log('Samba Air v0.6.0 iniciado');
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _renderer.dispose();
     _deviceCtrl.dispose();
     super.dispose();
+  }
+
+  // Ship the log to the PC when the app is backgrounded or closed, so the data
+  // survives even if the user swipes the app away or Android kills it.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      LogService.instance.shipToPc(reason: 'lifecycle_${state.name}');
+    }
   }
 
   void _log(String m) {
@@ -102,8 +139,10 @@ class _HomePageState extends State<_HomePage> {
     final t = '${n.hour.toString().padLeft(2,'0')}:'
               '${n.minute.toString().padLeft(2,'0')}:'
               '${n.second.toString().padLeft(2,'0')}';
-    debugPrint('VCAM [$t] $m');
-    if (mounted) setState(() => _logs.insert(0, '[$t] $m'));
+    final line = '[$t] $m';
+    debugPrint('[SambaAir] $line');
+    LogService.instance.add(line);
+    if (mounted) setState(() => _logs.insert(0, line));
   }
 
   Future<void> _loadSaved() async {
@@ -123,6 +162,7 @@ class _HomePageState extends State<_HomePage> {
     Transport.srt  => 'SRT',
     Transport.rtmp => 'RTMP',
     Transport.omt  => 'OMT',
+    Transport.sbl  => 'SBL',
   };
 
   static Color colorFor(Transport t) => switch (t) {
@@ -130,6 +170,7 @@ class _HomePageState extends State<_HomePage> {
     Transport.srt  => const Color(0xFF34D399),
     Transport.rtmp => const Color(0xFFF59E0B),
     Transport.omt  => const Color(0xFFB57BFF),
+    Transport.sbl  => const Color(0xFF7C3AED),
   };
 
   String get _transportLabel => labelFor(_transport);
@@ -147,12 +188,13 @@ class _HomePageState extends State<_HomePage> {
     if (raw == null) return;
     final cfg = ConnectionConfig.tryParse(raw);
     if (cfg == null) {
-      _log('QR no reconocido como VortexCam'); return;
+      _log('QR no reconocido como Samba Air'); return;
     }
     setState(() {
       _config    = cfg;
       _transport = cfg.preferredTransport;
     });
+    LogService.instance.configure(host: cfg.host, device: _deviceCtrl.text.trim());
 
     // Network layer: if the QR includes WiFi credentials (PC hotspot active),
     // connect to that network automatically before the user taps Go Live.
@@ -175,7 +217,7 @@ class _HomePageState extends State<_HomePage> {
       final ok = await _nativeChannel.invokeMethod<bool>('connectWifi', {
         'ssid':     wifi.ssid,
         'password': wifi.password,
-      });
+      }).timeout(const Duration(seconds: 20));
       if (ok == true) {
         setState(() { _wifiStatus = '✓ Conectado a "${wifi.ssid}"'; });
         _log('WiFi: conectado a "${wifi.ssid}"');
@@ -251,6 +293,7 @@ class _HomePageState extends State<_HomePage> {
       t   = Transport.whip;
     }
     setState(() { _config = cfg; _transport = t; });
+    LogService.instance.configure(host: cfg.host, device: _deviceCtrl.text.trim());
     _log('Manual: $proto → $url');
   }
 
@@ -276,21 +319,37 @@ class _HomePageState extends State<_HomePage> {
     setState(() => _connecting = true);
     try {
       if (!(await Permission.camera.request()).isGranted) {
-        _log('Permiso denegado'); return;
+        _log('Permiso de cámara denegado'); return;
       }
       await Permission.microphone.request();
       await _saveName();
 
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-      switch (_transport) {
-        case Transport.whip: await _connectWhip(cfg);
-        case Transport.srt:  await _connectSrt(cfg);
-        case Transport.rtmp: await _connectRtmp(cfg);
-        case Transport.omt:  await _connectOmt(cfg);
-      }
+      // Master watchdog. No matter which transport await stalls (camera HAL,
+      // WiFi join, native encoder, ICE), this releases the "connecting" state so
+      // the UI never freezes on the spinner — the user gets an error and can
+      // retry WITHOUT killing the app (the original bug).
+      await Future(() async {
+        switch (_transport) {
+          case Transport.whip: await _connectWhip(cfg);
+          case Transport.srt:  await _connectSrt(cfg);
+          case Transport.rtmp: await _connectRtmp(cfg);
+          case Transport.omt:  await _connectOmt(cfg);
+          case Transport.sbl:  await _connectSbl(cfg);
+        }
+      }).timeout(const Duration(seconds: 40));
+    } on TimeoutException {
+      _log('Tiempo de espera agotado al conectar ($_transportLabel) — cancelado');
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } catch (e) {
+      _log('Error al conectar: $e');
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     } finally {
       if (mounted) setState(() => _connecting = false);
+      // Send the connection trail to the PC after every attempt (success or not)
+      // so a failed/hung connect is analysable locally.
+      LogService.instance.shipToPc(reason: _live ? 'connected' : 'connect_failed');
     }
   }
 
@@ -349,7 +408,7 @@ class _HomePageState extends State<_HomePage> {
       height:  cfg.video.height,
       fps:     cfg.video.fps,
       quality: omtCfg?.quality ?? 2,
-      name:    _deviceCtrl.text.trim().isEmpty ? 'VortexCam' : _deviceCtrl.text.trim(),
+      name:    _deviceCtrl.text.trim().isEmpty ? 'SambaAir' : _deviceCtrl.text.trim(),
     );
 
     try {
@@ -437,6 +496,38 @@ class _HomePageState extends State<_HomePage> {
     }
   }
 
+  // -----------------------------------------------------------------------
+  // SBL — Samba Broadcast Link (protocolo nativo SAMBA, UDP, H.264)
+  // -----------------------------------------------------------------------
+  Future<void> _connectSbl(ConnectionConfig cfg) async {
+    final sblCfg = cfg.sbl;
+    if (sblCfg == null) { _log('Sin config SBL'); return; }
+    final sbl = context.read<SblConnectionService>();
+    await sbl.configure(
+      width:            cfg.video.width,
+      height:           cfg.video.height,
+      targetBitrateBps: cfg.video.maxKbps * 1000,
+    );
+    try {
+      await sbl.startCamera(frontCamera: _frontCam);
+      _nativeTexId = sbl.textureId;
+      await sbl.connect(
+        sblCfg.host,
+        port:       sblCfg.port,
+        sourceName: _deviceCtrl.text.trim().isEmpty ? 'SambaAir' : _deviceCtrl.text.trim(),
+      );
+      setState(() { _live = true; });
+      _log('SBL conectado → ${sblCfg.host}:${sblCfg.port}');
+      Timer.periodic(const Duration(seconds: 2), (t) {
+        if (!_live) { t.cancel(); return; }
+        if (mounted) setState(() {});
+      });
+    } catch (e) {
+      _log('SBL error: $e');
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
+  }
+
   // ---- Disconnect ----
   Future<void> _disconnect() async {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -455,8 +546,13 @@ class _HomePageState extends State<_HomePage> {
         _nativeTexId = null;
       case Transport.omt:
         await context.read<OmtConnectionService>().stop();
+      case Transport.sbl:
+        await context.read<SblConnectionService>().stop();
+        _nativeTexId = null;
     }
     _log('Desconectado');
+    // Camera/connection closed → push the session log to the PC for analysis.
+    LogService.instance.shipToPc(reason: 'disconnect');
   }
 
   // ---- Flip & torch ----
@@ -473,6 +569,8 @@ class _HomePageState extends State<_HomePage> {
         await context.read<RtmpConnectionService>().flipCamera();
       case Transport.omt:
         break; // camera flip handled internally by OmtStreamPlugin
+      case Transport.sbl:
+        break;
     }
   }
 
@@ -490,6 +588,8 @@ class _HomePageState extends State<_HomePage> {
         await context.read<RtmpConnectionService>().setTorch(_torchOn);
       case Transport.omt:
         break; // torch not yet wired for OMT
+      case Transport.sbl:
+        break;
     }
   }
 
@@ -507,7 +607,7 @@ class _HomePageState extends State<_HomePage> {
     final configured = _config != null;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('VortexCam'),
+        title: const Text('Samba Air'),
         actions: [
           IconButton(tooltip: 'Registro', icon: const Icon(Icons.article_outlined), onPressed: _showLogs),
         ],
@@ -622,6 +722,7 @@ class _HomePageState extends State<_HomePage> {
   List<Transport> get _transportOptions {
     if (_config == null) return Transport.values;
     return [
+      if (_config!.hasSbl)  Transport.sbl,
       if (_config!.hasOmt)  Transport.omt,
       if (_config!.hasSrt)  Transport.srt,
       if (_config!.hasWhip) Transport.whip,
@@ -667,6 +768,7 @@ class _HomePageState extends State<_HomePage> {
     children: const [
       Divider(),
       SizedBox(height: 4),
+      _LegendRow(color: Color(0xFF7C3AED), label: 'SBL',  desc: 'LAN, H.264, protocolo nativo SAMBA'),
       _LegendRow(color: Color(0xFFB57BFF), label: 'OMT',  desc: 'LAN, VMX 4:2:2, ~16ms, máxima calidad'),
       _LegendRow(color: Color(0xFF34D399), label: 'SRT',  desc: 'LAN, H.265, baja latencia'),
       _LegendRow(color: Color(0xFF00BBDD), label: 'WHIP', desc: 'LAN + internet, H.264, WebRTC'),
@@ -701,6 +803,10 @@ class _HomePageState extends State<_HomePage> {
         final omt = context.watch<OmtConnectionService>();
         bitrate = omt.mbpsSent;
         onAir   = omt.connected;
+      case Transport.sbl:
+        final sbl = context.watch<SblConnectionService>();
+        bitrate = sbl.mbpsSent;
+        onAir   = sbl.isOnAir;
     }
 
     Widget preview;
@@ -713,6 +819,7 @@ class _HomePageState extends State<_HomePage> {
         );
       case Transport.srt:
       case Transport.rtmp:
+      case Transport.sbl:
         final texId = _nativeTexId;
         preview = texId != null
             ? Texture(textureId: texId)

@@ -20,7 +20,7 @@ import 'dart:convert';
 //   whip/srt/rtmp = TRANSPORT layer — how to send video (can coexist, user/auto picks one)
 // =============================================================================
 
-enum Transport { whip, srt, rtmp, omt }
+enum Transport { whip, srt, rtmp, omt, sbl }
 
 /// Network layer — credentials for the PC's WiFi hotspot.
 /// Present only when VortexEngine is running its own hotspot.
@@ -29,6 +29,13 @@ class WifiConfig {
   final String ssid;
   final String password;
   const WifiConfig({required this.ssid, required this.password});
+}
+
+class SblConfig {
+  final String host;
+  final int    port;       // default 8890
+  final String sourceName;
+  const SblConfig({required this.host, this.port = 8890, this.sourceName = 'SambaAir'});
 }
 
 class OmtConfig {
@@ -76,6 +83,7 @@ class ConnectionConfig {
   final SrtConfig?  srt;
   final RtmpConfig? rtmp;
   final OmtConfig?  omt;
+  final SblConfig?  sbl;
   final VideoConfig video;
 
   const ConnectionConfig({
@@ -85,11 +93,13 @@ class ConnectionConfig {
     this.srt,
     this.rtmp,
     this.omt,
+    this.sbl,
     this.video = const VideoConfig(),
   });
 
-  /// Returns the preferred transport: OMT (LAN) > SRT > WHIP > RTMP
+  /// Returns the preferred transport: SBL > OMT > SRT > WHIP > RTMP
   Transport get preferredTransport {
+    if (sbl  != null) return Transport.sbl;
     if (omt  != null) return Transport.omt;
     if (srt  != null) return Transport.srt;
     if (whip != null) return Transport.whip;
@@ -102,9 +112,11 @@ class ConnectionConfig {
   bool get hasWhip => whip != null;
   bool get hasRtmp => rtmp != null;
   bool get hasOmt  => omt  != null;
+  bool get hasSbl  => sbl  != null;
 
   /// Available video transports (network layer not included).
   List<Transport> get availableTransports => [
+    if (hasSbl)  Transport.sbl,
     if (hasOmt)  Transport.omt,
     if (hasSrt)  Transport.srt,
     if (hasWhip) Transport.whip,
@@ -138,6 +150,7 @@ class ConnectionConfig {
       SrtConfig?  srt;
       RtmpConfig? rtmp;
       OmtConfig?  omt;
+      SblConfig?  sbl;
 
       if (j['wifi'] is Map) {
         final ssid = (j['wifi']['ssid'] ?? '').toString();
@@ -165,7 +178,14 @@ class ConnectionConfig {
         omt = OmtConfig(port: port, quality: quality);
       }
 
-      if (whip == null && srt == null && rtmp == null && omt == null) return null;
+      if (j['sbl'] is Map) {
+        final host = (j['sbl']['host'] ?? '').toString();
+        final port = (j['sbl']['port'] as num?)?.toInt() ?? 8890;
+        final name = (j['sbl']['name'] ?? 'SambaAir').toString();
+        if (host.isNotEmpty) sbl = SblConfig(host: host, port: port, sourceName: name);
+      }
+
+      if (whip == null && srt == null && rtmp == null && omt == null && sbl == null) return null;
 
       final v = j['video'] is Map ? j['video'] as Map : <String, dynamic>{};
       final video = VideoConfig(
@@ -177,12 +197,13 @@ class ConnectionConfig {
       );
 
       return ConnectionConfig(
-        host:  (j['host'] ?? 'VortexEngine').toString(),
+        host:  (j['host'] ?? 'SAMBA').toString(),
         wifi:  wifi,
         whip:  whip,
         srt:   srt,
         rtmp:  rtmp,
         omt:   omt,
+        sbl:   sbl,
         video: video,
       );
     } catch (_) {

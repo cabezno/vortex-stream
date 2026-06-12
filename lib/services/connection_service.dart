@@ -95,7 +95,7 @@ class ConnectionService extends ChangeNotifier {
       _state        = ConnectionState.error;
       _errorMessage = e.toString();
       notifyListeners();
-      debugPrint('[VortexCam] Connection failed: $e');
+      debugPrint('[SambaAir] Connection failed: $e');
     }
   }
 
@@ -104,11 +104,35 @@ class ConnectionService extends ChangeNotifier {
     final config = <String, dynamic>{
       'iceServers': [
         {'urls': 'stun:stun.l.google.com:19302'},
+        {'urls': 'stun:stun1.l.google.com:19302'},
+        {'urls': 'stun:stun2.l.google.com:19302'},
+        {'urls': 'stun:stun.cloudflare.com:3478'},
       ],
       'sdpSemantics': 'unified-plan',
     };
 
     _peerConnection = await createPeerConnection(config);
+
+    // Register the ICE-connection handler NOW, before setRemoteDescription kicks
+    // off connectivity checks. On a fast LAN, ICE can reach Connected within
+    // milliseconds of the answer being applied; if the handler is attached after
+    // setRemoteDescription (as it was), that Connected event is missed and the
+    // state never advances → stats/heartbeat never start.
+    _peerConnection!.onIceConnectionState = (state) {
+      debugPrint('[SambaAir] ICE: $state');
+      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
+          state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
+        _state = ConnectionState.connected;
+        notifyListeners();
+        _startStats();
+        _startHeartbeat();
+      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
+                 state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
+        _state        = ConnectionState.error;
+        _errorMessage = 'WebRTC connection lost (ICE $state)';
+        notifyListeners();
+      }
+    };
 
     // CRITICAL: use addTrack(), NOT addTransceiver() with sendEncodings.
     //
@@ -142,7 +166,7 @@ class ConnectionService extends ChangeNotifier {
           await videoSender.setParameters(params);
         }
       } catch (e) {
-        debugPrint('[VortexCam] setParameters failed (non-fatal): $e');
+        debugPrint('[SambaAir] setParameters failed (non-fatal): $e');
       }
     }
 
@@ -159,7 +183,7 @@ class ConnectionService extends ChangeNotifier {
       if (msg.text != null) _handleEngineMessage(msg.text!);
     };
     _controlChannel!.onDataChannelState = (state) {
-      debugPrint('[VortexCam] control channel: $state');
+      debugPrint('[SambaAir] control channel: $state');
     };
 
     // Create SDP offer. Do NOT pass offerToReceive* — those are legacy Plan-B
@@ -179,7 +203,7 @@ class ConnectionService extends ChangeNotifier {
     // can revert our a=sendonly back to a=recvonly. Re-apply _forceSendOnly to
     // the bytes we actually POST so the engine sees sendonly and forwards RTP.
     final offerToSend = _forceSendOnly(localDesc.sdp ?? '');
-    debugPrint('[VortexCam] offer POSTed:\n$offerToSend');
+    debugPrint('[SambaAir] offer POSTed:\n$offerToSend');
 
     // WHIP POST — send offer to VortexEngine
     // Timeout is 30 s: DTLS cert generation on first run can take up to 8 s,
@@ -198,29 +222,13 @@ class ConnectionService extends ChangeNotifier {
       throw Exception('WHIP rejected: HTTP ${response.statusCode} — ${response.body}');
     }
 
-    // Apply SDP answer
+    // Apply SDP answer (the onIceConnectionState handler was already registered
+    // right after createPeerConnection, so a fast LAN connection is not missed).
     await _peerConnection!.setRemoteDescription(
       RTCSessionDescription(response.body, 'answer'),
     );
 
-    // ICE connection state → update UI
-    _peerConnection!.onIceConnectionState = (state) {
-      debugPrint('[VortexCam] ICE: $state');
-      if (state == RTCIceConnectionState.RTCIceConnectionStateConnected ||
-          state == RTCIceConnectionState.RTCIceConnectionStateCompleted) {
-        _state = ConnectionState.connected;
-        notifyListeners();
-        _startStats();
-        _startHeartbeat();
-      } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
-                 state == RTCIceConnectionState.RTCIceConnectionStateDisconnected) {
-        _state        = ConnectionState.error;
-        _errorMessage = 'WebRTC connection lost (ICE $state)';
-        notifyListeners();
-      }
-    };
-
-    debugPrint('[VortexCam] WHIP handshake complete → waiting for ICE...');
+    debugPrint('[SambaAir] WHIP handshake complete → waiting for ICE...');
   }
 
   Future<void> _waitForIceGathering() async {
@@ -247,7 +255,7 @@ class ConnectionService extends ChangeNotifier {
         case 'set_resolution':
           final w = (msg['width']  as num?)?.toInt() ?? 1280;
           final h = (msg['height'] as num?)?.toInt() ?? 720;
-          debugPrint('[VortexCam] engine → set_resolution ${w}x$h');
+          debugPrint('[SambaAir] engine → set_resolution ${w}x$h');
           _cameraService?.applyResolutionFromEngine(w, h);
           break;
 
@@ -339,7 +347,7 @@ class ConnectionService extends ChangeNotifier {
       ).timeout(const Duration(seconds: 3));
     } catch (_) {}
 
-    debugPrint('[VortexCam] Disconnected from engine.');
+    debugPrint('[SambaAir] Disconnected from engine.');
   }
 
   // Inject x-google-{min,max,start}-bitrate into every H264 a=fmtp line.

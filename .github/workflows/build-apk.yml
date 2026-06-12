@@ -1,4 +1,4 @@
-name: Build VortexCam APK
+name: Build Samba Air APK
 
 on:
   push:
@@ -87,6 +87,9 @@ jobs:
               s = s.replace("<application", inject + "    <application", 1)
           if "usesCleartextTraffic" not in s:
               s = s.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
+          # Set app label (flutter create uses the project name as label)
+          import re as _re
+          s = _re.sub(r'android:label="[^"]*"', 'android:label="Samba Air"', s)
           open(man, "w", encoding="utf-8").write(s)
           print("patched manifest")
 
@@ -125,6 +128,9 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
+      - name: Generate launcher icons
+        run: flutter pub run flutter_launcher_icons
+
       # flutter_zxing 1.x bundles ZXing-C++ whose Utf.cpp defines:
       #   #if __cplusplus <= 201703L
       #   using char8_t = uint8_t;   // uint8_t == unsigned char
@@ -161,7 +167,7 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vortexcam-apk
+          name: samba-air-apk
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
 
@@ -169,7 +175,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: VortexCam — Latest Build
+          name: Samba Air — Latest Build
           body: |
             Descargá el APK e instalalo en tu Android.
             Activá "Instalar apps de fuentes desconocidas" en Ajustes si es necesario.

@@ -21,7 +21,7 @@
         xmlns:tools="http://schemas.android.com/tools"/>
 
     <application
-        android:label="VortexCam"
+        android:label="Samba Air"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">

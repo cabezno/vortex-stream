@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
@@ -87,6 +88,10 @@ class CameraService extends ChangeNotifier {
       };
     }
 
+    // Timeout: on some devices the camera HAL can hang indefinitely (another app
+    // holding the camera, an unsupported resolution, a driver stall). Without a
+    // timeout this await never returns and the whole "connecting" flow freezes,
+    // forcing the user to kill the app. Fail loudly instead so the UI recovers.
     _stream = await navigator.mediaDevices.getUserMedia({
       'audio': {
         'echoCancellation': true,
@@ -94,7 +99,11 @@ class CameraService extends ChangeNotifier {
         'autoGainControl':  true,
       },
       'video': videoConstraints,
-    });
+    }).timeout(
+      const Duration(seconds: 12),
+      onTimeout: () => throw TimeoutException(
+          'La cámara no respondió (12s). ¿Otra app la está usando?'),
+    );
     debugPrint('[CameraService] Stream ready: $resolutionLabel'
         ' (engine=${_engineWidth != null})');
   }
