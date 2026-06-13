@@ -22,7 +22,7 @@ class ConnectScreen extends StatefulWidget {
 class _ConnectScreenState extends State<ConnectScreen> {
   final _ipCtrl    = TextEditingController(text: '192.168.137.1'); // hotspot default
   final _portCtrl  = TextEditingController(text: '8080');
-  final _srtPortCtrl = TextEditingController(text: '9000');
+  final _srtPortCtrl = TextEditingController(text: '8890');
   final _nameCtrl  = TextEditingController(text: 'Mobile Cam 1');
   final _idCtrl    = TextEditingController(text: 'cam1');
   bool  _connecting = false;
@@ -114,7 +114,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
       srt.configure(width: 1280, height: 720, targetBitrateBps: 6000000, srtLatencyMs: 80);
       await srt.connectTo(
         _ipCtrl.text.trim(),
-        port: int.tryParse(_srtPortCtrl.text.trim()) ?? 9000,
+        port: int.tryParse(_srtPortCtrl.text.trim()) ?? 8890,
       );
       setState(() => _connecting = false);
       if (srt.state == SrtState.error && mounted) {
@@ -214,7 +214,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   Expanded(
                     flex: 1,
                     child: _field('SRT Port', _srtPortCtrl,
-                        hint: '9000',
+                        hint: '8890',
                         keyboard: TextInputType.number),
                   ),
                 ]),
@@ -228,7 +228,7 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     final srt = context.read<SrtConnectionService>();
                     await srt.discoverAndConnect(
                         fallbackIp: _ipCtrl.text.trim(),
-                        fallbackPort: int.tryParse(_srtPortCtrl.text.trim()) ?? 9000);
+                        fallbackPort: int.tryParse(_srtPortCtrl.text.trim()) ?? 8890);
                   },
                   icon: const Icon(Icons.wifi_find, size: 16),
                   label: const Text('Auto-discover engine (mDNS)',

@@ -116,7 +116,7 @@ class SrtConnectionService extends ChangeNotifier {
   }
 
   // Connect to a specific engine IP:port directly (skip mDNS).
-  Future<void> connectTo(String ip, {int port = 9000}) async {
+  Future<void> connectTo(String ip, {int port = 8890}) async {
     _engineIp   = ip;
     _enginePort = port;
     _errorMsg   = '';

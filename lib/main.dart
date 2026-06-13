@@ -282,7 +282,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     if (proto.contains('SRT')) {
       final parts = url.split(':');
       final ip = parts[0];
-      final port = parts.length > 1 ? int.tryParse(parts[1]) ?? 9000 : 9000;
+      final port = parts.length > 1 ? int.tryParse(parts[1]) ?? 8890 : 8890;
       cfg = ConnectionConfig.fromSrtIp(ip, port: port);
       t   = Transport.srt;
     } else if (proto.contains('RTMP')) {
@@ -298,12 +298,12 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   }
 
   String _urlLabel(String proto) {
-    if (proto.contains('SRT'))  return 'IP:puerto (ej. 192.168.1.2:9000)';
+    if (proto.contains('SRT'))  return 'IP:puerto (ej. 192.168.1.2:8890)';
     if (proto.contains('RTMP')) return 'rtmp://ip/app/clave';
     return 'http://ip:8080/whip/';
   }
   String _urlHint(String proto) {
-    if (proto.contains('SRT'))  return '192.168.137.1:9000';
+    if (proto.contains('SRT'))  return '192.168.137.1:8890';
     if (proto.contains('RTMP')) return 'rtmp://192.168.1.2:1935/live/vortexcam';
     return 'http://192.168.137.1:8080/whip/';
   }
