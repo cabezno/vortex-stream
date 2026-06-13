@@ -26,7 +26,7 @@ class SrtConnectionService extends ChangeNotifier {
 
   SrtState _state       = SrtState.idle;
   String   _engineIp    = '';
-  int      _enginePort  = 9000;
+  int      _enginePort  = 8890;
   String   _errorMsg    = '';
   double   _bitrateMbps = 0.0;
   int      _latencyMs   = 0;
@@ -84,7 +84,7 @@ class SrtConnectionService extends ChangeNotifier {
 
   // Discover engine via mDNS (_srt._udp.local) and start streaming.
   // Falls back to manual IP if discovery times out.
-  Future<void> discoverAndConnect({String? fallbackIp, int fallbackPort = 9000}) async {
+  Future<void> discoverAndConnect({String? fallbackIp, int fallbackPort = 8890}) async {
     _state = SrtState.discovering;
     _errorMsg = '';
     notifyListeners();
@@ -97,7 +97,7 @@ class SrtConnectionService extends ChangeNotifier {
 
       if (discovered != null && discovered['ip'] != null) {
         _engineIp   = discovered['ip'] as String;
-        _enginePort = (discovered['port'] as int?) ?? 9000;
+        _enginePort = (discovered['port'] as int?) ?? 8890;
         debugPrint('[VortexCam SRT] Discovered engine: $_engineIp:$_enginePort');
       } else if (fallbackIp != null) {
         _engineIp   = fallbackIp;

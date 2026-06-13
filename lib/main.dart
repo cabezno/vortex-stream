@@ -563,8 +563,8 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
         final t = context.read<CameraService>().stream?.getVideoTracks().firstOrNull;
         if (t != null) await Helper.switchCamera(t);
       case Transport.srt:
-        await context.read<SrtConnectionService>()
-            .connectTo('', port: 0);  // stub — flip via plugin
+        await const MethodChannel('com.vortex.vortexcam/native')
+            .invokeMethod('flipCamera');
       case Transport.rtmp:
         await context.read<RtmpConnectionService>().flipCamera();
       case Transport.omt:

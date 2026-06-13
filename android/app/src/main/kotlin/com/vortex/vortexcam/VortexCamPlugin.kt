@@ -347,7 +347,7 @@ class VortexCamPlugin(
         val bitrate     = call.argument<Int>("bitrateBps")    ?: 6_000_000
         val keyframeMs  = call.argument<Int>("keyframeMs")    ?: 2000
         val latencyMs   = call.argument<Int>("srtLatencyMs")  ?: 80
-        val codec       = call.argument<String>("codec")      ?: "hevc"
+        val codec       = call.argument<String>("codec")      ?: "h264"
 
         thread(name = "SrtStart") {
             try {

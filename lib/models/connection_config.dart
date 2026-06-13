@@ -130,7 +130,7 @@ class ConnectionConfig {
       try {
         final uri  = Uri.parse(trimmed);
         final host = uri.host;
-        final port = uri.hasPort ? uri.port : 9000;
+        final port = uri.hasPort ? uri.port : 8890;
         if (host.isNotEmpty) {
           return ConnectionConfig(
             host: host,
@@ -163,7 +163,7 @@ class ConnectionConfig {
       }
       if (j['srt'] is Map) {
         final host = (j['srt']['host'] ?? '').toString();
-        final port = (j['srt']['port'] as num?)?.toInt() ?? 9000;
+        final port = (j['srt']['port'] as num?)?.toInt() ?? 8890;
         final lat  = (j['srt']['latencyMs'] as num?)?.toInt() ?? 80;
         if (host.isNotEmpty) srt = SrtConfig(host: host, port: port, latencyMs: lat);
       }
@@ -218,7 +218,7 @@ class ConnectionConfig {
   );
 
   /// Create an SRT config from manual IP entry
-  static ConnectionConfig fromSrtIp(String ip, {int port = 9000}) => ConnectionConfig(
+  static ConnectionConfig fromSrtIp(String ip, {int port = 8890}) => ConnectionConfig(
     host: 'Manual',
     srt:  SrtConfig(host: ip, port: port),
   );
