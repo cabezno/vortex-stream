@@ -37,12 +37,16 @@ import android.util.Log
 import android.util.Size
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioTrack
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.view.TextureRegistry
 import java.io.OutputStream
 import java.net.Socket
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -87,6 +91,12 @@ class VortexCamPlugin(
     private var sblSocket:     java.net.DatagramSocket?    = null
     private var sblRemoteAddr: java.net.InetSocketAddress? = null
     private var sblPktSeq      = 0
+
+    // ---- SBL AudioReturn receiver (engine → phone talkback) ----
+    private var returnDecoder:    MediaCodec?         = null
+    private var returnTrack:      AudioTrack?         = null
+    private val returnRunning    = AtomicBoolean(false)
+    private var returnThread:     Thread?             = null
     private var sblFrameSeq    = 0
 
     // ---- SBL protocol constants ----
@@ -328,6 +338,7 @@ class VortexCamPlugin(
         encoderSurface?.release(); encoderSurface = null
         srtSocket?.close(); srtSocket = null
         rtmpClient?.close(); rtmpClient = null
+        stopReturnAudio()
         sblSocket?.close(); sblSocket = null
         bytesSent.set(0L); bitrateMbps = 0.0; rttMs = 0
         // Restart preview-only session
@@ -513,6 +524,9 @@ class VortexCamPlugin(
                 // Small wait for HelloAck (optional, non-blocking approach)
                 Thread.sleep(200)
                 streaming.set(true)
+                // Start receive loop for incoming packets (AudioReturn from engine)
+                returnRunning.set(true)
+                returnThread = thread(name = "SblReceive") { receiveLoop() }
                 encodeThread = thread(name = "SblEncode") { drainToSbl(width, height) }
                 result.success(null)
                 Log.i(TAG, "SBL streaming → $host:$port ${width}x${height} @${bitrate/1000}kbps")
@@ -784,6 +798,122 @@ class VortexCamPlugin(
         fun close() {
             try { tcpSocket?.close() } catch (_: Exception) {}
             tcpSocket = null
+        }
+    }
+
+    // =========================================================================
+    // SBL AudioReturn — receive Opus packets from engine, decode, play
+    // =========================================================================
+
+    private fun initReturnAudio() {
+        try {
+            // OpusHead CSD-0 (19 bytes, little-endian fields)
+            val opusHead = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN)
+            opusHead.put("OpusHead".toByteArray(Charsets.US_ASCII))  // magic (8)
+            opusHead.put(1.toByte())        // version
+            opusHead.put(1.toByte())        // channels = 1 (mono)
+            opusHead.putShort(3840)         // pre-skip (little-endian)
+            opusHead.putInt(48000)          // input sample rate
+            opusHead.putShort(0)            // output gain
+            opusHead.put(0.toByte())        // channel mapping family
+            opusHead.flip()
+
+            // CSD-2: 80ms seek pre-roll in nanoseconds (little-endian int64)
+            val csd2 = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            csd2.putLong(80_000_000L)
+            csd2.flip()
+
+            val fmt = android.media.MediaFormat.createAudioFormat("audio/opus", 48000, 1)
+            fmt.setByteBuffer("csd-0", opusHead)
+            fmt.setByteBuffer("csd-1", ByteBuffer.allocate(0))
+            fmt.setByteBuffer("csd-2", csd2)
+
+            val dec = MediaCodec.createDecoderByType("audio/opus")
+            dec.configure(fmt, null, null, 0)
+            dec.start()
+            returnDecoder = dec
+
+            val minBuf = AudioTrack.getMinBufferSize(
+                48000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            returnTrack = AudioTrack.Builder()
+                .setAudioAttributes(AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build())
+                .setAudioFormat(AudioFormat.Builder()
+                    .setSampleRate(48000)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .build())
+                .setBufferSizeInBytes(minBuf * 4)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            returnTrack!!.play()
+            Log.i(TAG, "SBL AudioReturn: Opus decoder + AudioTrack ready")
+        } catch (e: Exception) {
+            Log.w(TAG, "SBL AudioReturn init failed: $e")
+            returnDecoder?.release(); returnDecoder = null
+            returnTrack?.release();   returnTrack   = null
+        }
+    }
+
+    private fun stopReturnAudio() {
+        returnRunning.set(false)
+        returnThread?.join(1000); returnThread = null
+        returnDecoder?.stop(); returnDecoder?.release(); returnDecoder = null
+        returnTrack?.stop();   returnTrack?.release();   returnTrack   = null
+    }
+
+    private fun receiveLoop() {
+        val socket = sblSocket ?: return
+        initReturnAudio()
+        socket.soTimeout = 5          // 5ms — allows checking returnRunning
+        val buf = ByteArray(2048)
+        val pkt = java.net.DatagramPacket(buf, buf.size)
+        while (returnRunning.get() && streaming.get()) {
+            try {
+                socket.receive(pkt)
+                processIncoming(buf, pkt.length)
+            } catch (_: java.net.SocketTimeoutException) {
+                // normal — loop continues
+            } catch (e: Exception) {
+                if (returnRunning.get()) Log.w(TAG, "SBL recv: $e")
+            }
+        }
+    }
+
+    private fun processIncoming(buf: ByteArray, len: Int) {
+        if (len < 32) return
+        // SBL magic check: buf[0..2] == "SBL"
+        if (buf[0] != 0x53.toByte() || buf[1] != 0x42.toByte() || buf[2] != 0x4C.toByte()) return
+        val streamId = buf[5].toInt() and 0xFF
+        if (streamId != 3) return   // only AudioReturn (streamID=3)
+        val payloadLen = ((buf[24].toInt() and 0xFF) shl 8) or (buf[25].toInt() and 0xFF)
+        if (payloadLen <= 0 || 32 + payloadLen > len) return
+        decodeAndPlay(buf, 32, payloadLen)
+    }
+
+    private fun decodeAndPlay(buf: ByteArray, offset: Int, length: Int) {
+        val dec   = returnDecoder ?: return
+        val track = returnTrack   ?: return
+        val inputIdx = dec.dequeueInputBuffer(5_000)
+        if (inputIdx >= 0) {
+            val inBuf = dec.getInputBuffer(inputIdx) ?: return
+            inBuf.clear()
+            inBuf.put(buf, offset, length)
+            dec.queueInputBuffer(inputIdx, 0, length, 0, 0)
+        }
+        val info = MediaCodec.BufferInfo()
+        var outIdx = dec.dequeueOutputBuffer(info, 5_000)
+        while (outIdx >= 0) {
+            val outBuf = dec.getOutputBuffer(outIdx)
+            if (outBuf != null && info.size > 0) {
+                val pcm = ShortArray(info.size / 2)
+                outBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(pcm)
+                track.write(pcm, 0, pcm.size)
+            }
+            dec.releaseOutputBuffer(outIdx, false)
+            outIdx = dec.dequeueOutputBuffer(info, 0)
         }
     }
 }
