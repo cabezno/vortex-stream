@@ -96,7 +96,7 @@ class SblConnectionService extends ChangeNotifier {
   // ---- Connect to SAMBA desktop ----
   // FIX B4: pass width/height/bitrateBps to native
   // FIX B8: native handles Hello — Dart no longer sends Hello (avoids double Hello)
-  Future<void> connect(String host, {int port = 8890, String sourceName = 'SambaAir'}) async {
+  Future<void> connect(String host, {int port = 8890, String sourceName = 'ZambaAir'}) async {
     _state    = SblState.connecting;
     _errorMsg = '';
     notifyListeners();

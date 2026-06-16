@@ -541,7 +541,7 @@ class VortexCamPlugin(
     private fun sendSblHello(sourceName: String) {
         // Packet header (32) + Hello payload (105)
         val buf = java.nio.ByteBuffer.allocate(SBL_HEADER_SIZE + 105)
-        buf.order(java.nio.ByteOrder.BIG_ENDIAN)
+        buf.order(java.nio.ByteOrder.LITTLE_ENDIAN)
         // Header
         buf.put(SBL_MAGIC)           // [0..2] magic
         buf.put(SBL_VERSION)         // [3]
@@ -572,7 +572,7 @@ class VortexCamPlugin(
 
     private fun sendSblKeepalive() {
         val buf = java.nio.ByteBuffer.allocate(SBL_HEADER_SIZE)
-        buf.order(java.nio.ByteOrder.BIG_ENDIAN)
+        buf.order(java.nio.ByteOrder.LITTLE_ENDIAN)
         buf.put(SBL_MAGIC); buf.put(SBL_VERSION)
         buf.put(4)  // Keepalive
         buf.put(0)  // streamID
@@ -645,7 +645,7 @@ class VortexCamPlugin(
             val isFirst    = i == 0
             val payloadLen = (if (isFirst) SBL_FRAME_HEADER_SIZE else 0) + chunk.size
             val pkt = java.nio.ByteBuffer.allocate(SBL_HEADER_SIZE + payloadLen)
-            pkt.order(java.nio.ByteOrder.BIG_ENDIAN)
+            pkt.order(java.nio.ByteOrder.LITTLE_ENDIAN)
             // Packet header
             pkt.put(SBL_MAGIC); pkt.put(SBL_VERSION)
             pkt.put(0)  // Data

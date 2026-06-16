@@ -28,7 +28,7 @@ class OmtConnectionService extends ChangeNotifier {
   int  _height  = 1080;
   int  _fps     = 30;
   int  _quality = 2;     // 0=Low 1=Med 2=High
-  String _name  = 'SambaAir';
+  String _name  = 'ZambaAir';
 
   OmtState get state       => _state;
   bool     get isStreaming  => _state == OmtState.streaming;
@@ -40,7 +40,7 @@ class OmtConnectionService extends ChangeNotifier {
 
   void configure({
     int width = 1920, int height = 1080,
-    int fps = 30, int quality = 2, String name = 'SambaAir',
+    int fps = 30, int quality = 2, String name = 'ZambaAir',
   }) {
     _width = width; _height = height;
     _fps = fps; _quality = quality; _name = name;

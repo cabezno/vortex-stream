@@ -35,7 +35,7 @@ class SblConfig {
   final String host;
   final int    port;       // default 8890
   final String sourceName;
-  const SblConfig({required this.host, this.port = 8890, this.sourceName = 'SambaAir'});
+  const SblConfig({required this.host, this.port = 8890, this.sourceName = 'ZambaAir'});
 }
 
 class OmtConfig {
@@ -181,7 +181,7 @@ class ConnectionConfig {
       if (j['sbl'] is Map) {
         final host = (j['sbl']['host'] ?? '').toString();
         final port = (j['sbl']['port'] as num?)?.toInt() ?? 8890;
-        final name = (j['sbl']['name'] ?? 'SambaAir').toString();
+        final name = (j['sbl']['name'] ?? 'ZambaAir').toString();
         if (host.isNotEmpty) sbl = SblConfig(host: host, port: port, sourceName: name);
       }
 
@@ -197,7 +197,7 @@ class ConnectionConfig {
       );
 
       return ConnectionConfig(
-        host:  (j['host'] ?? 'SAMBA').toString(),
+        host:  (j['host'] ?? 'ZAMBA').toString(),
         wifi:  wifi,
         whip:  whip,
         srt:   srt,

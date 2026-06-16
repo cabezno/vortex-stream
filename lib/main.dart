@@ -408,7 +408,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       height:  cfg.video.height,
       fps:     cfg.video.fps,
       quality: omtCfg?.quality ?? 2,
-      name:    _deviceCtrl.text.trim().isEmpty ? 'SambaAir' : _deviceCtrl.text.trim(),
+      name:    _deviceCtrl.text.trim().isEmpty ? 'ZambaAir' : _deviceCtrl.text.trim(),
     );
 
     try {
@@ -514,7 +514,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       await sbl.connect(
         sblCfg.host,
         port:       sblCfg.port,
-        sourceName: _deviceCtrl.text.trim().isEmpty ? 'SambaAir' : _deviceCtrl.text.trim(),
+        sourceName: _deviceCtrl.text.trim().isEmpty ? 'ZambaAir' : _deviceCtrl.text.trim(),
       );
       setState(() { _live = true; });
       _log('SBL conectado → ${sblCfg.host}:${sblCfg.port}');
