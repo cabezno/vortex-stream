@@ -274,8 +274,8 @@ class ConnectionService extends ChangeNotifier {
     final msg = jsonEncode({
       'type':            'capabilities',
       'replaceTrackSafe': true,
-      'maxWidth':         1920,
-      'maxHeight':        1080,
+      'maxWidth':         3840,   // aim for 4K; engine director falls back if unsustainable
+      'maxHeight':        2160,
     });
     try {
       dc.send(RTCDataChannelMessage(msg));

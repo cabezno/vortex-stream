@@ -74,10 +74,15 @@ class CameraService extends ChangeNotifier {
     // (no min) so the camera HAL picks the best resolution it supports.
     final Map<String, dynamic> videoConstraints;
     if (_engineWidth != null && _engineHeight != null) {
+      // Soft constraints: aim for the engine's target and cap at it (so a 1080p
+      // command never yields 4K), but DON'T set a hard 'min' — if the phone
+      // can't reach the target, getUserMedia falls back to its best instead of
+      // failing. The engine's director sees the actual delivered resolution
+      // (via SPS) and settles there. "Max quality with graceful fallback."
       videoConstraints = {
         'facingMode': _facing == CameraFacing.back ? 'environment' : 'user',
-        'width':  {'min': _engineWidth,  'ideal': _engineWidth},
-        'height': {'min': _engineHeight, 'ideal': _engineHeight},
+        'width':  {'ideal': _engineWidth,  'max': _engineWidth},
+        'height': {'ideal': _engineHeight, 'max': _engineHeight},
         'frameRate': {'ideal': 60, 'min': 30},
       };
     } else {
