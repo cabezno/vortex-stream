@@ -503,10 +503,13 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     final sblCfg = cfg.sbl;
     if (sblCfg == null) { _log('Sin config SBL'); return; }
     final sbl = context.read<SblConnectionService>();
+    // SBL on LAN aims for MAXIMUM quality (4K @ 30 Mbps). The native encoder
+    // falls back down a ladder (1080p/720p/540p) if the device can't do 4K, and
+    // RS FEC absorbs packet loss without dropping resolution.
     await sbl.configure(
-      width:            cfg.video.width,
-      height:           cfg.video.height,
-      targetBitrateBps: cfg.video.maxKbps * 1000,
+      width:            3840,
+      height:           2160,
+      targetBitrateBps: 30000000,
     );
     try {
       await sbl.startCamera(frontCamera: _frontCam);

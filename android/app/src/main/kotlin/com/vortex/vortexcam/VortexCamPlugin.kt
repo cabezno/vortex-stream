@@ -289,7 +289,34 @@ class VortexCamPlugin(
         return (sensorOrientation - displayDegrees + 360) % 360
     }
 
+    // Public entry: try the requested resolution, then fall back DOWN a quality
+    // ladder until the device's encoder accepts one. Phones that can't configure
+    // 4K silently settle at the best they support — "max quality with graceful
+    // fallback". Bitrate scales with the resolution that actually starts.
     private fun setupEncoder(
+        codec: String, width: Int, height: Int,
+        bitrateBps: Int, keyframeMs: Int,
+    ): Boolean {
+        val ladder = listOf(
+            Triple(3840, 2160, 30_000_000),
+            Triple(1920, 1080, 16_000_000),
+            Triple(1280,  720,  8_000_000),
+            Triple( 960,  540,  4_000_000),
+        )
+        val attempts = ArrayList<Triple<Int, Int, Int>>()
+        attempts.add(Triple(width, height, bitrateBps))            // requested first
+        for (t in ladder) if (t.first < width) attempts.add(t)     // then strictly smaller tiers
+        for (a in attempts) {
+            if (tryConfigureEncoder(codec, a.first, a.second, a.third, keyframeMs)) {
+                Log.i(TAG, "SBL/encoder @ ${a.first}x${a.second} @${a.third / 1000}kbps")
+                return true
+            }
+            Log.w(TAG, "encoder ${a.first}x${a.second} rejected — falling back")
+        }
+        return false
+    }
+
+    private fun tryConfigureEncoder(
         codec: String, width: Int, height: Int,
         bitrateBps: Int, keyframeMs: Int,
     ): Boolean {
@@ -324,7 +351,10 @@ class VortexCamPlugin(
             startPreviewSession()
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Encoder setup failed: $e")
+            Log.e(TAG, "Encoder setup failed at ${width}x${height}: $e")
+            try { encoder?.release() } catch (_: Exception) {}
+            encoder = null
+            encoderSurface = null
             false
         }
     }
