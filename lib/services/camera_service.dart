@@ -27,6 +27,13 @@ class CameraService extends ChangeNotifier {
   int? _engineWidth;
   int? _engineHeight;
 
+  // Fired after _buildStream() rebuilds _stream (resolution change / camera
+  // flip). ConnectionService listens to this and swaps the new tracks onto its
+  // existing RTP senders via replaceTrack(). WITHOUT this, a rebuild stops the
+  // old video track that feeds WHIP and never re-attaches the new one → the
+  // phone freezes and the engine shows black video.
+  void Function(MediaStream stream)? onStreamRebuilt;
+
   MediaStream?     get stream        => _stream;
   bool             get isInitialized => _initialized;
   CameraFacing     get facing        => _facing;
@@ -106,6 +113,11 @@ class CameraService extends ChangeNotifier {
     );
     debugPrint('[CameraService] Stream ready: $resolutionLabel'
         ' (engine=${_engineWidth != null})');
+
+    // Notify the connection layer so it can replaceTrack() the new tracks onto
+    // the live RTP senders (keeps the WHIP feed alive across a rebuild).
+    final s = _stream;
+    if (s != null) onStreamRebuilt?.call(s);
   }
 
   // ---- Called by ConnectionService when VortexEngine requests a resolution ----

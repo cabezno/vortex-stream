@@ -37,6 +37,12 @@ class ConnectionService extends ChangeNotifier {
   RTCDataChannel?     _controlChannel;
   MediaStream?        _localStream;
   CameraService?      _cameraService;
+
+  // RTP senders kept so we can swap tracks via replaceTrack() when the camera
+  // rebuilds its stream (resolution change / flip) — without renegotiation and
+  // without killing the feed.
+  RTCRtpSender?       _videoSender;
+  RTCRtpSender?       _audioSender;
   Timer?              _statsTimer;
   Timer?              _heartbeatTimer;
 
@@ -84,6 +90,8 @@ class ConnectionService extends ChangeNotifier {
     _sourceName    = sourceName;
     _localStream   = stream;
     _cameraService = cameraService;
+    // When the camera rebuilds its stream, swap the new tracks onto our senders.
+    _cameraService!.onStreamRebuilt = _onStreamRebuilt;
     _state         = ConnectionState.connecting;
     _errorMessage  = '';
     notifyListeners();
@@ -148,7 +156,12 @@ class ConnectionService extends ChangeNotifier {
     RTCRtpSender? videoSender;
     for (final track in stream.getTracks()) {
       final sender = await _peerConnection!.addTrack(track, stream);
-      if (track.kind == 'video') videoSender = sender;
+      if (track.kind == 'video') {
+        videoSender   = sender;
+        _videoSender  = sender;   // kept for replaceTrack() on rebuild
+      } else if (track.kind == 'audio') {
+        _audioSender  = sender;
+      }
     }
 
     // Shape the video encoding AFTER the sender exists (this keeps the ssrc
@@ -247,6 +260,25 @@ class ConnectionService extends ChangeNotifier {
     await completer.future;
   }
 
+  // ---- Camera stream rebuilt → swap tracks onto live senders ----
+  // Called by CameraService after a resolution change or camera flip. We swap
+  // the freshly-captured tracks onto the existing RTP senders via replaceTrack()
+  // so media keeps flowing without an SDP renegotiation. The previous behaviour
+  // (rebuild without replaceTrack) left the senders pointing at stopped tracks →
+  // frozen phone + black video on the engine.
+  Future<void> _onStreamRebuilt(MediaStream stream) async {
+    try {
+      final v = stream.getVideoTracks().firstOrNull;
+      final a = stream.getAudioTracks().firstOrNull;
+      if (v != null && _videoSender != null) await _videoSender!.replaceTrack(v);
+      if (a != null && _audioSender != null) await _audioSender!.replaceTrack(a);
+      _localStream = stream;
+      debugPrint('[SambaAir] stream rebuilt → tracks replaced on senders');
+    } catch (e) {
+      debugPrint('[SambaAir] replaceTrack on rebuild failed: $e');
+    }
+  }
+
   // ---- Engine → Phone control messages (via data channel) ----
   void _handleEngineMessage(String json) {
     try {
@@ -335,6 +367,9 @@ class ConnectionService extends ChangeNotifier {
     await _peerConnection?.close();
     _peerConnection = null;
     _localStream    = null;
+    _videoSender    = null;
+    _audioSender    = null;
+    _cameraService?.onStreamRebuilt = null;   // detach callback to avoid stale refs
     _cameraService  = null;
     _state          = ConnectionState.disconnected;
     _isOnAir        = false;
