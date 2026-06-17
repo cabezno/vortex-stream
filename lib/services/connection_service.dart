@@ -197,6 +197,9 @@ class ConnectionService extends ChangeNotifier {
     };
     _controlChannel!.onDataChannelState = (state) {
       debugPrint('[SambaAir] control channel: $state');
+      if (state == RTCDataChannelState.RTCDataChannelOpen) {
+        _sendCapabilities();
+      }
     };
 
     // Create SDP offer. Do NOT pass offerToReceive* — those are legacy Plan-B
@@ -258,6 +261,28 @@ class ConnectionService extends ChangeNotifier {
       }
     };
     await completer.future;
+  }
+
+  // ---- Announce capabilities to the engine's resolution "director" ----
+  // replaceTrackSafe=true tells the engine this app can change capture
+  // resolution without freezing (it swaps tracks via replaceTrack). Without
+  // this flag the engine never commands a resolution change. maxWidth/Height is
+  // the ceiling the engine may aim for.
+  void _sendCapabilities() {
+    final dc = _controlChannel;
+    if (dc == null) return;
+    final msg = jsonEncode({
+      'type':            'capabilities',
+      'replaceTrackSafe': true,
+      'maxWidth':         1920,
+      'maxHeight':        1080,
+    });
+    try {
+      dc.send(RTCDataChannelMessage(msg));
+      debugPrint('[SambaAir] capabilities sent → $msg');
+    } catch (e) {
+      debugPrint('[SambaAir] capabilities send failed: $e');
+    }
   }
 
   // ---- Camera stream rebuilt → swap tracks onto live senders ----
