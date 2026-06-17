@@ -271,11 +271,27 @@ class VortexCamPlugin(
     // Returns the rotation angle (0/90/180/270) to apply to the encoder so that
     // VortexEngine receives upright video regardless of how the phone is held.
     private fun encoderRotationDegrees(): Int {
-        val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val rotation = if (android.os.Build.VERSION.SDK_INT >= 30)
-            context.display?.rotation ?: Surface.ROTATION_0
-        else
-            @Suppress("DEPRECATION") wm.defaultDisplay.rotation
+        // `context` is the Application context (non-visual — see registerWith, which
+        // passes activity.applicationContext). On Android 11+ (API 30) both
+        // Context.getDisplay() and WindowManager.defaultDisplay throw
+        // UnsupportedOperationException ("Tried to obtain display from a Context not
+        // associated with one") when called on a non-visual context. That exception
+        // was aborting tryConfigureEncoder() at EVERY resolution, so SRT/SBL/RTMP
+        // failed to start at all (black screen) on Android 11+ — only WHIP, which
+        // uses WebRTC's own encoder, kept working.
+        //
+        // DisplayManager.getDisplay(DEFAULT_DISPLAY) works from ANY context, so it
+        // gives the real rotation without the visual-context restriction. The
+        // try/catch is a final safety net so the encoder can never be blocked by a
+        // rotation query again.
+        val rotation = try {
+            val dm = context.getSystemService(Context.DISPLAY_SERVICE)
+                    as android.hardware.display.DisplayManager
+            dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: Surface.ROTATION_0
+        } catch (e: Exception) {
+            Log.w(TAG, "encoderRotationDegrees: display unavailable (${e.message}) — using ROTATION_0")
+            Surface.ROTATION_0
+        }
         val sensorOrientation = cameraManager
             ?.getCameraCharacteristics(getCameraId(cameraFacing) ?: "0")
             ?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
