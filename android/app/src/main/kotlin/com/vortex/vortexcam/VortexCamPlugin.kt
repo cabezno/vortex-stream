@@ -39,7 +39,9 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.AudioTrack
+import android.media.MediaRecorder
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.view.TextureRegistry
@@ -91,6 +93,15 @@ class VortexCamPlugin(
     private var sblSocket:     java.net.DatagramSocket?    = null
     private var sblRemoteAddr: java.net.InetSocketAddress? = null
     private var sblPktSeq      = 0
+
+    // ---- Mic audio for SRT (mic → AAC encoder → MPEG-TS) ----
+    private var audioEncoder:    MediaCodec?  = null
+    private var audioRecord:     AudioRecord? = null
+    private var audioInThread:   Thread?      = null
+    private var audioOutThread:  Thread?      = null
+    private val audioSampleRate  = 44100
+    private val audioChannels    = 1
+    private val sendLock         = Any()   // serializes SRT socket writes from video + audio threads
 
     // ---- SBL AudioReturn receiver (engine → phone talkback) ----
     private var returnDecoder:    MediaCodec?         = null
@@ -381,6 +392,12 @@ class VortexCamPlugin(
     private fun stopStream() {
         if (!streaming.getAndSet(false)) return
         encodeThread?.join(2000); encodeThread = null
+        audioInThread?.join(1000);  audioInThread  = null
+        audioOutThread?.join(1000); audioOutThread = null
+        try { audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}
+        audioRecord = null
+        try { audioEncoder?.stop(); audioEncoder?.release() } catch (_: Exception) {}
+        audioEncoder = null
         try { encoder?.signalEndOfInputStream() } catch (_: Exception) {}
         try { encoder?.stop(); encoder?.release() } catch (_: Exception) {}
         encoder = null
@@ -394,6 +411,81 @@ class VortexCamPlugin(
         captureSession?.close()
         startPreviewSession()
         Log.i(TAG, "Stream stopped")
+    }
+
+    // ====================================================================
+    // Mic audio — AAC encoder + AudioRecord for SRT transport
+    // ====================================================================
+    @SuppressLint("MissingPermission")
+    private fun setupAudio() {
+        try {
+            val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, audioSampleRate, audioChannels)
+            fmt.setInteger(MediaFormat.KEY_BIT_RATE, 128_000)
+            fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 4096)
+            fmt.setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+            audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
+            audioEncoder!!.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            audioEncoder!!.start()
+
+            val minBuf = AudioRecord.getMinBufferSize(
+                audioSampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC, audioSampleRate,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf * 4)
+            audioRecord!!.startRecording()
+            Log.i(TAG, "Audio: ${audioSampleRate}Hz mono 128kbps AAC")
+        } catch (e: Exception) {
+            Log.e(TAG, "Audio setup failed (stream continues without audio): $e")
+            try { audioRecord?.release() } catch (_: Exception) {}
+            try { audioEncoder?.release() } catch (_: Exception) {}
+            audioRecord = null; audioEncoder = null
+        }
+    }
+
+    private fun startAudioInputThread() {
+        val rec = audioRecord ?: return
+        val enc = audioEncoder ?: return
+        audioInThread = thread(name = "SrtAudioIn") {
+            val pcm = ByteArray(1024 * 2)   // 1024 PCM-16 samples = one AAC frame
+            while (streaming.get()) {
+                val n = rec.read(pcm, 0, pcm.size)
+                if (n <= 0) continue
+                val inIdx = enc.dequeueInputBuffer(10_000)
+                if (inIdx >= 0) {
+                    val inBuf = enc.getInputBuffer(inIdx) ?: continue
+                    inBuf.clear(); inBuf.put(pcm, 0, n)
+                    enc.queueInputBuffer(inIdx, 0, n, System.nanoTime() / 1000, 0)
+                }
+            }
+            val inIdx = enc.dequeueInputBuffer(10_000)
+            if (inIdx >= 0)
+                enc.queueInputBuffer(inIdx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+        }
+    }
+
+    private fun startAudioOutputThread(muxer: TsMuxer, socket: SrtSocket) {
+        val enc = audioEncoder ?: return
+        audioOutThread = thread(name = "SrtAudioOut") {
+            val info = MediaCodec.BufferInfo()
+            while (streaming.get()) {
+                val idx = enc.dequeueOutputBuffer(info, 10_000)
+                when {
+                    idx == MediaCodec.INFO_TRY_AGAIN_LATER      -> continue
+                    idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> continue
+                    idx < 0                                       -> continue
+                }
+                // Skip codec-config frames (CSD-0) — no ADTS needed for those
+                if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                    enc.releaseOutputBuffer(idx, false); continue
+                }
+                val buf = enc.getOutputBuffer(idx)
+                    ?: run { enc.releaseOutputBuffer(idx, false); continue }
+                val pkts = muxer.muxAudio(buf, info, audioSampleRate, audioChannels)
+                for (pkt in pkts) synchronized(sendLock) { socket.send(pkt) }
+                enc.releaseOutputBuffer(idx, false)
+                if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
+            }
+        }
     }
 
     // ====================================================================
@@ -414,6 +506,8 @@ class VortexCamPlugin(
                 if (!setupEncoder(codec, width, height, bitrate, keyframeMs)) {
                     result.error("ENC", "Encoder setup failed", null); return@thread
                 }
+                setupAudio()
+
                 srtSocket = SrtSocket(ip, port, latencyMs)
                 if (!srtSocket!!.connect()) throw Exception("SRT connect to $ip:$port failed")
 
@@ -422,6 +516,8 @@ class VortexCamPlugin(
                 val muxer = TsMuxer(mime)
                 streaming.set(true)
 
+                startAudioInputThread()
+                startAudioOutputThread(muxer, srtSocket!!)
                 encodeThread = thread(name = "SrtEncode") {
                     drainToSrt(muxer)
                 }
@@ -452,7 +548,7 @@ class VortexCamPlugin(
             }
             val pkts = muxer.mux(buf, info)
             for (pkt in pkts) {
-                srtSocket?.send(pkt)
+                synchronized(sendLock) { srtSocket?.send(pkt) }
                 bytesSent.addAndGet(pkt.size.toLong())
             }
             encoder!!.releaseOutputBuffer(idx, false)
@@ -971,12 +1067,38 @@ class VortexCamPlugin(
 // MPEG-TS muxer (H.264 / H.265)
 // =============================================================================
 class TsMuxer(private val mimeType: String) {
-    private val videoPid = 0x100
-    private val pmtPid   = 0x1000
-    private var pktCount = 0
-    private var dts      = 0L
+    private val videoPid      = 0x100
+    private val audioPid      = 0x101
+    private val pmtPid        = 0x1000
+    private var pktCount      = 0
+    private var audioPktCount = 0
+    private var dts           = 0L
+    private var audioDts      = 0L
 
     fun setFormat(fmt: MediaFormat) { /* SPS/PPS embedded in stream */ }
+
+    // Mux one AAC frame: prepends ADTS header, builds audio PES, fragments into TS packets
+    fun muxAudio(buf: ByteBuffer, info: MediaCodec.BufferInfo, sampleRate: Int, channels: Int): List<ByteArray> {
+        val rawAac = ByteArray(info.size).also { buf.position(info.offset); buf.get(it) }
+        val adts   = buildAdtsHeader(rawAac.size, sampleRate, channels) + rawAac
+        val pes    = buildAudioPES(adts, audioDts)
+        val pkts   = mutableListOf<ByteArray>()
+        var off = 0; var first = true
+        while (off < pes.size) {
+            val pkt = ByteArray(188)
+            pkt[0] = 0x47
+            val pusi = if (first) 0x40 else 0x00
+            pkt[1] = (pusi or ((audioPid shr 8) and 0x1F)).toByte()
+            pkt[2] = (audioPid and 0xFF).toByte()
+            pkt[3] = (0x10 or (audioPktCount++ and 0x0F)).toByte()
+            val len = minOf(184, pes.size - off)
+            pes.copyInto(pkt, 4, off, off + len)
+            if (len < 184) pkt.fill(0xFF.toByte(), 4 + len)
+            pkts.add(pkt); off += len; first = false
+        }
+        audioDts += 1024L * 90000L / sampleRate   // 1024 samples/AAC frame at 90 kHz clock
+        return pkts
+    }
 
     fun mux(buf: ByteBuffer, info: MediaCodec.BufferInfo): List<ByteArray> {
         val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
@@ -1015,6 +1137,39 @@ class TsMuxer(private val mimeType: String) {
         hdr[13] = (0x01 or ((pts and 0x7F).toInt() shl 1)).toByte()
         return hdr + data
     }
+    private fun buildAudioPES(data: ByteArray, pts: Long): ByteArray {
+        val hdr = ByteArray(14)
+        hdr[0] = 0; hdr[1] = 0; hdr[2] = 1; hdr[3] = 0xC0.toByte()  // audio stream 0
+        val pesLen = data.size + 8
+        hdr[4] = ((pesLen shr 8) and 0xFF).toByte()
+        hdr[5] = (pesLen and 0xFF).toByte()
+        hdr[6] = 0x80.toByte(); hdr[7] = 0x80.toByte(); hdr[8] = 5
+        hdr[9]  = (0x21 or ((pts shr 29) and 0x0E).toInt()).toByte()
+        hdr[10] = ((pts shr 22) and 0xFF).toByte()
+        hdr[11] = (0x01 or ((pts shr 14) and 0xFE).toInt()).toByte()
+        hdr[12] = ((pts shr 7) and 0xFF).toByte()
+        hdr[13] = (0x01 or ((pts and 0x7F).toInt() shl 1)).toByte()
+        return hdr + data
+    }
+
+    private fun buildAdtsHeader(dataLen: Int, sampleRate: Int, channels: Int): ByteArray {
+        val freqIdx = when (sampleRate) {
+            96000 -> 0; 88200 -> 1; 64000 -> 2; 48000 -> 3
+            44100 -> 4; 32000 -> 5; 24000 -> 6; 22050 -> 7
+            16000 -> 8; 12000 -> 9; 11025 -> 10; else -> 4
+        }
+        val frameLen = 7 + dataLen
+        return byteArrayOf(
+            0xFF.toByte(),
+            0xF1.toByte(),   // MPEG-4, no CRC
+            ((1 shl 6) or (freqIdx shl 2) or (channels shr 2)).toByte(),
+            (((channels and 3) shl 6) or ((frameLen shr 11) and 0x03)).toByte(),
+            ((frameLen shr 3) and 0xFF).toByte(),
+            (((frameLen and 7) shl 5) or 0x1F).toByte(),
+            0xFC.toByte()    // buffer_fullness=0x7FF (VBR), num_raw_blocks=0
+        )
+    }
+
     private fun buildPAT(): ByteArray {
         val p = ByteArray(188).also { it.fill(0xFF.toByte()) }
         p[0]=0x47; p[1]=0x40; p[2]=0; p[3]=0x10; p[4]=0
@@ -1029,12 +1184,17 @@ class TsMuxer(private val mimeType: String) {
         val p = ByteArray(188).also { it.fill(0xFF.toByte()) }
         p[0]=0x47; p[1]=(0x40 or ((pmtPid shr 8) and 0x1F)).toByte()
         p[2]=(pmtPid and 0xFF).toByte(); p[3]=0x10; p[4]=0
-        p[5]=2; p[6]=0xB0.toByte(); p[7]=0x12
+        // section_length=23 (was 18): +5 bytes for audio stream entry
+        p[5]=2; p[6]=0xB0.toByte(); p[7]=0x17
         p[8]=0; p[9]=1; p[10]=0xC1.toByte(); p[11]=0; p[12]=0
         p[13]=0xE1.toByte(); p[14]=0; p[15]=0xF0.toByte(); p[16]=0
+        // Video stream: PID=0x100
         val streamType = if (mimeType == MediaFormat.MIMETYPE_VIDEO_HEVC) 0x24 else 0x1B
-        p[17]=streamType.toByte(); p[18]=0xE1.toByte(); p[19]=0
+        p[17]=streamType.toByte(); p[18]=0xE1.toByte(); p[19]=0x00
         p[20]=0xF0.toByte(); p[21]=0
+        // Audio stream: type=0x0F (AAC-ADTS), PID=0x101
+        p[22]=0x0F.toByte(); p[23]=0xE1.toByte(); p[24]=0x01
+        p[25]=0xF0.toByte(); p[26]=0
         return p
     }
 }
