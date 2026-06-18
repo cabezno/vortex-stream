@@ -340,10 +340,13 @@ class VortexCamPlugin(
             val mime = if (codec == "hevc") MediaFormat.MIMETYPE_VIDEO_HEVC
                        else MediaFormat.MIMETYPE_VIDEO_AVC
             val rotation = encoderRotationDegrees()
-            // Swap width/height for portrait (90° or 270°) so the encoded
-            // resolution matches the upright frame dimensions.
-            val encW = if (rotation == 90 || rotation == 270) height else width
-            val encH = if (rotation == 90 || rotation == 270) width  else height
+            // Camera2 always outputs frames in the sensor's native landscape orientation.
+            // The encoder surface must match those dimensions exactly; swapping width/height
+            // would produce a portrait surface that Camera2 can't stream to simultaneously
+            // with the landscape preview surface → endConfigure fails.
+            // KEY_ROTATION embeds the display orientation in the bitstream as metadata.
+            val encW = width
+            val encH = height
             val fmt = MediaFormat.createVideoFormat(mime, encW, encH).apply {
                 setInteger(MediaFormat.KEY_BIT_RATE,         bitrateBps)
                 setInteger(MediaFormat.KEY_FRAME_RATE,       30)
