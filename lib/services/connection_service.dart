@@ -486,11 +486,27 @@ class ConnectionService extends ChangeNotifier {
     final kept   = parts.sublist(3).where(keep.contains).toList();
     lines[mIdx]  = ([...header, ...kept]).join(' ');
 
+    // BUG (found 2026-08-10): this filter used to run over the WHOLE sdp
+    // without tracking which m-section it was in. `keep` only ever contains
+    // video H264 payload types, so it silently deleted the audio codec's own
+    // a=rtpmap/fmtp/rtcp-fb lines too (any PT not in the video-only `keep`
+    // set got dropped, audio included) — the offer left the phone with a
+    // real Opus track, but by the time SAMBA parsed it there was no rtpmap
+    // for it left: "Opus_PT=-1", audio silently missing end-to-end. Scope
+    // the removal to the video m-section only.
     final rePt = RegExp(r'a=(rtpmap|fmtp|rtcp-fb):(\d+)');
     final out  = <String>[];
+    bool inVideo = false;
     for (final l in lines) {
-      final m = rePt.firstMatch(l);
-      if (m != null && !keep.contains(m.group(2))) continue;
+      if (l.startsWith('m=')) {
+        inVideo = l.startsWith('m=video');
+        out.add(l);
+        continue;
+      }
+      if (inVideo) {
+        final m = rePt.firstMatch(l);
+        if (m != null && !keep.contains(m.group(2))) continue;
+      }
       out.add(l);
     }
     return out.join('\r\n');

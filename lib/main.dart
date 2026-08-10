@@ -325,7 +325,15 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       if (!(await Permission.camera.request()).isGranted) {
         _log('Permiso de cámara denegado'); return;
       }
-      await Permission.microphone.request();
+      // Unlike camera, a denied mic permission does NOT block the connection —
+      // video-only streaming is still useful. But it used to fail completely
+      // silently: getUserMedia's audio request just came back without a track,
+      // WHIP negotiated video-only (Opus_PT=-1 in the offer), and nothing ever
+      // told the user why SAMBA "doesn't hear" the phone. Surface it instead.
+      if (!(await Permission.microphone.request()).isGranted) {
+        _log('Permiso de micrófono denegado — se conecta solo con video, '
+             'sin audio ni talkback. Activalo en Ajustes > Apps > Samba Air > Permisos.');
+      }
       await _saveName();
 
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
