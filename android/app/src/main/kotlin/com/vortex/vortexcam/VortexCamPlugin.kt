@@ -109,6 +109,9 @@ class VortexCamPlugin(
     private val returnRunning    = AtomicBoolean(false)
     private var returnThread:     Thread?             = null
     private var sblFrameSeq    = 0
+    // Toggled from Dart via "setTalkbackMuted" — checked in decodeAndPlay() before
+    // writing to the AudioTrack, so muting doesn't tear down/reopen the decoder.
+    private val talkbackMuted    = AtomicBoolean(false)
 
     // ---- SBL protocol constants ----
     private val SBL_MAGIC           = byteArrayOf(0x53, 0x42, 0x4C) // "SBL"
@@ -158,6 +161,15 @@ class VortexCamPlugin(
 
             "discoverSrt"  -> discoverSrt(call, result)
             "connectWifi"  -> connectWifi(call, result)
+
+            // Mute/unmute the SBL AudioReturn (talkback) playback without tearing down
+            // the MediaCodec/AudioTrack — reopening those on every toggle would add an
+            // audible gap and risks fighting the Camera2 session (see the freeze-fix
+            // comment on encoder surface dimensions elsewhere in this file).
+            "setTalkbackMuted" -> {
+                talkbackMuted.set(call.argument<Boolean>("muted") ?: false)
+                result.success(null)
+            }
 
             else -> result.notImplemented()
         }
@@ -1033,7 +1045,12 @@ class VortexCamPlugin(
         if (buf[0] != 0x53.toByte() || buf[1] != 0x42.toByte() || buf[2] != 0x4C.toByte()) return
         val streamId = buf[5].toInt() and 0xFF
         if (streamId != 3) return   // only AudioReturn (streamID=3)
-        val payloadLen = ((buf[24].toInt() and 0xFF) shl 8) or (buf[25].toInt() and 0xFF)
+        // SblPacketHeaderV3 is little-endian on the wire (desktop is x86, #pragma pack(1)
+        // memcpy of the struct — see sbl_transport.hpp). This was read big-endian before,
+        // so payloadLen came out as garbage (e.g. 0x0050 -> 0x5000 = 20480) and every
+        // AudioReturn packet failed the size check below and got silently dropped —
+        // talkback never played despite the rest of this pipeline being correct.
+        val payloadLen = (buf[24].toInt() and 0xFF) or ((buf[25].toInt() and 0xFF) shl 8)
         if (payloadLen <= 0 || 32 + payloadLen > len) return
         decodeAndPlay(buf, 32, payloadLen)
     }
@@ -1052,7 +1069,10 @@ class VortexCamPlugin(
         var outIdx = dec.dequeueOutputBuffer(info, 5_000)
         while (outIdx >= 0) {
             val outBuf = dec.getOutputBuffer(outIdx)
-            if (outBuf != null && info.size > 0) {
+            // Keep draining the decoder even while muted — skipping dequeueOutputBuffer
+            // would back up MediaCodec's internal buffers and eventually stall input.
+            // Just don't write the decoded PCM to the AudioTrack.
+            if (outBuf != null && info.size > 0 && !talkbackMuted.get()) {
                 val pcm = ShortArray(info.size / 2)
                 outBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(pcm)
                 track.write(pcm, 0, pcm.size)

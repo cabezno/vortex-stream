@@ -46,6 +46,15 @@ class ConnectionService extends ChangeNotifier {
   Timer?              _statsTimer;
   Timer?              _heartbeatTimer;
 
+  // Return audio (talkback): the engine sends the program mix back over the
+  // SAME audio m-line the phone's mic goes out on (see whip_server.cpp —
+  // it forces that section sendrecv and reuses the inbound track to answer
+  // on). onTrack below is the only piece that was missing; SRTP, jitter
+  // buffer and Opus PLC all come free from libwebrtc once the track exists.
+  MediaStreamTrack?   _remoteAudioTrack;
+  bool                _talkbackMuted = false;
+  bool                get talkbackMuted => _talkbackMuted;
+
   // Getters
   ConnectionState get state        => _state;
   bool            get isConnected  => _state == ConnectionState.connected;
@@ -140,6 +149,20 @@ class ConnectionService extends ChangeNotifier {
         _errorMessage = 'WebRTC connection lost (ICE $state)';
         notifyListeners();
       }
+    };
+
+    // Return audio (talkback) arrives here — the engine answers the audio
+    // m-line sendrecv and sends the program mix back on it. Without this
+    // handler the track was simply never retained: WHIP talkback compiled
+    // and connected but nothing played, because nothing on the Dart side
+    // ever looked at the inbound track.
+    _peerConnection!.onTrack = (RTCTrackEvent event) {
+      if (event.track.kind != 'audio') return;
+      debugPrint('[SambaAir] talkback audio track received');
+      _remoteAudioTrack = event.track;
+      // enabled=false silences playback without an SDP renegotiation —
+      // same mute semantics as the SBL side's talkbackMuted flag.
+      _remoteAudioTrack!.enabled = !_talkbackMuted;
     };
 
     // CRITICAL: use addTrack(), NOT addTransceiver() with sendEncodings.
@@ -379,6 +402,15 @@ class ConnectionService extends ChangeNotifier {
     } catch (_) {}
   }
 
+  // ---- Talkback mute toggle (WHIP path) ----
+  // Called from the UI's single talkback button — VortexCamPlugin handles the
+  // SBL side via the "setTalkbackMuted" MethodChannel call; this is the WHIP
+  // counterpart, entirely local (no renegotiation, no native call).
+  void setTalkbackMuted(bool muted) {
+    _talkbackMuted = muted;
+    _remoteAudioTrack?.enabled = !muted;
+  }
+
   // ---- Disconnect ----
   Future<void> disconnect() async {
     _statsTimer?.cancel();
@@ -394,6 +426,7 @@ class ConnectionService extends ChangeNotifier {
     _localStream    = null;
     _videoSender    = null;
     _audioSender    = null;
+    _remoteAudioTrack = null;
     _cameraService?.onStreamRebuilt = null;   // detach callback to avoid stale refs
     _cameraService  = null;
     _state          = ConnectionState.disconnected;

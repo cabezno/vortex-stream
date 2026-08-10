@@ -94,6 +94,10 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   Transport         _transport = Transport.whip;
   bool              _frontCam  = false;
   bool              _torchOn   = false;
+  // Talkback (engine → phone return audio). Starts unmuted — matches how SBL
+  // already behaved before this button existed (always-on, no control); the
+  // new part is being able to turn it off, not a new default-off surprise.
+  bool              _talkbackMuted = false;
   bool              _onAir     = false;
   bool              _live      = false;
   bool              _connecting = false;  // guard against double-tap → duplicate POST
@@ -596,6 +600,25 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     }
   }
 
+  // ---- Talkback mute (engine → phone return audio) ----
+  // Only wired for SBL (native receiver in VortexCamPlugin.kt, always running
+  // once startSbl() connects) and WHIP (ConnectionService.onTrack). SRT/RTMP/
+  // OMT don't carry a return audio channel at all yet.
+  Future<void> _toggleTalkback() async {
+    setState(() => _talkbackMuted = !_talkbackMuted);
+    switch (_transport) {
+      case Transport.sbl:
+        await const MethodChannel('com.vortex.vortexcam/native')
+            .invokeMethod('setTalkbackMuted', {'muted': _talkbackMuted});
+      case Transport.whip:
+        context.read<ConnectionService>().setTalkbackMuted(_talkbackMuted);
+      case Transport.srt:
+      case Transport.rtmp:
+      case Transport.omt:
+        break; // no return audio channel on this transport yet
+    }
+  }
+
   // ====================================================================
   // Build
   // ====================================================================
@@ -942,6 +965,11 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
         _torchOn ? Icons.flashlight_on : Icons.flashlight_off,
         'Linterna', _toggleTorch,
         color: _torchOn ? Colors.yellow : Colors.white,
+      ),
+      _ctrlBtn(
+        _talkbackMuted ? Icons.headset_off : Icons.headset,
+        'Retorno', _toggleTalkback,
+        color: _talkbackMuted ? Colors.white38 : Colors.white,
       ),
       _ctrlBtn(Icons.link_off, 'Detener', _disconnect, color: Colors.red.shade400),
     ]),
