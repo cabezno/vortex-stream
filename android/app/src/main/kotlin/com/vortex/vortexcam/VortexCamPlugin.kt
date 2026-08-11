@@ -697,8 +697,10 @@ class VortexCamPlugin(
 
     private fun sendSblHello(sourceName: String) {
         // Packet header (32) + Hello payload (105)
+        // No .order() call: SBL v3 is big-endian on the wire and that is
+        // ByteBuffer's default.  See sealSblPacket() for why this used to be
+        // LITTLE_ENDIAN and must not go back.
         val buf = java.nio.ByteBuffer.allocate(SBL_HEADER_SIZE + 105)
-        buf.order(java.nio.ByteOrder.LITTLE_ENDIAN)
         // Header
         buf.put(SBL_MAGIC)           // [0..2] magic
         buf.put(SBL_VERSION)         // [3]
@@ -728,8 +730,7 @@ class VortexCamPlugin(
     }
 
     private fun sendSblKeepalive() {
-        val buf = java.nio.ByteBuffer.allocate(SBL_HEADER_SIZE)
-        buf.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val buf = java.nio.ByteBuffer.allocate(SBL_HEADER_SIZE)   // big-endian default
         buf.put(SBL_MAGIC); buf.put(SBL_VERSION)
         buf.put(4)  // Keepalive
         buf.put(0)  // streamID
@@ -740,9 +741,44 @@ class VortexCamPlugin(
         sendSblDatagram(buf.array())
     }
 
+    // ------------------------------------------------------------------
+    // SBL v3 wire format
+    //
+    // Byte order: every multi-byte field is big-endian (network byte order),
+    // which is ByteBuffer's default. These builders used to force
+    // LITTLE_ENDIAN to match an engine-side receiver that parsed its header
+    // with a raw struct memcpy on x86. That receiver has been fixed to match
+    // the spec, the Go relay and this app; do not add .order() calls back.
+    //
+    // Integrity: an unencrypted packet carries a CRC32 of the whole packet in
+    // authTagPartial [28..31], computed with those four bytes zeroed. The
+    // engine's PacketReassembler::validatePacket() drops anything whose CRC
+    // does not match, and this app always wrote zero there — so every packet
+    // it ever sent was discarded, silently, before it reached reassembly.
+    //
+    // The engine uses the standard reflected polynomial 0xEDB88320
+    // (sbl_transport.hpp), so java.util.zip.CRC32 is bit-compatible with its
+    // sblCRC32() and there is nothing to hand-roll.
+    //
+    // Verified against TESTS/sbl_golden_vectors.txt by SblWireFormatTest.
+    // ------------------------------------------------------------------
+    private fun sealSblPacket(pkt: ByteArray): ByteArray {
+        if (pkt.size < SBL_HEADER_SIZE) return pkt
+        pkt[28] = 0; pkt[29] = 0; pkt[30] = 0; pkt[31] = 0
+        val crc = java.util.zip.CRC32().apply { update(pkt) }.value
+        pkt[28] = (crc ushr 24).toByte()
+        pkt[29] = (crc ushr 16).toByte()
+        pkt[30] = (crc ushr  8).toByte()
+        pkt[31] = (crc        ).toByte()
+        return pkt
+    }
+
     private fun sendSblDatagram(data: ByteArray) {
         try {
-            val pkt = java.net.DatagramPacket(data, data.size, sblRemoteAddr)
+            // Sealed here rather than at each call site so a new packet type
+            // cannot forget the CRC and get silently dropped by the engine.
+            val sealed = sealSblPacket(data)
+            val pkt = java.net.DatagramPacket(sealed, sealed.size, sblRemoteAddr)
             sblSocket?.send(pkt)
         } catch (e: Exception) {
             Log.w(TAG, "SBL send error: $e")
@@ -802,7 +838,7 @@ class VortexCamPlugin(
             val isFirst    = i == 0
             val payloadLen = (if (isFirst) SBL_FRAME_HEADER_SIZE else 0) + chunk.size
             val pkt = java.nio.ByteBuffer.allocate(SBL_HEADER_SIZE + payloadLen)
-            pkt.order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            // big-endian default; see sealSblPacket()
             // Packet header
             pkt.put(SBL_MAGIC); pkt.put(SBL_VERSION)
             pkt.put(0)  // Data
@@ -1045,12 +1081,18 @@ class VortexCamPlugin(
         if (buf[0] != 0x53.toByte() || buf[1] != 0x42.toByte() || buf[2] != 0x4C.toByte()) return
         val streamId = buf[5].toInt() and 0xFF
         if (streamId != 3) return   // only AudioReturn (streamID=3)
-        // SblPacketHeaderV3 is little-endian on the wire (desktop is x86, #pragma pack(1)
-        // memcpy of the struct — see sbl_transport.hpp). This was read big-endian before,
-        // so payloadLen came out as garbage (e.g. 0x0050 -> 0x5000 = 20480) and every
-        // AudioReturn packet failed the size check below and got silently dropped —
-        // talkback never played despite the rest of this pipeline being correct.
-        val payloadLen = (buf[24].toInt() and 0xFF) or ((buf[25].toInt() and 0xFF) shl 8)
+        // SblPacketHeaderV3 is big-endian on the wire, like the rest of SBL v3.
+        //
+        // This was little-endian, and the comment that used to sit here explained
+        // why: the engine's receiver parsed its header with a raw struct memcpy,
+        // so on x86 it behaved as little-endian, and this app was changed to
+        // match it. That made talkback work against a broken engine. The engine
+        // has since been fixed to the actual spec — which is also what the Go
+        // relay parses and what ByteBuffer defaults to — so this has to read
+        // big-endian again or payloadLen comes back as garbage (0x0050 read the
+        // wrong way is 0x5000 = 20480) and every AudioReturn packet fails the
+        // size check below and disappears without a trace.
+        val payloadLen = ((buf[24].toInt() and 0xFF) shl 8) or (buf[25].toInt() and 0xFF)
         if (payloadLen <= 0 || 32 + payloadLen > len) return
         decodeAndPlay(buf, 32, payloadLen)
     }
