@@ -109,6 +109,11 @@ class VortexCamPlugin(
     private val returnRunning    = AtomicBoolean(false)
     private var returnThread:     Thread?             = null
     private var sblFrameSeq    = 0
+
+    // H.264 parameter sets, republished with every keyframe so a receiver can
+    // join the stream at any IDR rather than only at the very first frame.
+    private var sblSps: ByteArray? = null
+    private var sblPps: ByteArray? = null
     // Toggled from Dart via "setTalkbackMuted" — checked in decodeAndPlay() before
     // writing to the AudioTrack, so muting doesn't tear down/reopen the decoder.
     private val talkbackMuted    = AtomicBoolean(false)
@@ -797,16 +802,36 @@ class VortexCamPlugin(
             }
             val idx = encoder?.dequeueOutputBuffer(info, 10_000) ?: break
             when {
-                idx == MediaCodec.INFO_TRY_AGAIN_LATER     -> continue
-                idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> continue
+                idx == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
+                idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    // H.264 parameter sets live here, and MediaCodec reports them
+                    // exactly once. This used to `continue`, throwing them away,
+                    // so a receiver that joined after the stream started never
+                    // got an SPS/PPS and could not decode a single frame
+                    // ("No SPS/PPS yet - dropping slice" on the engine side).
+                    // Keep them and republish with every keyframe below.
+                    captureSblParameterSets()
+                    continue
+                }
                 idx < 0 -> continue
             }
             val buf = encoder!!.getOutputBuffer(idx) ?: run {
                 encoder!!.releaseOutputBuffer(idx, false); continue
             }
             val nalData = ByteArray(info.size).also { buf.position(info.offset); buf.get(it) }
-            val isKey   = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-            val ptsUs   = info.presentationTimeUs
+            val isConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
+            val isKey    = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+            val ptsUs    = info.presentationTimeUs
+
+            if (isConfig) {
+                // Some devices deliver the parameter sets as a normal output
+                // buffer instead of (or as well as) the format change. Keep them
+                // and do not send as a frame; they ride along with each keyframe.
+                if (sblSps == null) sblSps = nalData
+                encoder!!.releaseOutputBuffer(idx, false)
+                continue
+            }
+
             sendSblVideoFrame(nalData, isKey, ptsUs, width, height)
             bytesSent.addAndGet(nalData.size.toLong())
             encoder!!.releaseOutputBuffer(idx, false)
@@ -815,10 +840,44 @@ class VortexCamPlugin(
         }
     }
 
+    // Pull csd-0 / csd-1 out of the encoder's output format. For AVC csd-0 is
+    // the SPS and csd-1 the PPS, both already in Annex-B form; some encoders put
+    // both into csd-0.
+    private fun captureSblParameterSets() {
+        try {
+            val fmt = encoder?.outputFormat ?: return
+            fmt.getByteBuffer("csd-0")?.let { b ->
+                sblSps = ByteArray(b.remaining()).also { b.duplicate().get(it) }
+            }
+            fmt.getByteBuffer("csd-1")?.let { b ->
+                sblPps = ByteArray(b.remaining()).also { b.duplicate().get(it) }
+            }
+            Log.i(TAG, "SBL parameter sets captured: sps=${sblSps?.size ?: 0}B pps=${sblPps?.size ?: 0}B")
+        } catch (e: Exception) {
+            Log.w(TAG, "SBL: could not read csd from output format: $e")
+        }
+    }
+
     private fun sendSblVideoFrame(
-        nalData: ByteArray, isKeyframe: Boolean,
+        rawNal: ByteArray, isKeyframe: Boolean,
         ptsUs: Long, width: Int, height: Int,
     ) {
+        // Prepend SPS/PPS to every keyframe. MediaCodec emits them once at
+        // stream start; without repeating them, any receiver that connects later
+        // sits on "Waiting for IDR" forever because it has no parameter sets to
+        // decode against.
+        val nalData: ByteArray =
+            if (isKeyframe && (sblSps != null || sblPps != null)) {
+                val sps = sblSps ?: ByteArray(0)
+                val pps = sblPps ?: ByteArray(0)
+                ByteArray(sps.size + pps.size + rawNal.size).also { out ->
+                    var o = 0
+                    sps.copyInto(out, o); o += sps.size
+                    pps.copyInto(out, o); o += pps.size
+                    rawNal.copyInto(out, o)
+                }
+            } else rawNal
+
         val frameSeq   = sblFrameSeq++
         val frameFlags: Short = if (isKeyframe) 0x0001 else 0x0000
         // Fragment into MAX_PAYLOAD chunks; fragment 0 gets extra SblFrameHeader
@@ -1079,6 +1138,22 @@ class VortexCamPlugin(
         if (len < 32) return
         // SBL magic check: buf[0..2] == "SBL"
         if (buf[0] != 0x53.toByte() || buf[1] != 0x42.toByte() || buf[2] != 0x4C.toByte()) return
+        // KeyframeRequest (packet type 7) — the engine asks for an IDR when it
+        // joins the stream or loses sync. It arrives on the Control stream, so
+        // it must be handled before the AudioReturn filter below. Without this
+        // the engine asked once per second and nothing ever answered.
+        if ((buf[4].toInt() and 0xFF) == 7) {
+            try {
+                encoder?.setParameters(android.os.Bundle().apply {
+                    putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                })
+                Log.i(TAG, "SBL: keyframe requested by engine — forcing IDR")
+            } catch (e: Exception) {
+                Log.w(TAG, "SBL: could not force IDR: $e")
+            }
+            return
+        }
+
         val streamId = buf[5].toInt() and 0xFF
         if (streamId != 3) return   // only AudioReturn (streamID=3)
         // SblPacketHeaderV3 is big-endian on the wire, like the rest of SBL v3.
