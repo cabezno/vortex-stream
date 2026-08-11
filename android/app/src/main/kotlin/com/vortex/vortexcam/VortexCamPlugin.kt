@@ -114,6 +114,10 @@ class VortexCamPlugin(
     // join the stream at any IDR rather than only at the very first frame.
     private var sblSps: ByteArray? = null
     private var sblPps: ByteArray? = null
+
+    // Audio runs on its own frame sequence: the Audio and VideoColor streams are
+    // reassembled independently by the engine and must not share a counter.
+    private var sblAudioFrameSeq = 0
     // Toggled from Dart via "setTalkbackMuted" — checked in decodeAndPlay() before
     // writing to the AudioTrack, so muting doesn't tear down/reopen the decoder.
     private val talkbackMuted    = AtomicBoolean(false)
@@ -411,6 +415,9 @@ class VortexCamPlugin(
         encodeThread?.join(2000); encodeThread = null
         audioInThread?.join(1000);  audioInThread  = null
         audioOutThread?.join(1000); audioOutThread = null
+        sblMicThread?.join(1000)
+        stopSblMicUplink()
+        sblSps = null; sblPps = null   // re-captured on the next stream
         try { audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null
         try { audioEncoder?.stop(); audioEncoder?.release() } catch (_: Exception) {}
@@ -689,6 +696,7 @@ class VortexCamPlugin(
                 // Start receive loop for incoming packets (AudioReturn from engine)
                 returnRunning.set(true)
                 returnThread = thread(name = "SblReceive") { receiveLoop() }
+                startSblMicUplink()
                 encodeThread = thread(name = "SblEncode") { drainToSbl(width, height) }
                 result.success(null)
                 Log.i(TAG, "SBL streaming → $host:$port ${width}x${height} @${bitrate/1000}kbps")
@@ -698,6 +706,134 @@ class VortexCamPlugin(
                 result.error("SBL_ERR", e.message, null)
             }
         }
+    }
+
+    // ====================================================================
+    // SBL microphone uplink (phone → engine)
+    //
+    // SBL audio was only ever half-built: the engine has had an Opus decoder on
+    // the Audio stream and an Opus encoder for talkback (AudioReturn) for a
+    // while, and this app decodes and plays that return. Nothing ever sent the
+    // microphone the other way — the AAC path above belongs to SRT — so the
+    // engine sat with a decoder waiting for a stream that never arrived.
+    //
+    // Opus at 48 kHz mono, which is what SblAudioDecoder is configured for and
+    // Opus's native rate. Deliberately separate from the SRT AAC pipeline so the
+    // two transports cannot disturb each other.
+    // ====================================================================
+    private var sblMicRecord:  AudioRecord? = null
+    private var sblOpusEncoder: MediaCodec? = null
+    private var sblMicThread:  Thread? = null
+
+    private val SBL_AUDIO_RATE     = 48_000   // Opus native; matches SblAudioConfig
+    private val SBL_AUDIO_CHANNELS = 1
+    private val SBL_AUDIO_BITRATE  = 48_000
+
+    @SuppressLint("MissingPermission")
+    private fun startSblMicUplink() {
+        try {
+            val fmt = MediaFormat.createAudioFormat(
+                MediaFormat.MIMETYPE_AUDIO_OPUS, SBL_AUDIO_RATE, SBL_AUDIO_CHANNELS)
+            fmt.setInteger(MediaFormat.KEY_BIT_RATE, SBL_AUDIO_BITRATE)
+            fmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 8192)
+
+            sblOpusEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
+            sblOpusEncoder!!.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            sblOpusEncoder!!.start()
+
+            val minBuf = AudioRecord.getMinBufferSize(
+                SBL_AUDIO_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            sblMicRecord = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION, SBL_AUDIO_RATE,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf * 4)
+            sblMicRecord!!.startRecording()
+
+            sblMicThread = thread(name = "SblMicUplink") { sblMicLoop() }
+            Log.i(TAG, "SBL mic uplink: ${SBL_AUDIO_RATE}Hz mono Opus ${SBL_AUDIO_BITRATE/1000}kbps")
+        } catch (e: Exception) {
+            // Video must not depend on the microphone: a device without an Opus
+            // encoder, or a denied permission, keeps streaming picture.
+            Log.e(TAG, "SBL mic uplink unavailable (video continues): $e")
+            stopSblMicUplink()
+        }
+    }
+
+    private fun stopSblMicUplink() {
+        try { sblMicRecord?.stop() }    catch (_: Exception) {}
+        try { sblMicRecord?.release() } catch (_: Exception) {}
+        try { sblOpusEncoder?.stop() }  catch (_: Exception) {}
+        try { sblOpusEncoder?.release() } catch (_: Exception) {}
+        sblMicRecord = null
+        sblOpusEncoder = null
+        sblMicThread = null
+    }
+
+    private fun sblMicLoop() {
+        val rec = sblMicRecord ?: return
+        val enc = sblOpusEncoder ?: return
+        // 20 ms at 48 kHz mono = 960 samples = 1920 bytes, one Opus frame.
+        val pcm = ByteArray(960 * 2)
+        val info = MediaCodec.BufferInfo()
+
+        while (streaming.get()) {
+            val n = rec.read(pcm, 0, pcm.size)
+            if (n > 0) {
+                val inIdx = enc.dequeueInputBuffer(10_000)
+                if (inIdx >= 0) {
+                    enc.getInputBuffer(inIdx)?.let { b ->
+                        b.clear(); b.put(pcm, 0, n)
+                        enc.queueInputBuffer(inIdx, 0, n, System.nanoTime() / 1000, 0)
+                    }
+                }
+            }
+            var outIdx = enc.dequeueOutputBuffer(info, 0)
+            while (outIdx >= 0) {
+                if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0 && info.size > 0) {
+                    val out = enc.getOutputBuffer(outIdx)
+                    if (out != null) {
+                        val frame = ByteArray(info.size)
+                        out.position(info.offset); out.get(frame)
+                        sendSblAudioFrame(frame, info.presentationTimeUs)
+                    }
+                }
+                enc.releaseOutputBuffer(outIdx, false)
+                outIdx = enc.dequeueOutputBuffer(info, 0)
+            }
+        }
+    }
+
+    // One Opus frame on the Audio stream (streamID 1). Small enough to always
+    // fit a single datagram, so no fragmentation loop is needed.
+    private fun sendSblAudioFrame(opus: ByteArray, ptsUs: Long) {
+        val payloadLen = SBL_FRAME_HEADER_SIZE + opus.size
+        if (SBL_HEADER_SIZE + payloadLen > 1400) return   // guard; Opus frames are ~120B
+
+        val pkt = java.nio.ByteBuffer.allocate(SBL_HEADER_SIZE + payloadLen)
+        pkt.put(SBL_MAGIC); pkt.put(SBL_VERSION)
+        pkt.put(0)                              // packetType = Data
+        pkt.put(1)                              // streamID   = Audio
+        pkt.putShort(sblPktSeq++.toShort())
+        pkt.putInt(sblAudioFrameSeq++)
+        pkt.putShort(0)                         // fragmentIdx
+        pkt.putShort(1)                         // fragmentTotal
+        pkt.putLong(ptsUs)
+        pkt.putShort(payloadLen.toShort())
+        pkt.putShort(0)                         // flags
+        pkt.putInt(0)                           // authTagPartial — filled by sealSblPacket
+
+        // Frame header: declare Opus so the engine routes it to the right decoder.
+        pkt.put(0x10)                           // SblCodec::Opus
+        pkt.put(SBL_AUDIO_CHANNELS.toByte())
+        pkt.putShort(0); pkt.putShort(0)        // width / height (audio = 0)
+        pkt.putShort(0); pkt.putShort(0)        // fpsNum / fpsDen
+        pkt.putInt(0)                           // flags
+        pkt.putInt(opus.size)                   // totalFrameSize
+        pkt.putShort(0); pkt.putShort(0); pkt.putShort(0)  // colour metadata
+        pkt.putInt(SBL_AUDIO_RATE)              // sampleRate
+        pkt.putInt(0)                           // reserved
+
+        pkt.put(opus)
+        sendSblDatagram(pkt.array())
     }
 
     private fun sendSblHello(sourceName: String) {
