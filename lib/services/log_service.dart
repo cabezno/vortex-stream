@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
@@ -67,6 +68,15 @@ class LogService {
   Future<bool> shipToPc({String reason = 'manual'}) async {
     if (_shipping || _engineHost.isEmpty || _buffer.isEmpty) return false;
     _shipping = true;
+    // 1) Through the connection that is already streaming (SRT: private TS PID → SAMBA phone_logs).
+    //    A log sent to some other port never arrives when only the stream port is reachable.
+    try {
+      final ok = await const MethodChannel('com.vortex.vortexcam/native').invokeMethod<bool>(
+          'sendLog', {'text': '# Samba Air log — reason=$reason — ${DateTime.now().toIso8601String()}
+${dump()}',
+                      'reason': reason});
+      if (ok == true) { _shipping = false; return true; }
+    } catch (_) {/* no stream up / not supported → HTTP below */}
     try {
       final uri = Uri.parse(
         'http://$_engineHost:$_enginePort/phonelog'

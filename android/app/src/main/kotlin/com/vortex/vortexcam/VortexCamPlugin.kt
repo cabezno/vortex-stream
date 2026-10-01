@@ -87,6 +87,7 @@ class VortexCamPlugin(
 
     // ---- Transport sockets ----
     private var srtSocket:  SrtSocket? = null   // SRT transport
+    private var srtMuxer:   TsMuxer?   = null   // kept to carry the diagnostic log in the same stream
     private var rtmpClient: RtmpClient? = null  // RTMP transport
 
     // ---- SBL UDP transport ----
@@ -170,6 +171,8 @@ class VortexCamPlugin(
             "setTorch"     -> { setTorch(call.argument<Boolean>("on") ?: false); result.success(null) }
 
             "startSrt"     -> startSrt(call, result)
+            "sendLog"      -> result.success(sendLogBytes(
+                                  call.argument<String>("text") ?: "", call.argument<String>("reason") ?: "manual"))
             "stopSrt"      -> { stopStream(); result.success(null) }
 
             "startRtmp"    -> startRtmp(call, result)
@@ -443,6 +446,7 @@ class VortexCamPlugin(
         encoder = null
         encoderSurface?.release(); encoderSurface = null
         srtSocket?.close(); srtSocket = null
+        srtMuxer = null
         rtmpClient?.close(); rtmpClient = null
         stopReturnAudio()
         sblSocket?.close(); sblSocket = null
@@ -554,7 +558,10 @@ class VortexCamPlugin(
                 val mime = if (codec == "hevc") MediaFormat.MIMETYPE_VIDEO_HEVC
                            else MediaFormat.MIMETYPE_VIDEO_AVC
                 val muxer = TsMuxer(mime)
+                srtMuxer = muxer
                 streaming.set(true)
+                // Diagnostic: orientation values, sent IN the SRT stream (SAMBA saves it to phone_logs).
+                sendLogBytes(orientationDiag(width, height), "diag")
 
                 startAudioInputThread()
                 startAudioOutputThread(muxer, srtSocket!!)
@@ -570,6 +577,46 @@ class VortexCamPlugin(
                 result.error("SRT_ERR", e.message, null)
             }
         }
+    }
+
+    // Send the app log through the SAME connection the video uses (private TS PID → SAMBA phone_logs).
+    // Returns false when no SRT stream is up (the caller then falls back to HTTP).
+    private fun sendLogBytes(text: String, reason: String): Boolean {
+        val sock = srtSocket ?: return false
+        val mux  = srtMuxer  ?: return false
+        if (!streaming.get()) return false
+        return try {
+            val pkts = mux.muxLog(text.toByteArray(Charsets.UTF_8), reason)
+            synchronized(sendLock) { for (p in pkts) sock.send(p) }
+            true
+        } catch (e: Exception) { Log.w(TAG, "sendLog: $e"); false }
+    }
+
+    private fun orientationDiag(width: Int, height: Int): String {
+        val sb = StringBuilder("[diag] orientación
+")
+        try {
+            val id = getCameraId(cameraFacing) ?: "0"
+            val ch = cameraManager?.getCameraCharacteristics(id)
+            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+            val rot = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: -1
+            sb.append("modelo=${Build.MANUFACTURER} ${Build.MODEL} android=${Build.VERSION.RELEASE} (api ${Build.VERSION.SDK_INT})
+")
+            sb.append("camara id=$id facing=${if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) "frontal" else "trasera"}")
+            sb.append(" SENSOR_ORIENTATION=${ch?.get(CameraCharacteristics.SENSOR_ORIENTATION)}
+")
+            sb.append("display.rotation=$rot (0=ROTATION_0 1=90 2=180 3=270)
+")
+            sb.append("encoderRotationDegrees()=${encoderRotationDegrees()} → KEY_ROTATION aplicado
+")
+            sb.append("encoder pedido=${width}x$height  preview buffer=1920x1080
+")
+            val map = ch?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            sb.append("tamaños SurfaceTexture: ${map?.getOutputSizes(SurfaceTexture::class.java)?.take(8)?.joinToString()}
+")
+        } catch (e: Exception) { sb.append("diag error: $e
+") }
+        return sb.toString()
     }
 
     private fun drainToSrt(muxer: TsMuxer) {
@@ -1365,6 +1412,31 @@ class TsMuxer(private val mimeType: String) {
     private var audioDts      = 0L
 
     fun setFormat(fmt: MediaFormat) { /* SPS/PPS embedded in stream */ }
+
+    // Diagnostic log inside the stream: private PID 0x1FF0 (not in the PMT → other receivers ignore it).
+    // Message: "SLOG" | u32 BE textLen | u8 reasonLen | reason | text, split over 188-byte TS packets.
+    private val logPid      = 0x1FF0
+    private var logPktCount = 0
+    fun muxLog(text: ByteArray, reason: String): List<ByteArray> {
+        val r = reason.toByteArray(Charsets.UTF_8).let { if (it.size > 255) it.copyOf(255) else it }
+        val hdr = java.nio.ByteBuffer.allocate(9 + r.size)
+            .put("SLOG".toByteArray(Charsets.US_ASCII)).putInt(text.size).put(r.size.toByte()).put(r).array()
+        val msg = hdr + text
+        val pkts = mutableListOf<ByteArray>()
+        var off = 0; var first = true
+        while (off < msg.size) {
+            val pkt = ByteArray(188)
+            pkt[0] = 0x47
+            pkt[1] = ((if (first) 0x40 else 0x00) or ((logPid shr 8) and 0x1F)).toByte()
+            pkt[2] = (logPid and 0xFF).toByte()
+            pkt[3] = (0x10 or (logPktCount++ and 0x0F)).toByte()
+            val len = minOf(184, msg.size - off)
+            msg.copyInto(pkt, 4, off, off + len)
+            if (len < 184) pkt.fill(0xFF.toByte(), 4 + len)
+            pkts.add(pkt); off += len; first = false
+        }
+        return pkts
+    }
 
     // Mux one AAC frame: prepends ADTS header, builds audio PES, fragments into TS packets
     fun muxAudio(buf: ByteBuffer, info: MediaCodec.BufferInfo, sampleRate: Int, channels: Int): List<ByteArray> {
