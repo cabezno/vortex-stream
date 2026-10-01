@@ -115,7 +115,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   int    _previewTurns = 0;      // quarter turns (clockwise) to counter-rotate the preview
   bool   _previewPortraitBuf = true;   // the Texture shows the camera as a PORTRAIT image (sensor 90/270)
   String _previewDbg  = '';
-  Timer? _previewTimer;
+  String _previewKey  = '';   // orientation+insets: re-query the rotation only when the screen turns
 
   @override
   void initState() {
@@ -130,7 +130,6 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _previewTimer?.cancel();
     _renderer.dispose();
     _deviceCtrl.dispose();
     super.dispose();
@@ -161,6 +160,11 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     final p = await SharedPreferences.getInstance();
     final name = p.getString('device_name');
     if (name != null) _deviceCtrl.text = name;
+    // Ship logs from the very start (before pairing) to the last PC we paired with.
+    final lastHost = p.getString('last_engine_host');
+    if (lastHost != null && lastHost.isNotEmpty && !LogService.instance.hasTarget) {
+      LogService.instance.configure(host: lastHost, device: _deviceCtrl.text.trim());
+    }
   }
 
   Future<void> _saveName() async {
@@ -207,6 +211,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       _transport = cfg.preferredTransport;
     });
     LogService.instance.configure(host: cfg.host, device: _deviceCtrl.text.trim());
+    SharedPreferences.getInstance().then((p) => p.setString('last_engine_host', cfg.host));
 
     // Network layer: if the QR includes WiFi credentials (PC hotspot active),
     // connect to that network automatically before the user taps Go Live.
@@ -321,6 +326,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     }
     setState(() { _config = cfg; _transport = t; });
     LogService.instance.configure(host: cfg.host, device: _deviceCtrl.text.trim());
+    SharedPreferences.getInstance().then((p) => p.setString('last_engine_host', cfg.host));
     _log('Manual: $proto → $url');
   }
 
@@ -854,9 +860,14 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   }
 
   Widget _buildLiveView() {
-    // Poll the preview rotation while the live view is shown (landscape-left vs right doesn't change the
-    // widget size, so no rebuild would tell us). Cheap: one method call per second.
-    _previewTimer ??= Timer.periodic(const Duration(seconds: 1), (_) => _refreshPreviewRotation());
+    // Re-query the preview rotation only when the screen turns (orientation / insets change; the insets also
+    // change between landscape-left and landscape-right). No polling: it froze the app on start (2026-10-01).
+    final mq = MediaQuery.of(context);
+    final pk = '${mq.orientation}|${mq.viewPadding}';
+    if (pk != _previewKey) {
+      _previewKey = pk;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _refreshPreviewRotation());
+    }
     // Stats per transport
     double bitrate = 0;
     int    latency = 0;
@@ -900,18 +911,11 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
         final texId = _nativeTexId;
         preview = texId != null
             ? Stack(fit: StackFit.expand, children: [
-                ClipRect(child: FittedBox(
-                  fit: BoxFit.contain,
-                  child: RotatedBox(
-                    quarterTurns: _previewTurns,
-                    // Real aspect of what the Texture shows (1920×1080 camera buffer, shown upright = portrait):
-                    // FittedBox scales it to the screen without stretching it.
-                    child: SizedBox(
-                      width:  _previewPortraitBuf ? 1080 : 1920,
-                      height: _previewPortraitBuf ? 1920 : 1080,
-                      child: Texture(textureId: texId),
-                    ),
-                  ),
+                // Real aspect of what the Texture shows (1920×1080 camera buffer, upright = portrait 9:16),
+                // turned by _previewTurns: AspectRatio keeps it undeformed, Center letterboxes it.
+                Center(child: AspectRatio(
+                  aspectRatio: (_previewPortraitBuf != (_previewTurns.isOdd)) ? 9 / 16 : 16 / 9,
+                  child: RotatedBox(quarterTurns: _previewTurns, child: Texture(textureId: texId)),
                 )),
                 Positioned(left: 8, bottom: 8, child: Text(_previewDbg,
                     style: const TextStyle(color: Colors.white38, fontSize: 10))),

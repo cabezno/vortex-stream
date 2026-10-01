@@ -90,6 +90,9 @@ class VortexCamPlugin(
     private var srtMuxer:   TsMuxer?   = null   // kept to carry the app log in the same stream
     // Last encoder failure, returned to Dart (→ log shipped to SAMBA) instead of a bare "failed".
     @Volatile private var lastEncoderError = ""
+    // Camera sensor orientation, read once when the camera opens (getCameraCharacteristics is NOT cheap and
+    // previewRotation runs on the main thread).
+    @Volatile private var cachedSensorOrientation = 90
     private var rtmpClient: RtmpClient? = null  // RTMP transport
 
     // ---- SBL UDP transport ----
@@ -154,10 +157,7 @@ class VortexCamPlugin(
             "startCamera"  -> startCamera(call, result)
             // Preview only (what goes to SAMBA is untouched): clockwise degrees to show the camera upright.
             "previewRotation" -> {
-                val sensor = try {
-                    cameraManager?.getCameraCharacteristics(getCameraId(cameraFacing) ?: "0")
-                        ?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
-                } catch (e: Exception) { 90 }
+                val sensor = cachedSensorOrientation
                 val disp = try {
                     (context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
                         .getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: 0
@@ -234,6 +234,9 @@ class VortexCamPlugin(
             override fun onOpened(camera: CameraDevice) {
                 cameraDevice = camera
                 Log.i(TAG, "Camera opened: $cameraId")
+                cachedSensorOrientation = try {
+                    cameraManager?.getCameraCharacteristics(cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+                } catch (e: Exception) { 90 }
                 // Start preview-only session (no encoder surface yet)
                 startPreviewSession()
                 result.success(mapOf("textureId" to flutterTexture!!.id()))
