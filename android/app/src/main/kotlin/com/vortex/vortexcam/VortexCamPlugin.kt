@@ -593,29 +593,21 @@ class VortexCamPlugin(
     }
 
     private fun orientationDiag(width: Int, height: Int): String {
-        val sb = StringBuilder("[diag] orientación
-")
+        val sb = StringBuilder("[diag] orientación\n")
         try {
             val id = getCameraId(cameraFacing) ?: "0"
             val ch = cameraManager?.getCameraCharacteristics(id)
             val dm = context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
             val rot = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: -1
-            sb.append("modelo=${Build.MANUFACTURER} ${Build.MODEL} android=${Build.VERSION.RELEASE} (api ${Build.VERSION.SDK_INT})
-")
+            sb.append("modelo=${Build.MANUFACTURER} ${Build.MODEL} android=${Build.VERSION.RELEASE} (api ${Build.VERSION.SDK_INT})\n")
             sb.append("camara id=$id facing=${if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) "frontal" else "trasera"}")
-            sb.append(" SENSOR_ORIENTATION=${ch?.get(CameraCharacteristics.SENSOR_ORIENTATION)}
-")
-            sb.append("display.rotation=$rot (0=ROTATION_0 1=90 2=180 3=270)
-")
-            sb.append("encoderRotationDegrees()=${encoderRotationDegrees()} → KEY_ROTATION aplicado
-")
-            sb.append("encoder pedido=${width}x$height  preview buffer=1920x1080
-")
+            sb.append(" SENSOR_ORIENTATION=${ch?.get(CameraCharacteristics.SENSOR_ORIENTATION)}\n")
+            sb.append("display.rotation=$rot (0=ROTATION_0 1=90 2=180 3=270)\n")
+            sb.append("encoderRotationDegrees()=${encoderRotationDegrees()} → KEY_ROTATION aplicado\n")
+            sb.append("encoder pedido=${width}x$height  preview buffer=1920x1080\n")
             val map = ch?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            sb.append("tamaños SurfaceTexture: ${map?.getOutputSizes(SurfaceTexture::class.java)?.take(8)?.joinToString()}
-")
-        } catch (e: Exception) { sb.append("diag error: $e
-") }
+            sb.append("tamaños SurfaceTexture: ${map?.getOutputSizes(SurfaceTexture::class.java)?.take(8)?.joinToString()}\n")
+        } catch (e: Exception) { sb.append("diag error: $e\n") }
         return sb.toString()
     }
 

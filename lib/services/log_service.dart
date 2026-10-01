@@ -72,8 +72,7 @@ class LogService {
     //    A log sent to some other port never arrives when only the stream port is reachable.
     try {
       final ok = await const MethodChannel('com.vortex.vortexcam/native').invokeMethod<bool>(
-          'sendLog', {'text': '# Samba Air log — reason=$reason — ${DateTime.now().toIso8601String()}
-${dump()}',
+          'sendLog', {'text': '# Samba Air log — reason=$reason — ${DateTime.now().toIso8601String()}\n${dump()}',
                       'reason': reason});
       if (ok == true) { _shipping = false; return true; }
     } catch (_) {/* no stream up / not supported → HTTP below */}
