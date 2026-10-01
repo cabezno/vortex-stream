@@ -110,6 +110,12 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   final _renderer = RTCVideoRenderer();
   // SRT/RTMP preview texture id
   int? _nativeTexId;
+  // Phone preview orientation (SRT/RTMP/SBL Texture): the raw camera buffer has to be turned and shown with
+  // its real aspect — it was stretched to the whole screen and looked rotated/deformed with the phone sideways.
+  int    _previewTurns = 0;      // quarter turns (clockwise) to counter-rotate the preview
+  bool   _previewPortraitBuf = true;   // the Texture shows the camera as a PORTRAIT image (sensor 90/270)
+  String _previewDbg  = '';
+  Timer? _previewTimer;
 
   @override
   void initState() {
@@ -123,6 +129,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _previewTimer?.cancel();
     _renderer.dispose();
     _deviceCtrl.dispose();
     super.dispose();
@@ -813,7 +820,27 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   // -----------------------------------------------------------------------
   // Live view
   // -----------------------------------------------------------------------
+  Future<void> _refreshPreviewRotation() async {
+    try {
+      final m = await _nativeChannel.invokeMethod<Map>('previewRotation');
+      if (m == null || !mounted) return;
+      final sensor  = (m['sensor']  as int?) ?? 90;
+      final display = (m['display'] as int?) ?? 0;
+      final front   = (m['front']   as bool?) ?? false;
+      // Upright in portrait already → only undo the display rotation (back: −display, front: +display).
+      final turns = ((front ? display : (360 - display)) % 360) ~/ 90;
+      final portraitBuf = sensor % 180 == 90;
+      final dbg = 'giro ${turns * 90}° · sensor $sensor° · pantalla $display°';
+      if (turns != _previewTurns || portraitBuf != _previewPortraitBuf || dbg != _previewDbg) {
+        setState(() { _previewTurns = turns; _previewPortraitBuf = portraitBuf; _previewDbg = dbg; });
+      }
+    } catch (_) {/* camera not started yet */}
+  }
+
   Widget _buildLiveView() {
+    // Poll the preview rotation while the live view is shown (landscape-left vs right doesn't change the
+    // widget size, so no rebuild would tell us). Cheap: one method call per second.
+    _previewTimer ??= Timer.periodic(const Duration(seconds: 1), (_) => _refreshPreviewRotation());
     // Stats per transport
     double bitrate = 0;
     int    latency = 0;
@@ -856,7 +883,23 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       case Transport.sbl:
         final texId = _nativeTexId;
         preview = texId != null
-            ? Texture(textureId: texId)
+            ? Stack(fit: StackFit.expand, children: [
+                ClipRect(child: FittedBox(
+                  fit: BoxFit.contain,
+                  child: RotatedBox(
+                    quarterTurns: _previewTurns,
+                    // Real aspect of what the Texture shows (1920×1080 camera buffer, shown upright = portrait):
+                    // FittedBox scales it to the screen without stretching it.
+                    child: SizedBox(
+                      width:  _previewPortraitBuf ? 1080 : 1920,
+                      height: _previewPortraitBuf ? 1920 : 1080,
+                      child: Texture(textureId: texId),
+                    ),
+                  ),
+                )),
+                Positioned(left: 8, bottom: 8, child: Text(_previewDbg,
+                    style: const TextStyle(color: Colors.white38, fontSize: 10))),
+              ])
             : const Center(child: CircularProgressIndicator());
       case Transport.omt:
         // OMT uses Camera2 directly in native code — show status overlay

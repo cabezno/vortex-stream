@@ -149,6 +149,22 @@ class VortexCamPlugin(
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "startCamera"  -> startCamera(call, result)
+            // Preview only (what goes to SAMBA is untouched): clockwise degrees to show the camera upright.
+            "previewRotation" -> {
+                val sensor = try {
+                    cameraManager?.getCameraCharacteristics(getCameraId(cameraFacing) ?: "0")
+                        ?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+                } catch (e: Exception) { 90 }
+                val disp = try {
+                    (context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+                        .getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: 0
+                } catch (e: Exception) { 0 }
+                val dispDeg = disp * 90
+                val rot = if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) (sensor + dispDeg) % 360
+                          else (sensor - dispDeg + 360) % 360
+                result.success(mapOf("rotation" to rot, "sensor" to sensor, "display" to dispDeg,
+                    "front" to (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT)))
+            }
             "stopCamera"   -> { stopCamera(); result.success(null) }
             "flipCamera"   -> { flipCamera(result) }
             "setTorch"     -> { setTorch(call.argument<Boolean>("on") ?: false); result.success(null) }
