@@ -173,8 +173,15 @@ class VortexCamPlugin(
             "setTorch"     -> { setTorch(call.argument<Boolean>("on") ?: false); result.success(null) }
 
             "startSrt"     -> startSrt(call, result)
-            "sendLog"      -> result.success(sendLogBytes(
-                                  call.argument<String>("text") ?: "", call.argument<String>("reason") ?: "manual"))
+            "sendLog"      -> {
+                // Network is not allowed on the main thread (NetworkOnMainThreadException): write from a worker.
+                val text = call.argument<String>("text") ?: ""
+                val reason = call.argument<String>("reason") ?: "manual"
+                Thread {
+                    val ok = sendLogBytes(text, reason)
+                    android.os.Handler(android.os.Looper.getMainLooper()).post { result.success(ok) }
+                }.start()
+            }
             "stopSrt"      -> { stopStream(); result.success(null) }
 
             "startRtmp"    -> startRtmp(call, result)
@@ -284,10 +291,12 @@ class VortexCamPlugin(
     }
 
     private fun flipCamera(result: MethodChannel.Result) {
+        // Swap ONLY the camera. The encoder input surface and the SRT/SBL/RTMP connection stay alive, so the stream
+        // to SAMBA continues with the other camera. It used to call stopStream() — closing the encoder and the
+        // socket — and never resumed: flipping while live disconnected SAMBA (2026-10-01).
         cameraFacing = if (cameraFacing == CameraCharacteristics.LENS_FACING_BACK)
             CameraCharacteristics.LENS_FACING_FRONT else CameraCharacteristics.LENS_FACING_BACK
-        val wasStreaming = streaming.get()
-        stopStream()
+        try { captureSession?.stopRepeating() } catch (_: Exception) {}
         captureSession?.close(); captureSession = null
         cameraDevice?.close();   cameraDevice  = null
 
@@ -298,11 +307,22 @@ class VortexCamPlugin(
         cameraManager?.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(cam: CameraDevice) {
                 cameraDevice = cam
-                startPreviewSession()
+                cachedSensorOrientation = try {
+                    cameraManager?.getCameraCharacteristics(cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+                } catch (e: Exception) { 90 }
+                startPreviewSession()   // preview + (if streaming) the same encoder surface
+                val facing = if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) "frontal" else "trasera"
+                val msg = "[flip] cámara $facing (id $cameraId, sensor $cachedSensorOrientation°), transmisión ${if (streaming.get()) "sigue" else "no activa"}\n"
+                Thread { sendLogBytes(msg, "flip") }.start()
                 result.success(null)
             }
             override fun onDisconnected(cam: CameraDevice) { cam.close() }
-            override fun onError(cam: CameraDevice, error: Int) { cam.close(); result.error("ERR", "error $error", null) }
+            override fun onError(cam: CameraDevice, error: Int) {
+                cam.close()
+                val msg = "[flip] error al abrir la cámara $cameraId: $error\n"
+                Thread { sendLogBytes(msg, "flip_error") }.start()
+                result.error("ERR", "error $error", null)
+            }
         }, cameraHandler)
     }
 

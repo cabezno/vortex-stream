@@ -614,8 +614,13 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       case Transport.omt:
         break; // camera flip handled internally by OmtStreamPlugin
       case Transport.sbl:
-        break;
+        // SBL uses the same native Camera2 pipeline as SRT (it used to do nothing here).
+        await const MethodChannel('com.vortex.vortexcam/native')
+            .invokeMethod('flipCamera');
     }
+    // The other camera usually has another sensor orientation: re-query the preview rotation.
+    _previewKey = '';
+    await _refreshPreviewRotation();
   }
 
   Future<void> _toggleTorch() async {
