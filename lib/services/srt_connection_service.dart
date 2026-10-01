@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'log_service.dart';
 
 // =============================================================================
 // SrtConnectionService — SRT transport with H.265 HW encoding
@@ -61,6 +62,8 @@ class SrtConnectionService extends ChangeNotifier {
       _textureId = result?['textureId'] as int?;
       notifyListeners();
     } catch (e) {
+      LogService.instance.add('[SRT] error: $e');
+      LogService.instance.shipToPc(reason: 'srt_error');
       _state    = SrtState.error;
       _errorMsg = 'Camera failed: $e';
       notifyListeners();
@@ -109,6 +112,8 @@ class SrtConnectionService extends ChangeNotifier {
 
       await _startStreaming();
     } catch (e) {
+      LogService.instance.add('[SRT] error: $e');
+      LogService.instance.shipToPc(reason: 'srt_error');
       _state    = SrtState.error;
       _errorMsg = e.toString();
       notifyListeners();
@@ -124,6 +129,8 @@ class SrtConnectionService extends ChangeNotifier {
     try {
       await _startStreaming();
     } catch (e) {
+      LogService.instance.add('[SRT] error: $e');
+      LogService.instance.shipToPc(reason: 'srt_error');
       _state    = SrtState.error;
       _errorMsg = e.toString();
       notifyListeners();

@@ -15,7 +15,9 @@ import 'package:path_provider/path_provider.dart';
 //   - on an uncaught error / FlutterError (crash capture in main()).
 //
 // Engine side: POST http://{host}:{port}/phonelog?source=..&reason=..
-//   handled by WHIPServer (whip_server.cpp) → saved to
+//   handled by SAMBA on BOTH the WHIP port (:8080) and the always-on remote-control port (:9000), so the
+//   ports are tried in the order that matches the active transport (portsProvider): a phone on SRT/SBL
+//   has no WHIP server to reach. (SRT also carries the log inside its own stream — tried first.) Saved to
 //   %APPDATA%\Samba\phone_logs\<source>_<timestamp>.log
 //
 // All network/file work is best-effort and never throws to the caller.
@@ -30,6 +32,8 @@ class LogService {
   String _device     = 'cam1';
   File?  _file;
   bool   _shipping   = false;
+  /// Ports to try, in order, for the CURRENT transport (set by the UI). Falls back to [_enginePort].
+  List<int> Function()? portsProvider;
 
   bool get hasTarget => _engineHost.isNotEmpty;
 
@@ -77,22 +81,26 @@ class LogService {
       if (ok == true) { _shipping = false; return true; }
     } catch (_) {/* no stream up / not supported → HTTP below */}
     try {
-      final uri = Uri.parse(
-        'http://$_engineHost:$_enginePort/phonelog'
-        '?source=${Uri.encodeComponent(_device)}'
-        '&reason=${Uri.encodeComponent(reason)}',
-      );
-      final body = StringBuffer()
-        ..writeln('# Samba Air log — reason=$reason — ${DateTime.now().toIso8601String()}')
-        ..writeln('# device=$_device  host=$_engineHost:$_enginePort')
-        ..writeln(dump());
-      final r = await http
-          .post(uri,
-              headers: {'Content-Type': 'text/plain; charset=utf-8'},
-              body: body.toString())
-          .timeout(const Duration(seconds: 4));
-      return r.statusCode >= 200 && r.statusCode < 300;
-    } catch (_) {
+      final ports = <int>[...(portsProvider?.call() ?? const <int>[]), _enginePort].toSet().toList();
+      for (final port in ports) {
+        try {
+          final uri = Uri.parse(
+            'http://$_engineHost:$port/phonelog'
+            '?source=${Uri.encodeComponent(_device)}'
+            '&reason=${Uri.encodeComponent(reason)}',
+          );
+          final body = StringBuffer()
+            ..writeln('# Samba Air log — reason=$reason — ${DateTime.now().toIso8601String()}')
+            ..writeln('# device=$_device  host=$_engineHost:$port  (ports tried: $ports)')
+            ..writeln(dump());
+          final r = await http
+              .post(uri,
+                  headers: {'Content-Type': 'text/plain; charset=utf-8'},
+                  body: body.toString())
+              .timeout(const Duration(seconds: 4));
+          if (r.statusCode >= 200 && r.statusCode < 300) return true;
+        } catch (_) {/* next port */}
+      }
       return false;
     } finally {
       _shipping = false;

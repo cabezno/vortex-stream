@@ -120,6 +120,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    LogService.instance.portsProvider = _logPorts;
     WidgetsBinding.instance.addObserver(this);
     _renderer.initialize();
     _loadSaved();
@@ -244,6 +245,18 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     }
   }
 
+  // Where SAMBA can receive our log over HTTP for the CURRENT transport: WHIP → the WHIP server port first;
+  // SRT / SBL / RTMP / OMT → the remote-control port (:9000, always on) first. Both handle /phonelog.
+  List<int> _logPorts() {
+    var whipPort = 8080;
+    final u = _config?.whip?.url;
+    if (u != null) {
+      final p = Uri.tryParse(u);
+      if (p != null && p.hasPort) whipPort = p.port;
+    }
+    return _transport == Transport.whip ? [whipPort, 9000] : [9000, whipPort];
+  }
+
   // ---- Manual entry ----
   Future<void> _manualEntry() async {
     final items = <String>['WHIP (WebRTC)', 'SRT', 'RTMP'];
@@ -291,7 +304,10 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     ConnectionConfig cfg;
     Transport t;
     if (proto.contains('SRT')) {
-      final parts = url.split(':');
+      // Accept "IP:port" and also "srt://IP:port?..." (what SAMBA shows) — splitting the raw URL on ':'
+      // used to make the host "srt".
+      final hp = url.replaceFirst(RegExp(r'^srt://', caseSensitive: false), '').split(RegExp(r'[/?]')).first;
+      final parts = hp.split(':');
       final ip = parts[0];
       final port = parts.length > 1 ? int.tryParse(parts[1]) ?? 8890 : 8890;
       cfg = ConnectionConfig.fromSrtIp(ip, port: port);

@@ -18,6 +18,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'log_service.dart';
 
 enum SblState { disconnected, connecting, streaming, error }
 
@@ -135,6 +136,8 @@ class SblConnectionService extends ChangeNotifier {
       _state = SblState.streaming;
       notifyListeners();
     } catch (e) {
+      LogService.instance.add('[SBL] error: $e');
+      LogService.instance.shipToPc(reason: 'sbl_error');
       _state    = SblState.error;
       _errorMsg = e.toString();
       notifyListeners();

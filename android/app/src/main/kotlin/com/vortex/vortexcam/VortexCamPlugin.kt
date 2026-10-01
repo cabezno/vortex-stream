@@ -87,7 +87,9 @@ class VortexCamPlugin(
 
     // ---- Transport sockets ----
     private var srtSocket:  SrtSocket? = null   // SRT transport
-    private var srtMuxer:   TsMuxer?   = null   // kept to carry the diagnostic log in the same stream
+    private var srtMuxer:   TsMuxer?   = null   // kept to carry the app log in the same stream
+    // Last encoder failure, returned to Dart (→ log shipped to SAMBA) instead of a bare "failed".
+    @Volatile private var lastEncoderError = ""
     private var rtmpClient: RtmpClient? = null  // RTMP transport
 
     // ---- SBL UDP transport ----
@@ -421,7 +423,8 @@ class VortexCamPlugin(
             startPreviewSession()
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Encoder setup failed at ${width}x${height}: $e")
+            Log.e(TAG, "Encoder setup failed at ${width}x${height}: $e", e)
+            lastEncoderError = "${width}x${height}: $e" + (e.cause?.let { " ← $it" } ?: "")
             try { encoder?.release() } catch (_: Exception) {}
             encoder = null
             encoderSurface = null
@@ -548,7 +551,7 @@ class VortexCamPlugin(
         thread(name = "SrtStart") {
             try {
                 if (!setupEncoder(codec, width, height, bitrate, keyframeMs)) {
-                    result.error("ENC", "Encoder setup failed", null); return@thread
+                    result.error("ENC", "Encoder setup failed — $lastEncoderError", null); return@thread
                 }
                 setupAudio()
 
@@ -560,8 +563,6 @@ class VortexCamPlugin(
                 val muxer = TsMuxer(mime)
                 srtMuxer = muxer
                 streaming.set(true)
-                // Diagnostic: orientation values, sent IN the SRT stream (SAMBA saves it to phone_logs).
-                sendLogBytes(orientationDiag(width, height), "diag")
 
                 startAudioInputThread()
                 startAudioOutputThread(muxer, srtSocket!!)
@@ -590,25 +591,6 @@ class VortexCamPlugin(
             synchronized(sendLock) { for (p in pkts) sock.send(p) }
             true
         } catch (e: Exception) { Log.w(TAG, "sendLog: $e"); false }
-    }
-
-    private fun orientationDiag(width: Int, height: Int): String {
-        val sb = StringBuilder("[diag] orientación\n")
-        try {
-            val id = getCameraId(cameraFacing) ?: "0"
-            val ch = cameraManager?.getCameraCharacteristics(id)
-            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
-            val rot = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: -1
-            sb.append("modelo=${Build.MANUFACTURER} ${Build.MODEL} android=${Build.VERSION.RELEASE} (api ${Build.VERSION.SDK_INT})\n")
-            sb.append("camara id=$id facing=${if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) "frontal" else "trasera"}")
-            sb.append(" SENSOR_ORIENTATION=${ch?.get(CameraCharacteristics.SENSOR_ORIENTATION)}\n")
-            sb.append("display.rotation=$rot (0=ROTATION_0 1=90 2=180 3=270)\n")
-            sb.append("encoderRotationDegrees()=${encoderRotationDegrees()} → KEY_ROTATION aplicado\n")
-            sb.append("encoder pedido=${width}x$height  preview buffer=1920x1080\n")
-            val map = ch?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            sb.append("tamaños SurfaceTexture: ${map?.getOutputSizes(SurfaceTexture::class.java)?.take(8)?.joinToString()}\n")
-        } catch (e: Exception) { sb.append("diag error: $e\n") }
-        return sb.toString()
     }
 
     private fun drainToSrt(muxer: TsMuxer) {
@@ -649,7 +631,7 @@ class VortexCamPlugin(
         thread(name = "RtmpStart") {
             try {
                 if (!setupEncoder("h264", width, height, bitrate, keyframeMs)) {
-                    result.error("ENC", "Encoder setup failed", null); return@thread
+                    result.error("ENC", "Encoder setup failed — $lastEncoderError", null); return@thread
                 }
                 rtmpClient = RtmpClient(url)
                 rtmpClient!!.connect()
@@ -736,7 +718,7 @@ class VortexCamPlugin(
         thread(name = "SblStart") {
             try {
                 if (!setupEncoder("h264", width, height, bitrate, 1000)) {
-                    result.error("ENC", "Encoder setup failed", null); return@thread
+                    result.error("ENC", "Encoder setup failed — $lastEncoderError", null); return@thread
                 }
                 sblSocket = java.net.DatagramSocket()
                 sblSocket!!.setSoTimeout(0)

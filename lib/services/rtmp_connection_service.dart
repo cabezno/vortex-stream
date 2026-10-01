@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'log_service.dart';
 
 // =============================================================================
 // RtmpConnectionService — RTMP transport via VortexCamPlugin native channel
@@ -51,6 +52,8 @@ class RtmpConnectionService extends ChangeNotifier {
       _textureId = result?['textureId'] as int?;
       notifyListeners();
     } catch (e) {
+      LogService.instance.add('[RTMP] error: $e');
+      LogService.instance.shipToPc(reason: 'rtmp_error');
       _state = RtmpState.error;
       _errorMsg = 'Camera failed: $e';
       notifyListeners();
@@ -76,6 +79,8 @@ class RtmpConnectionService extends ChangeNotifier {
       _startStatsPolling();
       debugPrint('[VortexCam RTMP] Streaming → $rtmpUrl');
     } catch (e) {
+      LogService.instance.add('[RTMP] error: $e');
+      LogService.instance.shipToPc(reason: 'rtmp_error');
       _state    = RtmpState.error;
       _errorMsg = e.toString();
       notifyListeners();

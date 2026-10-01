@@ -36,9 +36,8 @@ jobs:
         run: |
           PLUGIN_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
           mkdir -p /tmp/vortex_plugins
-          cp "$PLUGIN_DIR/VortexCamPlugin.kt"  /tmp/vortex_plugins/
-          cp "$PLUGIN_DIR/OmtStreamPlugin.kt"  /tmp/vortex_plugins/
-          cp "$PLUGIN_DIR/MainActivity.kt"     /tmp/vortex_plugins/
+          # ALL our .kt files (a fixed list silently dropped new ones, e.g. EncoderRotator.kt)
+          cp "$PLUGIN_DIR"/*.kt /tmp/vortex_plugins/
           # Preserve JNI/C++ sources and prebuilt .so files.
           # Copy the CONTENTS into a temp dir (trailing /.) so restore lands them
           # back as cpp/ and jniLibs/ — not as a nested vortex_cpp/ folder.
@@ -52,9 +51,7 @@ jobs:
 
           DST_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
           mkdir -p "$DST_DIR"
-          cp /tmp/vortex_plugins/VortexCamPlugin.kt  "$DST_DIR/"
-          cp /tmp/vortex_plugins/OmtStreamPlugin.kt  "$DST_DIR/"
-          cp /tmp/vortex_plugins/MainActivity.kt     "$DST_DIR/"
+          cp /tmp/vortex_plugins/*.kt "$DST_DIR/"
           # Restore JNI sources and prebuilt libraries into their real paths
           mkdir -p android/app/src/main/cpp android/app/src/main/jniLibs
           cp -r /tmp/vortex_cpp/.     android/app/src/main/cpp/
