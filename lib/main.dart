@@ -264,8 +264,10 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
 
   // ---- Manual entry ----
   Future<void> _manualEntry() async {
-    final items = <String>['WHIP (WebRTC)', 'SRT', 'RTMP'];
-    String selected = _transportLabel;
+    // Every transport the app has, not only the three that had a manual path: SBL and OMT were reachable ONLY by
+    // scanning SAMBA's QR.
+    final items = <String>['WHIP (WebRTC)', 'SRT', 'RTMP', 'SBL', 'OMT'];
+    String selected = items.contains(_transportLabel) ? _transportLabel : items.first;
     final ctrl = TextEditingController();
 
     final result = await showDialog<Map<String, String>?>(
@@ -320,6 +322,17 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     } else if (proto.contains('RTMP')) {
       cfg = ConnectionConfig.fromRtmpUrl(url);
       t   = Transport.rtmp;
+    } else if (proto == 'SBL') {
+      final hp = url.replaceFirst(RegExp(r'^sbl://', caseSensitive: false), '').split(RegExp(r'[/?]')).first;
+      final parts = hp.split(':');
+      final port = parts.length > 1 ? int.tryParse(parts[1]) ?? 8890 : 8890;
+      cfg = ConnectionConfig.fromSblIp(parts[0], port: port,
+          sourceName: _deviceCtrl.text.trim().isEmpty ? 'SambaAir' : _deviceCtrl.text.trim());
+      t   = Transport.sbl;
+    } else if (proto == 'OMT') {
+      // OMT: the phone LISTENS and SAMBA connects to it — the field is only the port to listen on.
+      cfg = ConnectionConfig.fromOmtPort(int.tryParse(url.split(':').last) ?? 5960);
+      t   = Transport.omt;
     } else {
       cfg = ConnectionConfig.fromWhipUrl(url);
       t   = Transport.whip;
@@ -331,11 +344,15 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   }
 
   String _urlLabel(String proto) {
+    if (proto == 'SBL')         return 'IP:puerto de SAMBA (ej. 192.168.1.2:8890)';
+    if (proto == 'OMT')         return 'Puerto donde escucha el celular (ej. 5960)';
     if (proto.contains('SRT'))  return 'IP:puerto (ej. 192.168.1.2:8890)';
     if (proto.contains('RTMP')) return 'rtmp://ip/app/clave';
     return 'http://ip:8080/whip/';
   }
   String _urlHint(String proto) {
+    if (proto == 'SBL')         return '192.168.1.2:8890';
+    if (proto == 'OMT')         return '5960';
     if (proto.contains('SRT'))  return '192.168.137.1:8890';
     if (proto.contains('RTMP')) return 'rtmp://192.168.1.2:1935/live/vortexcam';
     return 'http://192.168.137.1:8080/whip/';

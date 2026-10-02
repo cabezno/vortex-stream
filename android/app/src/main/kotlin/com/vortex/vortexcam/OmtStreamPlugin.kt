@@ -99,6 +99,7 @@ class OmtStreamPlugin(
     private var cameraThread   : HandlerThread? = null
     private var cameraHandler  : Handler? = null
 
+    private var clock          = StreamClock()   // same session clock as SRT/RTMP/SBL
     private val bytesSent      = AtomicLong(0L)
     private val framesSent     = AtomicLong(0L)
     private var nsdManager     : NsdManager? = null
@@ -144,6 +145,7 @@ class OmtStreamPlugin(
                 encoderHandle = nativeCreateEncoder(width, height, quality, 709)
                 if (encoderHandle == 0L) throw Exception("VMX encoder init failed")
 
+                clock = StreamClock()
                 // Start TCP server (phone listens, VortexEngine connects)
                 serverSocket = ServerSocket(port)
                 streaming.set(true)
@@ -242,7 +244,7 @@ class OmtStreamPlugin(
                     yPlane.buffer,  yPlane.rowStride,
                     uvPlane.buffer, uvPlane.rowStride
                 ) ?: return@setOnImageAvailableListener
-                sendVideoFrame(encoded)
+                sendVideoFrame(encoded, clock.video.sessionUs(image.timestamp / 1000))
             } finally {
                 image.close()
             }
@@ -286,9 +288,10 @@ class OmtStreamPlugin(
     }
 
     // ── OMT frame encoding ───────────────────────────────────────────────────
-    private fun sendVideoFrame(vmxData: ByteArray) {
+    // sessionUs = the frame's CAPTURE time on the shared StreamClock (was the send time, after the VMX encode).
+    private fun sendVideoFrame(vmxData: ByteArray, sessionUs: Long) {
         val out = clientOutput ?: return
-        val ts  = System.nanoTime() / 100L  // 100-nanosecond units (OMT protocol)
+        val ts  = sessionUs * 10L  // 100-nanosecond units (OMT protocol)
 
         // Video extended header (32 bytes)
         val xhdr = ByteBuffer.allocate(32).order(ByteOrder.LITTLE_ENDIAN).apply {

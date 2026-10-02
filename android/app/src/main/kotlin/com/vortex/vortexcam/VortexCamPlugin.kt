@@ -93,12 +93,17 @@ class VortexCamPlugin(
     // Camera sensor orientation, read once when the camera opens (getCameraCharacteristics is NOT cheap and
     // previewRotation runs on the main thread).
     @Volatile private var cachedSensorOrientation = 90
+    // AE fps range the OPEN camera supports (asking for 30-60 on a 30 fps-only camera made the Galaxy A10's camera
+    // service abort on the next reconfigure). Read once per camera open.
+    @Volatile private var cachedFpsRange = android.util.Range(30, 30)
     private var rtmpClient: RtmpClient? = null  // RTMP transport
+    // Session clock shared by video and audio of whichever transport is up (new one per stream start).
+    @Volatile private var streamClock = StreamClock()
 
     // ---- SBL UDP transport ----
     private var sblSocket:     java.net.DatagramSocket?    = null
     private var sblRemoteAddr: java.net.InetSocketAddress? = null
-    private var sblPktSeq      = 0
+    private val sblPktSeq     = java.util.concurrent.atomic.AtomicInteger(0)   // video + mic + control threads
 
     // ---- Mic audio for SRT (mic → AAC encoder → MPEG-TS) ----
     private var audioEncoder:    MediaCodec?  = null
@@ -114,16 +119,30 @@ class VortexCamPlugin(
     private var returnTrack:      AudioTrack?         = null
     private val returnRunning    = AtomicBoolean(false)
     private var returnThread:     Thread?             = null
-    private var sblFrameSeq    = 0
+    // ONE frame counter for video AND audio. SAMBA's PacketReassembler keys frames by frameSeqNum alone (one reassembler
+    // per source, not per stream): separate counters made audio frame N collide with video frame N, and the gap
+    // between the two counters read as "Sender restarted its stream" ~25 times a second -> half-built 4K frames
+    // thrown away, blocky picture, a keyframe request every second (2026-10-02).
+    private val sblFrameSeq   = java.util.concurrent.atomic.AtomicInteger(0)
+    // Video datagrams are PACED at 1.5x the bitrate: a 4K keyframe (~400 KB = ~340 datagrams) sent back-to-back
+    // overflowed the Wi-Fi uplink and lost fragments; every lost fragment cost the whole frame and a new keyframe
+    // request -> a loss / keyframe storm with a blocky picture (Xiaomi 4K30 SBL, 2026-10-02).
+    @Volatile private var sblPaceBps = 8_000_000L
+    // Video frames and audio frames never interleave on the wire. SAMBA's reassembler treats every frameSeqNum at
+    // or below the highest COMPLETED one as finished: a one-packet audio frame N+1 sent while video frame N was
+    // still going out completed first, and the rest of frame N was then discarded as stale -> lost frames and the
+    // smeared "ghost" picture. Each frame takes its sequence number and goes out whole, under this lock.
+    private val sblSendLock = Any()
+    private var sblPaceNextNs = 0L
+    // Forced IDRs at most once a second: SAMBA asked ~3/s while frames were being lost, and each 4K keyframe is
+    // itself the biggest burst of all.
+    @Volatile private var lastForcedIdrMs = 0L
 
     // H.264 parameter sets, republished with every keyframe so a receiver can
     // join the stream at any IDR rather than only at the very first frame.
     private var sblSps: ByteArray? = null
     private var sblPps: ByteArray? = null
 
-    // Audio runs on its own frame sequence: the Audio and VideoColor streams are
-    // reassembled independently by the engine and must not share a counter.
-    private var sblAudioFrameSeq = 0
     // Toggled from Dart via "setTalkbackMuted" — checked in decodeAndPlay() before
     // writing to the AudioTrack, so muting doesn't tear down/reopen the decoder.
     private val talkbackMuted    = AtomicBoolean(false)
@@ -152,7 +171,20 @@ class VortexCamPlugin(
     // ====================================================================
     // MethodChannel dispatch
     // ====================================================================
-    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
+    // A Flutter reply may be sent ONCE. Camera callbacks can fire again after the call was answered (onError after
+    // onOpened when the camera service dies — Galaxy A10, 2026-10-02) and a second reply throws
+    // "Reply already submitted" on the camera thread, which killed the whole app.
+    private class OnceResult(private val r: MethodChannel.Result) : MethodChannel.Result {
+        private val done = AtomicBoolean(false)
+        override fun success(v: Any?) { if (done.compareAndSet(false, true)) r.success(v) }
+        override fun error(code: String, msg: String?, details: Any?) {
+            if (done.compareAndSet(false, true)) r.error(code, msg, details) else Log.w(TAG, "late error ignored: $code $msg")
+        }
+        override fun notImplemented() { if (done.compareAndSet(false, true)) r.notImplemented() }
+    }
+
+    override fun onMethodCall(call: MethodCall, rawResult: MethodChannel.Result) {
+        val result = OnceResult(rawResult)
         when (call.method) {
             "startCamera"  -> startCamera(call, result)
             // Preview only (what goes to SAMBA is untouched): clockwise degrees to show the camera upright.
@@ -240,7 +272,8 @@ class VortexCamPlugin(
         cameraManager!!.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(camera: CameraDevice) {
                 cameraDevice = camera
-                Log.i(TAG, "Camera opened: $cameraId")
+                cachedFpsRange = pickFpsRange(cameraId)
+                Log.i(TAG, "Camera opened: $cameraId (AE $cachedFpsRange fps)")
                 cachedSensorOrientation = try {
                     cameraManager?.getCameraCharacteristics(cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
                 } catch (e: Exception) { 90 }
@@ -253,29 +286,36 @@ class VortexCamPlugin(
             }
             override fun onError(camera: CameraDevice, error: Int) {
                 camera.close(); cameraDevice = null
-                result.error("CAMERA_ERROR", "Camera error: $error", null)
+                result.error("CAMERA_ERROR", "Camera error: $error", null)   // no-op if already answered
+                Thread { sendLogBytes("[cámara] error $error (servicio de cámara caído o cámara ocupada)\n", "camera_error") }.start()
             }
         }, cameraHandler)
     }
 
     private fun startPreviewSession() {
-        val surfaces = mutableListOf(previewSurface!!)
+        val dev = cameraDevice ?: return
+        val surfaces = mutableListOf(previewSurface ?: return)
         if (encoderSurface != null) surfaces.add(encoderSurface!!)
-        cameraDevice?.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
+        try { dev.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(session: CameraCaptureSession) {
+                // The camera may have been closed (flip, stop, camera service death) while this session was being
+                // configured: cameraDevice!! used to throw NPE here, on the camera thread, and kill the app.
+                if (cameraDevice !== dev) { try { session.close() } catch (_: Exception) {}; return }
                 captureSession = session
-                val req = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                    surfaces.forEach { addTarget(it) }
-                    set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, android.util.Range(30, 60))
-                    set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
-                }
-                session.setRepeatingRequest(req.build(), null, cameraHandler)
-                Log.i(TAG, "Capture session started (${surfaces.size} surfaces)")
+                try {
+                    val req = dev.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                        surfaces.forEach { addTarget(it) }
+                        set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, cachedFpsRange)
+                        set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
+                    }
+                    session.setRepeatingRequest(req.build(), null, cameraHandler)
+                    Log.i(TAG, "Capture session started (${surfaces.size} surfaces)")
+                } catch (e: Exception) { Log.w(TAG, "Capture session lost while starting: $e") }
             }
             override fun onConfigureFailed(session: CameraCaptureSession) {
                 Log.e(TAG, "Capture session configure failed")
             }
-        }, cameraHandler)
+        }, cameraHandler) } catch (e: Exception) { Log.w(TAG, "createCaptureSession failed: $e") }
     }
 
     private fun stopCamera() {
@@ -307,6 +347,7 @@ class VortexCamPlugin(
         cameraManager?.openCamera(cameraId, object : CameraDevice.StateCallback() {
             override fun onOpened(cam: CameraDevice) {
                 cameraDevice = cam
+                cachedFpsRange = pickFpsRange(cameraId)
                 cachedSensorOrientation = try {
                     cameraManager?.getCameraCharacteristics(cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
                 } catch (e: Exception) { 90 }
@@ -332,6 +373,15 @@ class VortexCamPlugin(
             cameraManager?.setTorchMode(id, on)
         } catch (e: Exception) { Log.w(TAG, "Torch: $e") }
     }
+
+    // Highest-ceiling AE range the camera lists, preferring a floor of at least 30 (no dark-scene drop to 15 fps).
+    private fun pickFpsRange(cameraId: String): android.util.Range<Int> = try {
+        val ranges = cameraManager?.getCameraCharacteristics(cameraId)
+            ?.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)?.toList().orEmpty()
+        ranges.filter { it.upper <= 60 }.maxWithOrNull(
+            compareBy<android.util.Range<Int>>({ it.upper }, { if (it.lower >= 30) 1 else 0 }, { -it.lower }))   // [30,60] over [60,60]: keeps exposure in low light
+            ?: android.util.Range(30, 30)
+    } catch (e: Exception) { android.util.Range(30, 30) }
 
     private fun getCameraId(facing: Int): String? {
         val mgr = cameraManager ?: return null
@@ -399,9 +449,13 @@ class VortexCamPlugin(
         attempts.add(Triple(width, height, bitrateBps))            // requested first
         for (t in ladder) if (t.first < width) attempts.add(t)     // then strictly smaller tiers
         for (a in attempts) {
-            if (tryConfigureEncoder(codec, a.first, a.second, a.third, keyframeMs)) {
-                Log.i(TAG, "SBL/encoder @ ${a.first}x${a.second} @${a.third / 1000}kbps")
-                return true
+            // First with the latency tuning, then plain: some encoders (Exynos on the Galaxy A10, 2026-10-02) reject
+            // KEY_LOW_LATENCY with -22 at EVERY resolution, so nothing could stream on SRT/RTMP/SBL at all.
+            for (tuned in listOf(true, false)) {
+                if (tryConfigureEncoder(codec, a.first, a.second, a.third, keyframeMs, tuned)) {
+                    Log.i(TAG, "encoder @ ${a.first}x${a.second} @${a.third / 1000}kbps${if (tuned) "" else " (sin ajustes de latencia)"}")
+                    return true
+                }
             }
             Log.w(TAG, "encoder ${a.first}x${a.second} rejected — falling back")
         }
@@ -410,7 +464,7 @@ class VortexCamPlugin(
 
     private fun tryConfigureEncoder(
         codec: String, width: Int, height: Int,
-        bitrateBps: Int, keyframeMs: Int,
+        bitrateBps: Int, keyframeMs: Int, tuned: Boolean,
     ): Boolean {
         return try {
             val mime = if (codec == "hevc") MediaFormat.MIMETYPE_VIDEO_HEVC
@@ -429,10 +483,12 @@ class VortexCamPlugin(
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, keyframeMs / 1000)
                 setInteger(MediaFormat.KEY_COLOR_FORMAT,     MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
                 setInteger(MediaFormat.KEY_BITRATE_MODE,     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
-                setInteger(MediaFormat.KEY_PRIORITY,         0)
-                setInteger(MediaFormat.KEY_OPERATING_RATE,   120)
-                if (android.os.Build.VERSION.SDK_INT >= 30)
-                    setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                if (tuned) {
+                    setInteger(MediaFormat.KEY_PRIORITY,         0)
+                    setInteger(MediaFormat.KEY_OPERATING_RATE,   120)
+                    if (android.os.Build.VERSION.SDK_INT >= 30)
+                        setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                }
                 if (rotation != 0)
                     setInteger(MediaFormat.KEY_ROTATION, rotation)
             }
@@ -583,7 +639,8 @@ class VortexCamPlugin(
 
                 val mime = if (codec == "hevc") MediaFormat.MIMETYPE_VIDEO_HEVC
                            else MediaFormat.MIMETYPE_VIDEO_AVC
-                val muxer = TsMuxer(mime)
+                streamClock = StreamClock()
+                val muxer = TsMuxer(mime, streamClock)
                 srtMuxer = muxer
                 streaming.set(true)
 
@@ -656,6 +713,7 @@ class VortexCamPlugin(
                 if (!setupEncoder("h264", width, height, bitrate, keyframeMs)) {
                     result.error("ENC", "Encoder setup failed — $lastEncoderError", null); return@thread
                 }
+                streamClock = StreamClock()
                 rtmpClient = RtmpClient(url)
                 rtmpClient!!.connect()
 
@@ -698,14 +756,29 @@ class VortexCamPlugin(
             }
             val data = ByteArray(info.size).also { buf.position(info.offset); buf.get(it) }
             val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+            if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                // Some encoders deliver SPS+PPS as a buffer instead of (or as well as) csd-0/csd-1: keep them as
+                // the sequence header, never send them as a frame.
+                if (spsData == null) spsData = data
+                encoder!!.releaseOutputBuffer(idx, false); continue
+            }
 
-            if (!seqHeaderSent && spsData != null && ppsData != null) {
-                rtmpClient?.sendVideoSequenceHeader(spsData, ppsData)
-                seqHeaderSent = true
+            // csd-0 may hold SPS and PPS together (csd-1 absent) — the header builder splits them.
+            if (!seqHeaderSent && spsData != null) {
+                seqHeaderSent = rtmpClient?.sendVideoSequenceHeader(spsData, ppsData ?: ByteArray(0)) == true
             }
             if (seqHeaderSent) {
-                rtmpClient?.sendVideoData(data, info.presentationTimeUs / 1000, isKey)
-                bytesSent.addAndGet(data.size.toLong())
+                try {
+                    rtmpClient?.sendVideoData(data, streamClock.video.sessionUs(info.presentationTimeUs) / 1000, isKey)
+                    bytesSent.addAndGet(data.size.toLong())
+                } catch (e: java.io.IOException) {
+                    // The receiver went away (Broken pipe / reset). This used to escape the encode thread and kill
+                    // the whole app; now the stream stops cleanly (stopStream from another thread: it joins this one).
+                    Log.w(TAG, "RTMP connection lost: $e")
+                    try { encoder?.releaseOutputBuffer(idx, false) } catch (_: Exception) {}
+                    Thread { stopStream() }.start()
+                    return
+                }
             }
 
             encoder!!.releaseOutputBuffer(idx, false)
@@ -737,6 +810,7 @@ class VortexCamPlugin(
         val width      = call.argument<Int>("width")         ?: 1280
         val height     = call.argument<Int>("height")        ?: 720
         val bitrate    = call.argument<Int>("bitrateBps")    ?: 8_000_000
+        sblPaceBps = bitrate.toLong()
 
         thread(name = "SblStart") {
             try {
@@ -746,8 +820,9 @@ class VortexCamPlugin(
                 sblSocket = java.net.DatagramSocket()
                 sblSocket!!.setSoTimeout(0)
                 sblRemoteAddr = java.net.InetSocketAddress(host, port)
-                sblPktSeq   = 0
-                sblFrameSeq = 0
+                sblPktSeq.set(0)
+                sblFrameSeq.set(0)
+                streamClock = StreamClock()
                 // Send Hello
                 sendSblHello(sourceName)
                 // Small wait for HelloAck (optional, non-blocking approach)
@@ -853,7 +928,7 @@ class VortexCamPlugin(
                     if (out != null) {
                         val frame = ByteArray(info.size)
                         out.position(info.offset); out.get(frame)
-                        sendSblAudioFrame(frame, info.presentationTimeUs)
+                        sendSblAudioFrame(frame, streamClock.audio.sessionUs(info.presentationTimeUs))
                     }
                 }
                 enc.releaseOutputBuffer(outIdx, false)
@@ -864,7 +939,11 @@ class VortexCamPlugin(
 
     // One Opus frame on the Audio stream (streamID 1). Small enough to always
     // fit a single datagram, so no fragmentation loop is needed.
-    private fun sendSblAudioFrame(opus: ByteArray, ptsUs: Long) {
+    private fun sendSblAudioFrame(opus: ByteArray, ptsUs: Long) = synchronized(sblSendLock) {
+        sendSblAudioFrameLocked(opus, ptsUs)
+    }
+
+    private fun sendSblAudioFrameLocked(opus: ByteArray, ptsUs: Long) {
         val payloadLen = SBL_FRAME_HEADER_SIZE + opus.size
         if (SBL_HEADER_SIZE + payloadLen > 1400) return   // guard; Opus frames are ~120B
 
@@ -872,8 +951,8 @@ class VortexCamPlugin(
         pkt.put(SBL_MAGIC); pkt.put(SBL_VERSION)
         pkt.put(0)                              // packetType = Data
         pkt.put(1)                              // streamID   = Audio
-        pkt.putShort(sblPktSeq++.toShort())
-        pkt.putInt(sblAudioFrameSeq++)
+        pkt.putShort(sblPktSeq.getAndIncrement().toShort())
+        pkt.putInt(sblFrameSeq.getAndIncrement())   // shared with video (see sblFrameSeq)
         pkt.putShort(0)                         // fragmentIdx
         pkt.putShort(1)                         // fragmentTotal
         pkt.putLong(ptsUs)
@@ -907,7 +986,7 @@ class VortexCamPlugin(
         buf.put(SBL_VERSION)         // [3]
         buf.put(2)                   // [4] packetType = Hello
         buf.put(0)                   // [5] streamID = VideoColor
-        buf.putShort(sblPktSeq++.toShort()) // [6..7]
+        buf.putShort(sblPktSeq.getAndIncrement().toShort()) // [6..7]
         buf.putInt(0)                // [8..11] frameSeq
         buf.putShort(0)              // [12..13] fragmentIdx
         buf.putShort(1)              // [14..15] fragmentTotal
@@ -935,7 +1014,7 @@ class VortexCamPlugin(
         buf.put(SBL_MAGIC); buf.put(SBL_VERSION)
         buf.put(4)  // Keepalive
         buf.put(0)  // streamID
-        buf.putShort(sblPktSeq++.toShort())
+        buf.putShort(sblPktSeq.getAndIncrement().toShort())
         buf.putInt(0); buf.putShort(0); buf.putShort(1)
         buf.putLong(System.currentTimeMillis() * 1000)
         buf.putShort(0); buf.putShort(0); buf.putInt(0)
@@ -972,6 +1051,17 @@ class VortexCamPlugin(
         pkt[30] = (crc ushr  8).toByte()
         pkt[31] = (crc        ).toByte()
         return pkt
+    }
+
+    // Token-bucket pacing for the video stream (see sblPaceBps). Small idle gaps are not saved up beyond 20 ms, so a
+    // pause cannot turn into a later burst.
+    private fun paceSbl(bytes: Int) {
+        val rate = (sblPaceBps * 3 / 2).coerceAtLeast(2_000_000L)          // bits/s
+        val now = System.nanoTime()
+        if (sblPaceNextNs < now - 20_000_000L) sblPaceNextNs = now - 20_000_000L
+        val wait = sblPaceNextNs - now
+        if (wait > 200_000L) java.util.concurrent.locks.LockSupport.parkNanos(wait)
+        sblPaceNextNs += bytes * 8L * 1_000_000_000L / rate
     }
 
     private fun sendSblDatagram(data: ByteArray) {
@@ -1017,7 +1107,6 @@ class VortexCamPlugin(
             val nalData = ByteArray(info.size).also { buf.position(info.offset); buf.get(it) }
             val isConfig = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0
             val isKey    = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-            val ptsUs    = info.presentationTimeUs
 
             if (isConfig) {
                 // Some devices deliver the parameter sets as a normal output
@@ -1028,7 +1117,7 @@ class VortexCamPlugin(
                 continue
             }
 
-            sendSblVideoFrame(nalData, isKey, ptsUs, width, height)
+            sendSblVideoFrame(nalData, isKey, streamClock.video.sessionUs(info.presentationTimeUs), width, height)
             bytesSent.addAndGet(nalData.size.toLong())
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
@@ -1057,6 +1146,11 @@ class VortexCamPlugin(
     private fun sendSblVideoFrame(
         rawNal: ByteArray, isKeyframe: Boolean,
         ptsUs: Long, width: Int, height: Int,
+    ) = synchronized(sblSendLock) { sendSblVideoFrameLocked(rawNal, isKeyframe, ptsUs, width, height) }
+
+    private fun sendSblVideoFrameLocked(
+        rawNal: ByteArray, isKeyframe: Boolean,
+        ptsUs: Long, width: Int, height: Int,
     ) {
         // Prepend SPS/PPS to every keyframe. MediaCodec emits them once at
         // stream start; without repeating them, any receiver that connects later
@@ -1074,7 +1168,7 @@ class VortexCamPlugin(
                 }
             } else rawNal
 
-        val frameSeq   = sblFrameSeq++
+        val frameSeq   = sblFrameSeq.getAndIncrement()
         val frameFlags: Short = if (isKeyframe) 0x0001 else 0x0000
         // Fragment into MAX_PAYLOAD chunks; fragment 0 gets extra SblFrameHeader
         val dataPerFrag0 = SBL_MAX_PAYLOAD - SBL_FRAME_HEADER_SIZE
@@ -1098,7 +1192,7 @@ class VortexCamPlugin(
             pkt.put(SBL_MAGIC); pkt.put(SBL_VERSION)
             pkt.put(0)  // Data
             pkt.put(0)  // VideoColor
-            pkt.putShort(sblPktSeq++.toShort())
+            pkt.putShort(sblPktSeq.getAndIncrement().toShort())
             pkt.putInt(frameSeq)
             pkt.putShort(i.toShort())
             pkt.putShort(total.toShort())
@@ -1123,7 +1217,9 @@ class VortexCamPlugin(
                 pkt.putInt(0)    // reserved
             }
             pkt.put(chunk)
-            sendSblDatagram(pkt.array().copyOf(SBL_HEADER_SIZE + payloadLen))
+            val dg = pkt.array().copyOf(SBL_HEADER_SIZE + payloadLen)
+            paceSbl(dg.size)
+            sendSblDatagram(dg)
         }
     }
 
@@ -1276,10 +1372,8 @@ class VortexCamPlugin(
             fmt.setByteBuffer("csd-1", ByteBuffer.allocate(0))
             fmt.setByteBuffer("csd-2", csd2)
 
-            val dec = MediaCodec.createDecoderByType("audio/opus")
-            dec.configure(fmt, null, null, 0)
-            dec.start()
-            returnDecoder = dec
+            returnFormat = fmt
+            returnDecoder = newReturnDecoder(fmt)
 
             val minBuf = AudioTrack.getMinBufferSize(
                 48000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -1339,6 +1433,9 @@ class VortexCamPlugin(
         // it must be handled before the AudioReturn filter below. Without this
         // the engine asked once per second and nothing ever answered.
         if ((buf[4].toInt() and 0xFF) == 7) {
+            val now = System.currentTimeMillis()
+            if (now - lastForcedIdrMs < 1000) return          // at most one forced IDR per second
+            lastForcedIdrMs = now
             try {
                 encoder?.setParameters(android.os.Bundle().apply {
                     putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
@@ -1368,15 +1465,46 @@ class VortexCamPlugin(
         decodeAndPlay(buf, 32, payloadLen)
     }
 
+    private var returnFormat: android.media.MediaFormat? = null
+    private var returnPtsUs = 0L
+    private var returnLastResetMs = 0L
+    private var returnResets = 0
+
+    private fun newReturnDecoder(fmt: android.media.MediaFormat): MediaCodec =
+        MediaCodec.createDecoderByType("audio/opus").also { it.configure(fmt, null, null, 0); it.start() }
+
     private fun decodeAndPlay(buf: ByteArray, offset: Int, length: Int) {
-        val dec   = returnDecoder ?: return
+        try { decodeAndPlayOnce(buf, offset, length) } catch (e: Exception) {
+            // Recreate the decoder (at most once a second) instead of leaving it dead.
+            try { returnDecoder?.release() } catch (_: Exception) {}
+            returnDecoder = null
+            val now = System.currentTimeMillis()
+            if (now - returnLastResetMs >= 1000) {
+                returnLastResetMs = now
+                returnDecoder = try { returnFormat?.let { newReturnDecoder(it) } } catch (e2: Exception) { null }
+                if (returnResets++ < 5) {
+                    val msg = "[retorno] decodificador Opus reiniciado (${e.javaClass.simpleName}: ${e.message})\n"
+                    Log.w(TAG, msg.trim())
+                    Thread { sendLogBytes(msg, "talkback_reset") }.start()
+                }
+            }
+        }
+    }
+
+    private fun decodeAndPlayOnce(buf: ByteArray, offset: Int, length: Int) {
+        val dec   = returnDecoder ?: run {
+            // Dead decoder and no reset yet this second: try again on a later packet.
+            if (System.currentTimeMillis() - returnLastResetMs >= 1000) throw IllegalStateException("no decoder")
+            return
+        }
         val track = returnTrack   ?: return
         val inputIdx = dec.dequeueInputBuffer(5_000)
         if (inputIdx >= 0) {
             val inBuf = dec.getInputBuffer(inputIdx) ?: return
             inBuf.clear()
             inBuf.put(buf, offset, length)
-            dec.queueInputBuffer(inputIdx, 0, length, 0, 0)
+            dec.queueInputBuffer(inputIdx, 0, length, returnPtsUs, 0)
+            returnPtsUs += 20_000   // one 20 ms Opus frame per packet (was 0 for every packet)
         }
         val info = MediaCodec.BufferInfo()
         var outIdx = dec.dequeueOutputBuffer(info, 5_000)
@@ -1399,106 +1527,128 @@ class VortexCamPlugin(
 // =============================================================================
 // MPEG-TS muxer (H.264 / H.265)
 // =============================================================================
-class TsMuxer(private val mimeType: String) {
-    private val videoPid      = 0x100
-    private val audioPid      = 0x101
-    private val pmtPid        = 0x1000
-    private var pktCount      = 0
-    private var audioPktCount = 0
-    private var dts           = 0L
-    private var audioDts      = 0L
+// MPEG-TS for SRT. Every PES ends on the declared byte: the last TS packet is padded with ADAPTATION-FIELD
+// stuffing, never with 0xFF inside the payload (Media Foundation tolerated that garbage after the last NAL,
+// VideoToolbox rejects the whole frame — the phone camera froze on SAMBA Mac, 2026-10-01). PAT/PMT carry a
+// real CRC and their own continuity counters, the video PID carries the PCR, and PTS come from the shared
+// StreamClock (real capture spacing — the camera runs at 30-60 fps, not a fixed 30).
+class TsMuxer(private val mimeType: String, private val clock: StreamClock) {
+    private val videoPid = 0x100
+    private val audioPid = 0x101
+    private val pmtPid   = 0x1000
+    private val logPid   = 0x1FF0   // private, not in the PMT → other receivers ignore it
 
-    fun setFormat(fmt: MediaFormat) { /* SPS/PPS embedded in stream */ }
+    // Continuity counters, one per PID (each is touched by a single thread: video / audio / log).
+    private var videoCc = 0
+    private var audioCc = 0
+    private var patCc   = 0
+    private var pmtCc   = 0
+    private var logCc   = 0
 
-    // Diagnostic log inside the stream: private PID 0x1FF0 (not in the PMT → other receivers ignore it).
-    // Message: "SLOG" | u32 BE textLen | u8 reasonLen | reason | text, split over 188-byte TS packets.
-    private val logPid      = 0x1FF0
-    private var logPktCount = 0
+    private var lastPsiUs = Long.MIN_VALUE
+    private var paramSets: ByteArray? = null   // SPS/PPS (VPS too for HEVC), Annex-B, from the codec-config buffer
+
+    fun setFormat(fmt: MediaFormat) { /* SPS/PPS travel in-band with every keyframe */ }
+
+    // Diagnostic log inside the stream. Message: "SLOG" | u32 BE textLen | u8 reasonLen | reason | text.
     fun muxLog(text: ByteArray, reason: String): List<ByteArray> {
         val r = reason.toByteArray(Charsets.UTF_8).let { if (it.size > 255) it.copyOf(255) else it }
         val hdr = java.nio.ByteBuffer.allocate(9 + r.size)
             .put("SLOG".toByteArray(Charsets.US_ASCII)).putInt(text.size).put(r.size.toByte()).put(r).array()
-        val msg = hdr + text
-        val pkts = mutableListOf<ByteArray>()
-        var off = 0; var first = true
-        while (off < msg.size) {
-            val pkt = ByteArray(188)
-            pkt[0] = 0x47
-            pkt[1] = ((if (first) 0x40 else 0x00) or ((logPid shr 8) and 0x1F)).toByte()
-            pkt[2] = (logPid and 0xFF).toByte()
-            pkt[3] = (0x10 or (logPktCount++ and 0x0F)).toByte()
-            val len = minOf(184, msg.size - off)
-            msg.copyInto(pkt, 4, off, off + len)
-            if (len < 184) pkt.fill(0xFF.toByte(), 4 + len)
-            pkts.add(pkt); off += len; first = false
-        }
-        return pkts
+        val out = mutableListOf<ByteArray>()
+        logCc = packetize(logPid, hdr + text, logCc, out)
+        return out
     }
 
-    // Mux one AAC frame: prepends ADTS header, builds audio PES, fragments into TS packets
+    // One AAC frame: ADTS header + audio PES.
     fun muxAudio(buf: ByteBuffer, info: MediaCodec.BufferInfo, sampleRate: Int, channels: Int): List<ByteArray> {
         val rawAac = ByteArray(info.size).also { buf.position(info.offset); buf.get(it) }
         val adts   = buildAdtsHeader(rawAac.size, sampleRate, channels) + rawAac
-        val pes    = buildAudioPES(adts, audioDts)
-        val pkts   = mutableListOf<ByteArray>()
-        var off = 0; var first = true
-        while (off < pes.size) {
-            val pkt = ByteArray(188)
-            pkt[0] = 0x47
-            val pusi = if (first) 0x40 else 0x00
-            pkt[1] = (pusi or ((audioPid shr 8) and 0x1F)).toByte()
-            pkt[2] = (audioPid and 0xFF).toByte()
-            pkt[3] = (0x10 or (audioPktCount++ and 0x0F)).toByte()
-            val len = minOf(184, pes.size - off)
-            pes.copyInto(pkt, 4, off, off + len)
-            if (len < 184) pkt.fill(0xFF.toByte(), 4 + len)
-            pkts.add(pkt); off += len; first = false
-        }
-        audioDts += 1024L * 90000L / sampleRate   // 1024 samples/AAC frame at 90 kHz clock
-        return pkts
+        val pts90  = (clock.audio.sessionUs(info.presentationTimeUs) + PTS_DELAY_US) * 9 / 100
+        val out = mutableListOf<ByteArray>()
+        audioCc = packetize(audioPid, buildPES(0xC0, adts, pts90, bounded = true), audioCc, out)
+        return out
     }
 
     fun mux(buf: ByteBuffer, info: MediaCodec.BufferInfo): List<ByteArray> {
         val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
-        val data  = ByteArray(info.size).also { buf.position(info.offset); buf.get(it) }
-        val pkts  = mutableListOf<ByteArray>()
-        if (pktCount % 15 == 0) { pkts.add(buildPAT()); pkts.add(buildPMT()) }
-        val pes = buildPES(data, dts)
-        var off = 0; var first = true
-        while (off < pes.size) {
-            val pkt = ByteArray(188)
-            pkt[0] = 0x47
-            val pusi = if (first) 0x40 else 0x00
-            pkt[1] = (pusi or ((videoPid shr 8) and 0x1F)).toByte()
-            pkt[2] = (videoPid and 0xFF).toByte()
-            pkt[3] = (0x10 or (pktCount++ and 0x0F)).toByte()
-            val len = minOf(184, pes.size - off)
-            pes.copyInto(pkt, 4, off, off + len)
-            if (len < 184) pkt.fill(0xFF.toByte(), 4 + len)
-            pkts.add(pkt); off += len; first = false
+        val raw   = ByteArray(info.size).also { buf.position(info.offset); buf.get(it) }
+        // The codec-config buffer is not a picture: it used to go out as its own PES with the same PTS as the first
+        // frame. Keep it and put it in front of EVERY keyframe, so a receiver can also join at any keyframe.
+        if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) { paramSets = raw; return emptyList() }
+        val data  = paramSets?.takeIf { isKey }?.let { it + raw } ?: raw
+        val us    = clock.video.sessionUs(info.presentationTimeUs)
+        val out   = mutableListOf<ByteArray>()
+        // PAT/PMT before every keyframe and at least every 100 ms, so a receiver can join at any time.
+        if (isKey || lastPsiUs == Long.MIN_VALUE || us - lastPsiUs >= 100_000) {
+            out.add(buildPAT()); out.add(buildPMT()); lastPsiUs = us
         }
-        dts += 3000  // 90kHz ticks @ 30fps
-        return pkts
+        // PCR = capture time; PTS = capture time + PTS_DELAY_US (decoder buffer headroom, PTS never behind PCR).
+        val pes = buildPES(0xE0, data, (us + PTS_DELAY_US) * 9 / 100, bounded = false)
+        videoCc = packetize(videoPid, pes, videoCc, out, pcr27 = us * 27, randomAccess = isKey)
+        return out
     }
 
-    private fun buildPES(data: ByteArray, pts: Long): ByteArray {
-        val hdr = ByteArray(14)
-        hdr[0] = 0; hdr[1] = 0; hdr[2] = 1; hdr[3] = 0xE0.toByte()
-        val pesLen = data.size + 8
-        hdr[4] = ((pesLen shr 8) and 0xFF).toByte()
-        hdr[5] = (pesLen and 0xFF).toByte()
-        hdr[6] = 0x80.toByte(); hdr[7] = 0x80.toByte(); hdr[8] = 5
-        hdr[9]  = (0x21 or ((pts shr 29) and 0x0E).toInt()).toByte()
-        hdr[10] = ((pts shr 22) and 0xFF).toByte()
-        hdr[11] = (0x01 or ((pts shr 14) and 0xFE).toInt()).toByte()
-        hdr[12] = ((pts shr 7) and 0xFF).toByte()
-        hdr[13] = (0x01 or ((pts and 0x7F).toInt() shl 1)).toByte()
-        return hdr + data
+    // Splits one PES (or log message) into 188-byte packets. The first packet may carry PCR / random-access in
+    // its adaptation field; the last one is filled with adaptation-field stuffing. Returns the next CC.
+    private fun packetize(pid: Int, payload: ByteArray, ccIn: Int, out: MutableList<ByteArray>,
+                          pcr27: Long = -1, randomAccess: Boolean = false): Int {
+        var cc = ccIn
+        var off = 0
+        var first = true
+        while (off < payload.size) {
+            val pkt = ByteArray(188)
+            pkt[0] = 0x47
+            pkt[1] = ((if (first) 0x40 else 0x00) or ((pid shr 8) and 0x1F)).toByte()
+            pkt[2] = (pid and 0xFF).toByte()
+
+            val withPcr = first && pcr27 >= 0
+            var afFlags = 0
+            if (first && randomAccess) afFlags = afFlags or 0x40
+            if (withPcr)               afFlags = afFlags or 0x10
+            // Adaptation field size (length byte excluded) before stuffing: flags byte + 6 PCR bytes.
+            var afLen = if (afFlags != 0) 1 + (if (withPcr) 6 else 0) else -1   // -1 = no adaptation field
+            val remaining = payload.size - off
+            val room = 184 - (if (afLen >= 0) 1 + afLen else 0)
+            if (remaining < room) afLen = 184 - remaining - 1                     // grow it to stuff the gap
+            val len = minOf(remaining, 184 - (if (afLen >= 0) 1 + afLen else 0))
+
+            pkt[3] = ((if (afLen >= 0) 0x30 else 0x10) or (cc and 0x0F)).toByte()
+            cc = (cc + 1) and 0x0F
+            var p = 4
+            if (afLen >= 0) {
+                pkt[p++] = afLen.toByte()
+                if (afLen > 0) {
+                    val afEnd = p + afLen
+                    pkt[p++] = afFlags.toByte()
+                    if (withPcr) {
+                        val base = (pcr27 / 300) and 0x1FFFFFFFFL
+                        val ext  = (pcr27 % 300).toInt()
+                        pkt[p++] = (base shr 25).toByte()
+                        pkt[p++] = (base shr 17).toByte()
+                        pkt[p++] = (base shr 9).toByte()
+                        pkt[p++] = (base shr 1).toByte()
+                        pkt[p++] = (((base and 1L).toInt() shl 7) or 0x7E or (ext shr 8)).toByte()
+                        pkt[p++] = ext.toByte()
+                    }
+                    while (p < afEnd) pkt[p++] = 0xFF.toByte()
+                }
+            }
+            payload.copyInto(pkt, p, off, off + len)
+            out.add(pkt)
+            off += len
+            first = false
+        }
+        return cc
     }
-    private fun buildAudioPES(data: ByteArray, pts: Long): ByteArray {
+
+    // PES with PTS only (the encoder emits no B-frames). Video is unbounded (PES_packet_length = 0, allowed for
+    // video; a keyframe easily exceeds 64 KB and used to be written modulo 65536). Audio declares its length.
+    private fun buildPES(streamId: Int, data: ByteArray, pts90In: Long, bounded: Boolean): ByteArray {
+        val pts = pts90In and 0x1FFFFFFFFL
         val hdr = ByteArray(14)
-        hdr[0] = 0; hdr[1] = 0; hdr[2] = 1; hdr[3] = 0xC0.toByte()  // audio stream 0
-        val pesLen = data.size + 8
+        hdr[0] = 0; hdr[1] = 0; hdr[2] = 1; hdr[3] = streamId.toByte()
+        val pesLen = if (bounded && data.size + 8 <= 0xFFFF) data.size + 8 else 0
         hdr[4] = ((pesLen shr 8) and 0xFF).toByte()
         hdr[5] = (pesLen and 0xFF).toByte()
         hdr[6] = 0x80.toByte(); hdr[7] = 0x80.toByte(); hdr[8] = 5
@@ -1528,32 +1678,56 @@ class TsMuxer(private val mimeType: String) {
         )
     }
 
-    private fun buildPAT(): ByteArray {
+    // PSI packet: pointer_field + section + CRC32/MPEG-2; 0xFF after a section is the standard PSI stuffing.
+    private fun psiPacket(pid: Int, cc: Int, section: ByteArray): ByteArray {
         val p = ByteArray(188).also { it.fill(0xFF.toByte()) }
-        p[0]=0x47; p[1]=0x40; p[2]=0; p[3]=0x10; p[4]=0
-        p[5]=0; p[6]=0xB0.toByte(); p[7]=0x0D
-        p[8]=0; p[9]=1; p[10]=0xC1.toByte(); p[11]=0; p[12]=0
-        p[13]=0; p[14]=1
-        p[15]=(0xE0 or ((pmtPid shr 8) and 0x1F)).toByte()
-        p[16]=(pmtPid and 0xFF).toByte()
+        p[0] = 0x47
+        p[1] = (0x40 or ((pid shr 8) and 0x1F)).toByte()
+        p[2] = (pid and 0xFF).toByte()
+        p[3] = (0x10 or (cc and 0x0F)).toByte()
+        p[4] = 0   // pointer_field
+        section.copyInto(p, 5)
+        val crc = crc32Mpeg(section)
+        p[5 + section.size]     = (crc ushr 24).toByte()
+        p[5 + section.size + 1] = (crc ushr 16).toByte()
+        p[5 + section.size + 2] = (crc ushr 8).toByte()
+        p[5 + section.size + 3] = crc.toByte()
         return p
     }
+
+    private fun buildPAT(): ByteArray {
+        val s = byteArrayOf(
+            0x00, 0xB0.toByte(), 0x0D,               // table_id PAT, section_length 13
+            0x00, 0x01, 0xC1.toByte(), 0x00, 0x00,   // transport_stream_id 1, version 0, current, section 0/0
+            0x00, 0x01,                              // program_number 1
+            (0xE0 or ((pmtPid shr 8) and 0x1F)).toByte(), (pmtPid and 0xFF).toByte())
+        return psiPacket(0x0000, patCc, s).also { patCc = (patCc + 1) and 0x0F }
+    }
+
     private fun buildPMT(): ByteArray {
-        val p = ByteArray(188).also { it.fill(0xFF.toByte()) }
-        p[0]=0x47; p[1]=(0x40 or ((pmtPid shr 8) and 0x1F)).toByte()
-        p[2]=(pmtPid and 0xFF).toByte(); p[3]=0x10; p[4]=0
-        // section_length=23 (was 18): +5 bytes for audio stream entry
-        p[5]=2; p[6]=0xB0.toByte(); p[7]=0x17
-        p[8]=0; p[9]=1; p[10]=0xC1.toByte(); p[11]=0; p[12]=0
-        p[13]=0xE1.toByte(); p[14]=0; p[15]=0xF0.toByte(); p[16]=0
-        // Video stream: PID=0x100
         val streamType = if (mimeType == MediaFormat.MIMETYPE_VIDEO_HEVC) 0x24 else 0x1B
-        p[17]=streamType.toByte(); p[18]=0xE1.toByte(); p[19]=0x00
-        p[20]=0xF0.toByte(); p[21]=0
-        // Audio stream: type=0x0F (AAC-ADTS), PID=0x101
-        p[22]=0x0F.toByte(); p[23]=0xE1.toByte(); p[24]=0x01
-        p[25]=0xF0.toByte(); p[26]=0
-        return p
+        val s = byteArrayOf(
+            0x02, 0xB0.toByte(), 0x17,               // table_id PMT, section_length 23
+            0x00, 0x01, 0xC1.toByte(), 0x00, 0x00,   // program_number 1, version 0, current, section 0/0
+            (0xE0 or (videoPid shr 8)).toByte(), (videoPid and 0xFF).toByte(),   // PCR_PID = video
+            0xF0.toByte(), 0x00,                     // program_info_length 0
+            streamType.toByte(), (0xE0 or (videoPid shr 8)).toByte(), (videoPid and 0xFF).toByte(), 0xF0.toByte(), 0x00,
+            0x0F, (0xE0 or (audioPid shr 8)).toByte(), (audioPid and 0xFF).toByte(), 0xF0.toByte(), 0x00)  // AAC ADTS
+        return psiPacket(pmtPid, pmtCc, s).also { pmtCc = (pmtCc + 1) and 0x0F }
+    }
+
+    companion object {
+        private const val PTS_DELAY_US = 200_000L
+
+        // CRC-32/MPEG-2: poly 0x04C11DB7, init 0xFFFFFFFF, not reflected, no final xor.
+        fun crc32Mpeg(data: ByteArray): Int {
+            var crc = -1
+            for (b in data) {
+                crc = crc xor ((b.toInt() and 0xFF) shl 24)
+                repeat(8) { crc = if (crc < 0) (crc shl 1) xor 0x04C11DB7 else crc shl 1 }
+            }
+            return crc
+        }
     }
 }
 
@@ -1610,6 +1784,11 @@ class RtmpClient(private val rtmpUrl: String) {
         output!!.write(c2)
         socket!!.setSoTimeout(0)
 
+        // Announce our chunk size BEFORE using it. sendRtmpChunk() always cut at 4096 but never said so, and every
+        // receiver (SAMBA's ingest included) reads chunks at the default 128 bytes → the stream was garbage.
+        sendRtmpChunk(chunkStreamId = 2, msgTypeId = 1, msgStreamId = 0, timestamp = 0,
+                      data = byteArrayOf(0, 0, (CHUNK_SIZE shr 8).toByte(), CHUNK_SIZE.toByte()))
+
         // connect command
         sendRtmpConnect(app)
         readAck()
@@ -1623,35 +1802,41 @@ class RtmpClient(private val rtmpUrl: String) {
         Log.i("RtmpClient", "Connected to $rtmpUrl (app=$app stream=$streamKey)")
     }
 
-    fun sendVideoSequenceHeader(sps: ByteArray, pps: ByteArray) {
-        // AVCDecoderConfigurationRecord
-        val buf = mutableListOf<Byte>()
-        buf.add(0x17.toByte())  // keyframe + AVC
-        buf.add(0x00)           // AVC sequence header
-        buf.add(0); buf.add(0); buf.add(0)  // composition time = 0
-        // AVCDecoderConfigurationRecord
-        buf.add(1)              // configurationVersion
-        buf.add(sps[1]); buf.add(sps[2]); buf.add(sps[3])  // profile/compat/level
-        buf.add(0xFF.toByte())  // lengthSizeMinusOne = 3
-        buf.add(0xE1.toByte())  // numSequenceParameterSets = 1
-        buf.add(((sps.size shr 8) and 0xFF).toByte())
-        buf.add((sps.size and 0xFF).toByte())
-        buf.addAll(sps.toList())
-        buf.add(1)  // numPictureParameterSets = 1
-        buf.add(((pps.size shr 8) and 0xFF).toByte())
-        buf.add((pps.size and 0xFF).toByte())
-        buf.addAll(pps.toList())
+    // MediaCodec hands out Annex-B (start codes, csd-0/csd-1 included); FLV wants raw parameter sets in the
+    // AVCDecoderConfigurationRecord and 4-byte length-prefixed NALs. Sending Annex-B made the profile bytes read
+    // as 00 00 01 and every frame undecodable.
+    fun sendVideoSequenceHeader(csd0: ByteArray, csd1: ByteArray): Boolean {
+        val nals = splitAnnexB(csd0) + splitAnnexB(csd1)
+        val sps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 } ?: return false
+        val pps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 } ?: return false
+        if (sps.size < 4) return false
+        val buf = java.io.ByteArrayOutputStream()
+        buf.write(0x17)                 // keyframe + AVC
+        buf.write(0x00)                 // AVC sequence header
+        buf.write(0); buf.write(0); buf.write(0)   // composition time = 0
+        buf.write(1)                    // configurationVersion
+        buf.write(sps[1].toInt()); buf.write(sps[2].toInt()); buf.write(sps[3].toInt())  // profile/compat/level
+        buf.write(0xFF)                 // lengthSizeMinusOne = 3
+        buf.write(0xE1)                 // numSequenceParameterSets = 1
+        buf.write(sps.size shr 8); buf.write(sps.size and 0xFF); buf.write(sps)
+        buf.write(1)                    // numPictureParameterSets = 1
+        buf.write(pps.size shr 8); buf.write(pps.size and 0xFF); buf.write(pps)
         sendRtmpVideo(buf.toByteArray(), 0, true)
+        return true
     }
 
     fun sendVideoData(data: ByteArray, timestampMs: Long, isKeyframe: Boolean) {
-        // RTMP video tag: frameType + codecId + avcPacketType + compositionTime + data
-        val buf = ByteArray(5 + data.size)
-        buf[0] = if (isKeyframe) 0x17 else 0x27  // keyframe/interframe + AVC
-        buf[1] = 0x01  // AVC NALU
-        buf[2] = 0; buf[3] = 0; buf[4] = 0  // composition time offset
-        data.copyInto(buf, 5)
-        sendRtmpVideo(buf, timestampMs.toInt(), isKeyframe)
+        // RTMP video tag: frameType + codecId + avcPacketType + compositionTime + AVCC NALs
+        val buf = java.io.ByteArrayOutputStream(data.size + 32)
+        buf.write(if (isKeyframe) 0x17 else 0x27)  // keyframe/interframe + AVC
+        buf.write(0x01)                            // AVC NALU
+        buf.write(0); buf.write(0); buf.write(0)   // composition time offset (no B-frames)
+        for (nal in splitAnnexB(data)) {
+            if (nal.isEmpty() || (nal[0].toInt() and 0x1F) == 9) continue   // drop access-unit delimiters
+            buf.write(nal.size ushr 24); buf.write(nal.size ushr 16); buf.write(nal.size ushr 8); buf.write(nal.size)
+            buf.write(nal)
+        }
+        sendRtmpVideo(buf.toByteArray(), timestampMs.toInt(), isKeyframe)
     }
 
     private fun sendRtmpConnect(app: String) {
@@ -1680,13 +1865,15 @@ class RtmpClient(private val rtmpUrl: String) {
         timestamp: Int, data: ByteArray,
     ) {
         val out = output ?: return
-        // Basic header (1 byte, fmt=0)
-        val basicHdr = (chunkStreamId and 0x3F).toByte()
-        // Message header type 0 (11 bytes)
+        // Timestamps at or above 0xFFFFFF (4.6 h) go in the 4-byte extended field, which is then repeated after
+        // every continuation header. They used to be clamped, freezing every later frame on the same timestamp.
+        val extended = timestamp >= 0xFFFFFF
+        val ts = if (extended) 0xFFFFFF else timestamp
+        val ext = byteArrayOf((timestamp ushr 24).toByte(), (timestamp ushr 16).toByte(),
+                              (timestamp ushr 8).toByte(), timestamp.toByte())
+        // Basic header (fmt=0) + message header type 0 (11 bytes)
         val hdr = ByteArray(12)
-        hdr[0] = basicHdr
-        // timestamp (3 bytes big-endian, clamped to 0xFFFFFF)
-        val ts = minOf(timestamp, 0xFFFFFF)
+        hdr[0] = (chunkStreamId and 0x3F).toByte()
         hdr[1] = ((ts shr 16) and 0xFF).toByte()
         hdr[2] = ((ts shr  8) and 0xFF).toByte()
         hdr[3] = (ts and 0xFF).toByte()
@@ -1702,17 +1889,17 @@ class RtmpClient(private val rtmpUrl: String) {
         hdr[10]= ((msgStreamId shr 16) and 0xFF).toByte()
         hdr[11]= ((msgStreamId shr 24) and 0xFF).toByte()
 
-        // Chunk payload (chunk size = 128 by default)
-        val chunkSize = 4096
         out.write(hdr)
+        if (extended) out.write(ext)
         var offset = 0
         var first  = true
         while (offset < data.size) {
             if (!first) {
                 // Continuation chunk: fmt=3 basic header
                 out.write(0xC0 or (chunkStreamId and 0x3F))
+                if (extended) out.write(ext)
             }
-            val len = minOf(chunkSize, data.size - offset)
+            val len = minOf(CHUNK_SIZE, data.size - offset)
             out.write(data, offset, len)
             offset += len; first = false
         }
@@ -1780,4 +1967,27 @@ class RtmpClient(private val rtmpUrl: String) {
     }
 
     fun close() { try { socket?.close() } catch (_: Exception) {}; socket = null; output = null }
+
+    companion object {
+        private const val CHUNK_SIZE = 4096
+
+        // NAL units of an Annex-B buffer, start codes removed. No start code at all → the whole buffer is one NAL.
+        fun splitAnnexB(data: ByteArray): List<ByteArray> {
+            val starts = ArrayList<Int>()   // index of the first NAL byte after each start code
+            var i = 0
+            while (i + 2 < data.size) {
+                if (data[i].toInt() == 0 && data[i + 1].toInt() == 0 && data[i + 2].toInt() == 1) {
+                    starts.add(i + 3); i += 3
+                } else i++
+            }
+            if (starts.isEmpty()) return if (data.isEmpty()) emptyList() else listOf(data)
+            val nals = ArrayList<ByteArray>(starts.size)
+            for ((k, st) in starts.withIndex()) {
+                var end = if (k + 1 < starts.size) starts[k + 1] - 3 else data.size
+                while (end > st && data[end - 1].toInt() == 0) end--   // trailing zero of a 4-byte start code
+                if (end > st) nals.add(data.copyOfRange(st, end))
+            }
+            return nals
+        }
+    }
 }

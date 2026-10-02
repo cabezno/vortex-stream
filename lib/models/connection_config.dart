@@ -228,4 +228,16 @@ class ConnectionConfig {
     host: 'Manual',
     rtmp: RtmpConfig(url: url),
   );
+
+  /// Create an SBL config from manual IP entry (host = SAMBA's IP: the log goes there too)
+  static ConnectionConfig fromSblIp(String ip, {int port = 8890, String sourceName = 'SambaAir'}) => ConnectionConfig(
+    host: ip,
+    sbl:  SblConfig(host: ip, port: port, sourceName: sourceName),
+  );
+
+  /// Create an OMT config from manual entry: the phone listens on [port], SAMBA connects to it
+  static ConnectionConfig fromOmtPort(int port) => ConnectionConfig(
+    host: 'Manual',
+    omt:  OmtConfig(port: port),
+  );
 }

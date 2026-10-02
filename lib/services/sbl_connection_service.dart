@@ -141,6 +141,7 @@ class SblConnectionService extends ChangeNotifier {
       _state    = SblState.error;
       _errorMsg = e.toString();
       notifyListeners();
+      rethrow;   // the screen must not say "connected" when the native start failed
     }
   }
 

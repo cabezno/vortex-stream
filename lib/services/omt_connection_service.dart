@@ -69,6 +69,7 @@ class OmtConnectionService extends ChangeNotifier {
       _state = OmtState.error;
       _errorMsg = e.toString();
       notifyListeners();
+      rethrow;   // the screen must not say "connected" when the native start failed
     }
   }
 

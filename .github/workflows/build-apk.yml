@@ -111,6 +111,9 @@ jobs:
                       "        externalNativeBuild {\n"
                       "            cmake {\n"
                       "                abiFilters += listOf(\"arm64-v8a\")\n"
+                      # libvmx.so (OMT codec, prebuilt) needs libc++_shared.so: with the default static STL it was
+                      # never packaged and OMT failed with "VMX encoder init failed" on every phone (2026-10-02).
+                      "                arguments += listOf(\"-DANDROID_STL=c++_shared\")\n"
                       "            }\n"
                       "        }\n"
                       "    }\n"
