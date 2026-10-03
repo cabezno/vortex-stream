@@ -97,6 +97,9 @@ class VortexCamPlugin(
     // service abort on the next reconfigure). Read once per camera open.
     @Volatile private var cachedFpsRange = android.util.Range(30, 30)
     private var rtmpClient: RtmpClient? = null  // RTMP transport
+    @Volatile private var rtmpUrl = ""
+    @Volatile private var rtmpDown = false
+    @Volatile private var rtmpReconnects = 0
     // Session clock shared by video and audio of whichever transport is up (new one per stream start).
     @Volatile private var streamClock = StreamClock()
 
@@ -219,7 +222,10 @@ class VortexCamPlugin(
             "startRtmp"    -> startRtmp(call, result)
             "stopRtmp"     -> { stopStream(); result.success(null) }
 
-            "getStats"     -> result.success(mapOf("bitrateMbps" to bitrateMbps, "rttMs" to rttMs))
+            "getStats"     -> result.success(mapOf("bitrateMbps" to bitrateMbps, "rttMs" to rttMs,
+                                  // false while SRT/RTMP is reconnecting by itself (the UI can say so)
+                                  "linkUp" to (srtSocket?.linkUp ?: !rtmpDown),
+                                  "reconnects" to ((srtSocket?.reconnects ?: 0) + rtmpReconnects)))
 
             "startSbl"         -> startSbl(call, result)
             "startSblStream"   -> startSbl(call, result)          // alias
@@ -511,6 +517,12 @@ class VortexCamPlugin(
         }
     }
 
+    private fun requestIdr() {
+        try {
+            encoder?.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+        } catch (e: Exception) { Log.w(TAG, "IDR request failed: $e") }
+    }
+
     private fun stopStream() {
         if (!streaming.getAndSet(false)) return
         encodeThread?.join(2000); encodeThread = null
@@ -634,7 +646,12 @@ class VortexCamPlugin(
                 }
                 setupAudio()
 
-                srtSocket = SrtSocket(ip, port, latencyMs)
+                srtSocket = SrtSocket(ip, port, latencyMs).also { sk ->
+                    sk.onReconnected = { downMs ->
+                        requestIdr()   // the receiver must not wait for the next GOP
+                        Thread { sendLogBytes("[srt] reconectado a $ip:$port tras ${downMs} ms\n", "reconnect") }.start()
+                    }
+                }
                 if (!srtSocket!!.connect()) throw Exception("SRT connect to $ip:$port failed")
 
                 val mime = if (codec == "hevc") MediaFormat.MIMETYPE_VIDEO_HEVC
@@ -714,6 +731,7 @@ class VortexCamPlugin(
                     result.error("ENC", "Encoder setup failed — $lastEncoderError", null); return@thread
                 }
                 streamClock = StreamClock()
+                rtmpUrl = url; rtmpDown = false; rtmpReconnects = 0
                 rtmpClient = RtmpClient(url)
                 rtmpClient!!.connect()
 
@@ -737,6 +755,8 @@ class VortexCamPlugin(
         var spsData: ByteArray? = null
         var ppsData: ByteArray? = null
         var seqHeaderSent = false
+        var rtmpLastTry = 0L
+        var rtmpDownSince = 0L
 
         while (streaming.get()) {
             val idx = encoder?.dequeueOutputBuffer(info, 10_000) ?: break
@@ -763,6 +783,21 @@ class VortexCamPlugin(
                 encoder!!.releaseOutputBuffer(idx, false); continue
             }
 
+            // Link down: keep draining the encoder (camera + encoder stay alive), reconnect once a second.
+            if (rtmpDown) {
+                val now = System.currentTimeMillis()
+                if (now - rtmpLastTry >= 1000) {
+                    rtmpLastTry = now
+                    try {
+                        val c = RtmpClient(rtmpUrl); c.connect()
+                        rtmpClient = c; rtmpDown = false; rtmpReconnects++; seqHeaderSent = false
+                        requestIdr()
+                        Log.i(TAG, "RTMP reconnected after ${now - rtmpDownSince} ms (#$rtmpReconnects)")
+                    } catch (e: Exception) { Log.w(TAG, "RTMP reconnect failed: $e") }
+                }
+                if (rtmpDown) { encoder!!.releaseOutputBuffer(idx, false); continue }
+            }
+
             // csd-0 may hold SPS and PPS together (csd-1 absent) — the header builder splits them.
             if (!seqHeaderSent && spsData != null) {
                 seqHeaderSent = rtmpClient?.sendVideoSequenceHeader(spsData, ppsData ?: ByteArray(0)) == true
@@ -773,11 +808,10 @@ class VortexCamPlugin(
                     bytesSent.addAndGet(data.size.toLong())
                 } catch (e: java.io.IOException) {
                     // The receiver went away (Broken pipe / reset). This used to escape the encode thread and kill
-                    // the whole app; now the stream stops cleanly (stopStream from another thread: it joins this one).
-                    Log.w(TAG, "RTMP connection lost: $e")
-                    try { encoder?.releaseOutputBuffer(idx, false) } catch (_: Exception) {}
-                    Thread { stopStream() }.start()
-                    return
+                    // the whole app; now the link goes DOWN and the loop above reconnects every second.
+                    Log.w(TAG, "RTMP link DOWN: $e — reconnecting every 1 s")
+                    try { rtmpClient?.close() } catch (_: Exception) {}
+                    rtmpDown = true; rtmpDownSince = System.currentTimeMillis(); rtmpLastTry = rtmpDownSince
                 }
             }
 
@@ -1315,33 +1349,87 @@ class VortexCamPlugin(
     // When libsrt.so is available it will be preferred (true SRT with FEC/CC).
     // Until then, TCP delivers reliable MPEG-TS on LAN with ~1ms extra latency.
     // ====================================================================
+    // SRT over TCP that HEALS ITSELF. A dead link used to go unnoticed: send() swallowed every error and a write
+    // into a dead Wi-Fi could block for a minute (SAMBA cut the phone after 5 s; the phone noticed > 60 s later,
+    // 2026-10-03). Now:
+    //   - a failed write (receiver closed / reset) or a write blocked > 3 s marks the link DOWN at once;
+    //   - while down, packets are dropped (the camera and the encoder keep running) and a watchdog reconnects
+    //     every second; on success onReconnected asks the encoder for an IDR (PAT/PMT ride along with it).
     private inner class SrtSocket(val ip: String, val port: Int, val latencyMs: Int) {
-        private var tcpSocket: Socket? = null
+        @Volatile private var tcpSocket: Socket? = null
+        @Volatile private var out: OutputStream? = null
+        @Volatile var linkUp = false; private set
+        @Volatile var reconnects = 0; private set
+        @Volatile private var writeStartMs = 0L        // > 0 while a write is in progress
+        @Volatile private var closed = false
+        @Volatile private var downSinceMs = 0L
+        private var watchdog: Thread? = null
+        var onReconnected: ((downMs: Long) -> Unit)? = null
+
+        private fun open(): Boolean = try {
+            val sk = Socket()
+            sk.tcpNoDelay = true; sk.keepAlive = true; sk.soTimeout = 0
+            sk.connect(java.net.InetSocketAddress(ip, port), 2000)
+            tcpSocket = sk; out = sk.getOutputStream(); linkUp = true
+            Log.i(TAG, "SRT/TCP connected → $ip:$port")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "SRT/TCP connect to $ip:$port failed: $e")
+            false
+        }
 
         fun connect(): Boolean {
-            return try {
-                tcpSocket = Socket(ip, port).also {
-                    it.tcpNoDelay  = true
-                    it.soTimeout   = 0       // no recv timeout — keep-alive handled by send
-                    it.keepAlive   = true
-                }
-                Log.i(TAG, "SRT/TCP connected → $ip:$port")
-                true
-            } catch (e: Exception) {
-                Log.e(TAG, "SRT/TCP connect to $ip:$port failed: $e")
-                false
-            }
+            val ok = open()
+            if (ok) startWatchdog()
+            return ok
         }
 
         fun send(data: ByteArray) {
-            try { tcpSocket?.outputStream?.write(data) } catch (_: Exception) {}
+            val o = out ?: return
+            if (!linkUp) return
+            writeStartMs = System.currentTimeMillis()
+            try { o.write(data) } catch (e: Exception) { markDown("write failed: $e") }
+            finally { writeStartMs = 0L }
+        }
+
+        private fun markDown(why: String) {
+            if (!linkUp || closed) return
+            linkUp = false
+            downSinceMs = System.currentTimeMillis()
+            Log.w(TAG, "SRT/TCP link DOWN ($why) — reconnecting every 1 s")
+            try { tcpSocket?.close() } catch (_: Exception) {}   // unblocks a writer stuck in write()
+            tcpSocket = null; out = null
+        }
+
+        private fun startWatchdog() {
+            watchdog = thread(name = "SrtWatchdog", isDaemon = true) {
+                var lastTry = 0L
+                while (!closed) {
+                    try { Thread.sleep(500) } catch (_: InterruptedException) { break }
+                    val now = System.currentTimeMillis()
+                    if (linkUp) {
+                        val ws = writeStartMs
+                        if (ws > 0 && now - ws > 3000) markDown("write blocked ${now - ws} ms")
+                    } else if (!closed && now - lastTry >= 1000) {
+                        lastTry = now
+                        if (open()) {
+                            reconnects++
+                            val down = now - downSinceMs
+                            Log.i(TAG, "SRT/TCP reconnected after $down ms (#$reconnects)")
+                            onReconnected?.invoke(down)
+                        }
+                    }
+                }
+            }
         }
 
         fun getRttMs(): Int = 0  // TCP doesn't expose RTT; use 0
 
         fun close() {
+            closed = true
             try { tcpSocket?.close() } catch (_: Exception) {}
-            tcpSocket = null
+            tcpSocket = null; out = null; linkUp = false
+            watchdog?.interrupt(); watchdog = null
         }
     }
 
@@ -1754,7 +1842,10 @@ class RtmpClient(private val rtmpUrl: String) {
         val app       = if (lastSlash >= 0) pathPart.substring(0, lastSlash) else pathPart
         val streamKey = if (lastSlash >= 0) pathPart.substring(lastSlash + 1) else "live"
 
-        socket = Socket(host, port).also { it.tcpNoDelay = true; it.setSoTimeout(5000) }
+        socket = Socket().also {
+            it.tcpNoDelay = true; it.setSoTimeout(5000)
+            it.connect(java.net.InetSocketAddress(host, port), 3000)
+        }
         output = socket!!.getOutputStream()
         val input = socket!!.getInputStream()
 
