@@ -39,6 +39,9 @@ class SblConnectionService extends ChangeNotifier {
   SblState get state     => _state;
   String   get errorMsg  => _errorMsg;
   double   get mbpsSent  => _mbpsSent;
+  bool     _reconnecting = false;
+  // true while SAMBA is silent and the native side re-sends Hello (SBL link supervision)
+  bool     get reconnecting => _reconnecting;
   bool     get isOnAir   => _isOnAir;
   int?     get textureId => _textureId;
   bool     get connected => _state == SblState.streaming;
@@ -128,6 +131,7 @@ class SblConnectionService extends ChangeNotifier {
           final stats = await _channel.invokeMethod<Map>('getSblStats');
           if (stats != null) {
             _mbpsSent = (stats['bitrateMbps'] as num?)?.toDouble() ?? 0;
+            _reconnecting = stats['linkUp'] == false;
             notifyListeners();
           }
         } catch (_) {}

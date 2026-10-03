@@ -28,6 +28,9 @@ class RtmpConnectionService extends ChangeNotifier {
   String    get errorMsg      => _errorMsg;
   double    get bitrateMbps   => _bitrateMbps;
   int       get latencyMs     => _latencyMs;
+  bool _reconnecting = false;
+  // true while the native side lost the link and is reconnecting by itself
+  bool get reconnecting => _reconnecting;
   int?      get textureId     => _textureId;
 
   int    _width      = 1280;
@@ -96,6 +99,7 @@ class RtmpConnectionService extends ChangeNotifier {
         if (s != null) {
           _bitrateMbps = (s['bitrateMbps'] as num?)?.toDouble() ?? 0.0;
           _latencyMs   = (s['rttMs']       as num?)?.toInt()    ?? 0;
+          _reconnecting = s['linkUp'] == false;
           notifyListeners();
         }
       } catch (_) {}

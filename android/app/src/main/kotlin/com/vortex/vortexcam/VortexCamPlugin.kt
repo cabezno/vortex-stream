@@ -140,6 +140,13 @@ class VortexCamPlugin(
     // Forced IDRs at most once a second: SAMBA asked ~3/s while frames were being lost, and each 4K keyframe is
     // itself the biggest burst of all.
     @Volatile private var lastForcedIdrMs = 0L
+    // SBL is UDP: a write never fails. Liveness = traffic FROM SAMBA (feedback every 0.5 s, keyframe requests,
+    // talkback audio). Nothing for 3 s → link down → re-send Hello every second (SAMBA re-handshakes on a Hello
+    // after it dropped the peer); the first packet back → link up again + IDR.
+    @Volatile private var sblLastRxMs = 0L
+    @Volatile private var sblLinkUp = true
+    @Volatile private var sblReconnects = 0
+    @Volatile private var sblSourceName = "SambaAir"
 
     // H.264 parameter sets, republished with every keyframe so a receiver can
     // join the stream at any IDR rather than only at the very first frame.
@@ -230,7 +237,8 @@ class VortexCamPlugin(
             "startSbl"         -> startSbl(call, result)
             "startSblStream"   -> startSbl(call, result)          // alias
             "stopSbl"          -> { stopStream(); result.success(null) }
-            "getSblStats"      -> result.success(mapOf("bitrateMbps" to bitrateMbps))
+            "getSblStats"      -> result.success(mapOf("bitrateMbps" to bitrateMbps, "linkUp" to sblLinkUp,
+                                                     "reconnects" to sblReconnects))
             "startSrtCamera"   -> startCamera(call, result)       // alias
             "configureSrt"     -> result.success(null)            // no-op; config comes in startSbl
 
@@ -857,6 +865,7 @@ class VortexCamPlugin(
                 sblPktSeq.set(0)
                 sblFrameSeq.set(0)
                 streamClock = StreamClock()
+                sblSourceName = sourceName; sblLastRxMs = 0L; sblLinkUp = true; sblReconnects = 0
                 // Send Hello
                 sendSblHello(sourceName)
                 // Small wait for HelloAck (optional, non-blocking approach)
@@ -1119,6 +1128,13 @@ class VortexCamPlugin(
             if (now - keepaliveNs > 1_000_000_000L) {
                 sendSblKeepalive()
                 keepaliveNs = now
+                val rx = sblLastRxMs
+                val ms = System.currentTimeMillis()
+                if (sblLinkUp && rx > 0 && ms - rx > 3000) {
+                    sblLinkUp = false
+                    Log.w(TAG, "SBL link DOWN (nothing from SAMBA for ${ms - rx} ms) — re-sending Hello every 1 s")
+                }
+                if (!sblLinkUp) sendSblHello(sblSourceName)
             }
             val idx = encoder?.dequeueOutputBuffer(info, 10_000) ?: break
             when {
@@ -1516,6 +1532,13 @@ class VortexCamPlugin(
         if (len < 32) return
         // SBL magic check: buf[0..2] == "SBL"
         if (buf[0] != 0x53.toByte() || buf[1] != 0x42.toByte() || buf[2] != 0x4C.toByte()) return
+        sblLastRxMs = System.currentTimeMillis()
+        if (!sblLinkUp) {
+            sblLinkUp = true; sblReconnects++
+            Log.i(TAG, "SBL link UP again (#$sblReconnects) — forcing IDR")
+            requestIdr()
+            Thread { sendLogBytes("[sbl] reconectado (#$sblReconnects)\n", "reconnect") }.start()
+        }
         // KeyframeRequest (packet type 7) — the engine asks for an IDR when it
         // joins the stream or loses sync. It arrives on the Control stream, so
         // it must be handled before the AudioReturn filter below. Without this

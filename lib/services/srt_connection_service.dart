@@ -49,6 +49,9 @@ class SrtConnectionService extends ChangeNotifier {
   String   get errorMsg        => _errorMsg;
   double   get bitrateMbps     => _bitrateMbps;
   int      get latencyMs       => _latencyMs;
+  bool     _reconnecting = false;
+  // true while the native side lost the link and is reconnecting by itself (SRT/RTMP/SBL)
+  bool     get reconnecting => _reconnecting;
   bool     get isOnAir         => _isOnAir;
   int      get width           => _width;
   int      get height          => _height;
@@ -175,6 +178,7 @@ class SrtConnectionService extends ChangeNotifier {
         if (stats != null) {
           _bitrateMbps = (stats['bitrateMbps'] as num?)?.toDouble() ?? 0.0;
           _latencyMs   = (stats['rttMs']       as num?)?.toInt()    ?? 0;
+          _reconnecting = stats['linkUp'] == false;
           notifyListeners();
         }
       } catch (_) {}

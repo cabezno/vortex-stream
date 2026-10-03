@@ -918,6 +918,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     double bitrate = 0;
     int    latency = 0;
     bool   onAir   = _onAir;
+    bool   reconnecting = false;
 
     switch (_transport) {
       case Transport.whip:
@@ -927,11 +928,13 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       case Transport.srt:
         final srt = context.watch<SrtConnectionService>();
         bitrate = srt.bitrateMbps;
+        reconnecting = srt.reconnecting;
         latency = srt.latencyMs;
         onAir   = srt.isOnAir;
       case Transport.rtmp:
         final rtmp = context.watch<RtmpConnectionService>();
         bitrate = rtmp.bitrateMbps;
+        reconnecting = rtmp.reconnecting;
         latency = rtmp.latencyMs;
       case Transport.omt:
         final omt = context.watch<OmtConnectionService>();
@@ -940,6 +943,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       case Transport.sbl:
         final sbl = context.watch<SblConnectionService>();
         bitrate = sbl.mbpsSent;
+        reconnecting = sbl.reconnecting;
         onAir   = sbl.isOnAir;
     }
 
@@ -1022,7 +1026,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
           Positioned(
             top: 44,
             right: 16,
-            child: _statsBar(bitrate, latency, _transportLabel, _transportColor),
+            child: _statsBar(bitrate, latency, _transportLabel, _transportColor, reconnecting: reconnecting),
           ),
 
           // Log button
@@ -1045,7 +1049,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     );
   }
 
-  Widget _statsBar(double bitMbps, int latMs, String proto, Color color) => Container(
+  Widget _statsBar(double bitMbps, int latMs, String proto, Color color, {bool reconnecting = false}) => Container(
     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
     decoration: BoxDecoration(
       color: Colors.black54,
@@ -1057,7 +1061,10 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       const SizedBox(width: 6),
       Text(proto, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold)),
       const SizedBox(width: 8),
-      if (bitMbps > 0)
+      // The link dropped and the app is reconnecting by itself (camera and encoder keep running).
+      if (reconnecting)
+        const Text('Reconectando…', style: TextStyle(color: Colors.orangeAccent, fontSize: 11, fontWeight: FontWeight.bold))
+      else if (bitMbps > 0)
         Text('${bitMbps.toStringAsFixed(1)} Mbps',
             style: const TextStyle(color: Colors.white70, fontSize: 11)),
       if (latMs > 0) ...[
