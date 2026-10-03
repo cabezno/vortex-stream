@@ -444,6 +444,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       });
 
       setState(() => _live = true);
+      _setKeepAlive(true);
       _log('WHIP conectado → ${cfg.host}');
     } catch (e) {
       _log('WHIP error: $e');
@@ -472,6 +473,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     try {
       await omt.start(port: port);
       setState(() { _live = true; });
+      _setKeepAlive(true);
       _log('OMT sender activo → escuchando en :$port');
       _log('VortexEngine: Herramientas → Fuentes OMT → IP del cel → Conectar OMT');
 
@@ -509,6 +511,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       _log('SRT: conectando a ${srtCfg.host}:${srtCfg.port}...');
       await srt.connectTo(srtCfg.host, port: srtCfg.port);
       setState(() { _live = true; });
+      _setKeepAlive(true);
       _log('SRT conectado → ${srtCfg.host}:${srtCfg.port}');
 
       // Poll stats
@@ -542,6 +545,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       _nativeTexId = rtmp.textureId;
       await rtmp.connect(rtmpCfg.url);
       setState(() { _live = true; });
+      _setKeepAlive(true);
       _log('RTMP conectado → ${rtmpCfg.url}');
 
       Timer.periodic(const Duration(seconds: 2), (t) {
@@ -578,6 +582,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
         sourceName: _deviceCtrl.text.trim().isEmpty ? 'ZambaAir' : _deviceCtrl.text.trim(),
       );
       setState(() { _live = true; });
+      _setKeepAlive(true);
       _log('SBL conectado → ${sblCfg.host}:${sblCfg.port}');
       Timer.periodic(const Duration(seconds: 2), (t) {
         if (!_live) { t.cancel(); return; }
@@ -589,10 +594,29 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     }
   }
 
+  // ---- Keep-alive while live ----
+  // Foreground service (camera|microphone) + Wi-Fi/CPU locks + screen on, for EVERY transport: without it the
+  // transmission died as soon as the phone locked (Android took the camera and let Wi-Fi sleep; 2026-10-03).
+  static const _keepAliveCh = MethodChannel('com.vortex.vortexcam/keepalive');
+  Future<void> _setKeepAlive(bool on) async {
+    try {
+      if (on) {
+        // Android 13+: the service's notification needs this permission (the service runs either way).
+        if (await Permission.notification.isDenied) await Permission.notification.request();
+        await _keepAliveCh.invokeMethod('start', {'text': '$_transportLabel → ${_config?.host ?? ''}'});
+      } else {
+        await _keepAliveCh.invokeMethod('stop');
+      }
+    } catch (e) {
+      _log('keep-alive: $e');
+    }
+  }
+
   // ---- Disconnect ----
   Future<void> _disconnect() async {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     setState(() { _live = false; _onAir = false; });
+    _setKeepAlive(false);
 
     switch (_transport) {
       case Transport.whip:

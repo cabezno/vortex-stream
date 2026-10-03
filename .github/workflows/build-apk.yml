@@ -75,6 +75,13 @@ jobs:
               "android.permission.INTERNET",
               "android.permission.ACCESS_NETWORK_STATE",
               "android.permission.FLASHLIGHT",
+              # Keep-alive while live (StreamKeepAliveService): foreground service of type camera|microphone
+              # (Android 14+ requires the typed permissions), Wi-Fi/CPU locks, its notification (Android 13+).
+              "android.permission.FOREGROUND_SERVICE",
+              "android.permission.FOREGROUND_SERVICE_CAMERA",
+              "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+              "android.permission.WAKE_LOCK",
+              "android.permission.POST_NOTIFICATIONS",
           ]
           inject = "".join(
               f'    <uses-permission android:name="{p}"/>\n' for p in perms
@@ -82,6 +89,10 @@ jobs:
           )
           if inject:
               s = s.replace("<application", inject + "    <application", 1)
+          if "StreamKeepAliveService" not in s:
+              s = s.replace("</application>",
+                  '    <service android:name=".StreamKeepAliveService" android:exported="false"'
+                  ' android:foregroundServiceType="camera|microphone"/>\n    </application>', 1)
           if "usesCleartextTraffic" not in s:
               s = s.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
           # Set app label (flutter create uses the project name as label)
