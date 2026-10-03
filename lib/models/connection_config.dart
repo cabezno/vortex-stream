@@ -218,9 +218,14 @@ class ConnectionConfig {
   );
 
   /// Create an SRT config from manual IP entry
+  // Manual SRT is a LAN link like SBL: ask for MAXIMUM quality (4K @ 30 Mbps). The native encoder walks down its
+  // ladder (1080p/720p/540p, with the bitrate) if the phone can't — a Galaxy A10 settles at 1080p @ 16 Mbps. The
+  // default VideoConfig (1080p @ 8 Mbps) left a 4K-capable phone at 1080p (2026-10-03). A config that comes from
+  // SAMBA's QR keeps its own `video`.
   static ConnectionConfig fromSrtIp(String ip, {int port = 8890}) => ConnectionConfig(
-    host: 'Manual',
-    srt:  SrtConfig(host: ip, port: port),
+    host:  'Manual',
+    srt:   SrtConfig(host: ip, port: port),
+    video: const VideoConfig(width: 3840, height: 2160, maxKbps: 30000),
   );
 
   /// Create an RTMP config from manual URL entry

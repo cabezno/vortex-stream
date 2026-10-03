@@ -454,6 +454,10 @@ class VortexCamPlugin(
     // 1080p gave SAMBA a 4K decoder fed 1080p → grey/green picture (2026-10-03).
     @Volatile private var encWidth = 0
     @Volatile private var encHeight = 0
+    // Same for the bitrate: the ladder lowers it with the size. SBL paces at 1.5× this; pacing for the requested 4K
+    // (30 Mbps → 45 Mbps bursts) while encoding 1080p @16 Mbps lost the big IDR fragments on the A10's Wi-Fi →
+    // no complete keyframe ever → grey picture in SAMBA (2026-10-03).
+    @Volatile private var encBitrate = 0
 
     private fun setupEncoder(
         codec: String, width: Int, height: Int,
@@ -473,7 +477,7 @@ class VortexCamPlugin(
             // KEY_LOW_LATENCY with -22 at EVERY resolution, so nothing could stream on SRT/RTMP/SBL at all.
             for (tuned in listOf(true, false)) {
                 if (tryConfigureEncoder(codec, a.first, a.second, a.third, keyframeMs, tuned)) {
-                    encWidth = a.first; encHeight = a.second
+                    encWidth = a.first; encHeight = a.second; encBitrate = a.third
                     Log.i(TAG, "encoder @ ${a.first}x${a.second} @${a.third / 1000}kbps${if (tuned) "" else " (sin ajustes de latencia)"}")
                     return true
                 }
@@ -859,7 +863,6 @@ class VortexCamPlugin(
         val width      = call.argument<Int>("width")         ?: 1280
         val height     = call.argument<Int>("height")        ?: 720
         val bitrate    = call.argument<Int>("bitrateBps")    ?: 8_000_000
-        sblPaceBps = bitrate.toLong()
 
         thread(name = "SblStart") {
             try {
@@ -882,11 +885,12 @@ class VortexCamPlugin(
                 returnRunning.set(true)
                 returnThread = thread(name = "SblReceive") { receiveLoop() }
                 startSblMicUplink()
-                // The size the encoder accepted, not the one requested (see encWidth).
+                // The size and bitrate the encoder accepted, not the ones requested (see encWidth / encBitrate).
                 val w = encWidth; val h = encHeight
+                sblPaceBps = encBitrate.toLong()
                 encodeThread = thread(name = "SblEncode") { drainToSbl(w, h) }
                 result.success(null)
-                Log.i(TAG, "SBL streaming → $host:$port ${w}x${h} @${bitrate/1000}kbps (pedido ${width}x${height})")
+                Log.i(TAG, "SBL streaming → $host:$port ${w}x${h} @${encBitrate/1000}kbps (pedido ${width}x${height} @${bitrate/1000}kbps)")
             } catch (e: Exception) {
                 Log.e(TAG, "startSbl failed: $e")
                 stopStream()
