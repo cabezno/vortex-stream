@@ -449,6 +449,12 @@ class VortexCamPlugin(
     // ladder until the device's encoder accepts one. Phones that can't configure
     // 4K silently settle at the best they support — "max quality with graceful
     // fallback". Bitrate scales with the resolution that actually starts.
+    // What the encoder ACTUALLY runs at after the ladder below (the request may have been refused). SBL announces this
+    // in every frame header and SAMBA builds its decoder from it: announcing the request (4K) while an A10 encoded
+    // 1080p gave SAMBA a 4K decoder fed 1080p → grey/green picture (2026-10-03).
+    @Volatile private var encWidth = 0
+    @Volatile private var encHeight = 0
+
     private fun setupEncoder(
         codec: String, width: Int, height: Int,
         bitrateBps: Int, keyframeMs: Int,
@@ -467,6 +473,7 @@ class VortexCamPlugin(
             // KEY_LOW_LATENCY with -22 at EVERY resolution, so nothing could stream on SRT/RTMP/SBL at all.
             for (tuned in listOf(true, false)) {
                 if (tryConfigureEncoder(codec, a.first, a.second, a.third, keyframeMs, tuned)) {
+                    encWidth = a.first; encHeight = a.second
                     Log.i(TAG, "encoder @ ${a.first}x${a.second} @${a.third / 1000}kbps${if (tuned) "" else " (sin ajustes de latencia)"}")
                     return true
                 }
@@ -875,9 +882,11 @@ class VortexCamPlugin(
                 returnRunning.set(true)
                 returnThread = thread(name = "SblReceive") { receiveLoop() }
                 startSblMicUplink()
-                encodeThread = thread(name = "SblEncode") { drainToSbl(width, height) }
+                // The size the encoder accepted, not the one requested (see encWidth).
+                val w = encWidth; val h = encHeight
+                encodeThread = thread(name = "SblEncode") { drainToSbl(w, h) }
                 result.success(null)
-                Log.i(TAG, "SBL streaming → $host:$port ${width}x${height} @${bitrate/1000}kbps")
+                Log.i(TAG, "SBL streaming → $host:$port ${w}x${h} @${bitrate/1000}kbps (pedido ${width}x${height})")
             } catch (e: Exception) {
                 Log.e(TAG, "startSbl failed: $e")
                 stopStream()
