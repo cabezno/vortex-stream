@@ -28,6 +28,9 @@ class ConnectionService extends ChangeNotifier {
   String _engineIp              = '';
   int    _enginePort            = 8080;
   String _sourceId              = 'cam1';
+  // The WHIP resource the engine actually gave us (201 Location). With several phones SAMBA numbers the name
+  // ("cam1(2)"), so the DELETE must go there, not to /whip/<sourceId> (that is another phone's session).
+  String? _whipResourceUrl;
   String _sourceName            = 'Mobile Cam';
   String _errorMessage          = '';
   int    _latencyMs             = 0;
@@ -260,6 +263,8 @@ class ConnectionService extends ChangeNotifier {
     if (response.statusCode != 201 && response.statusCode != 200) {
       throw Exception('WHIP rejected: HTTP ${response.statusCode} — ${response.body}');
     }
+    final loc = response.headers['location'];
+    _whipResourceUrl = (loc != null && loc.isNotEmpty) ? url.resolve(loc).toString() : null;
 
     // Apply SDP answer (the onIceConnectionState handler was already registered
     // right after createPeerConnection, so a fast LAN connection is not missed).
@@ -436,9 +441,10 @@ class ConnectionService extends ChangeNotifier {
     // WHIP DELETE to notify engine
     try {
       await http.delete(
-        Uri.parse('http://$_engineIp:$_enginePort/whip/$_sourceId'),
+        Uri.parse(_whipResourceUrl ?? 'http://$_engineIp:$_enginePort/whip/$_sourceId'),
       ).timeout(const Duration(seconds: 3));
     } catch (_) {}
+    _whipResourceUrl = null;
 
     debugPrint('[SambaAir] Disconnected from engine.');
   }
