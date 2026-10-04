@@ -5,6 +5,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'camera_service.dart';
+import 'device_capabilities.dart';
 
 // =============================================================================
 // ConnectionService — manages WebRTC/WHIP connection to VortexEngine
@@ -369,6 +370,15 @@ class ConnectionService extends ChangeNotifier {
         if (report.type == 'outbound-rtp' && (v['mediaType'] == 'video' || v['kind'] == 'video')) {
           // What the encoder actually sends and why it would send less (cpu / bandwidth / none).
           _statsTick++;
+          // Live safety net for the capability probe: connected for 8 s and not one frame encoded = this phone's
+          // H.264 can't run inside WebRTC (Exynos case). Say so, remember it (WHIP greyed from now on).
+          if (_statsTick == 4 && ((v['framesEncoded'] as num?)?.toInt() ?? 0) == 0) {
+            const why = 'el encoder H.264 no arrancó al transmitir';
+            DeviceCapabilities.instance.markWhipUnsupported(why);
+            _state        = ConnectionState.error;
+            _errorMessage = 'Este celular no puede WHIP ($why). Usá SBL o SRT.';
+            notifyListeners();
+          }
           if (_statsTick % 3 == 0) {
             debugPrint('[SambaAir] WHIP envío: ${v['frameWidth']}x${v['frameHeight']} '
                 '${v['framesPerSecond']} fps · objetivo ${((v['targetBitrate'] as num?) ?? 0) ~/ 1000} kbps · '

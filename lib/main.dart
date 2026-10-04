@@ -28,6 +28,7 @@ import 'services/rtmp_connection_service.dart';
 import 'services/omt_connection_service.dart';
 import 'services/sbl_connection_service.dart';
 import 'services/camera_service.dart';
+import 'services/device_capabilities.dart';
 import 'services/log_service.dart';
 import 'screens/mode_picker.dart';
 
@@ -127,11 +128,31 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     _renderer.initialize();
     _loadSaved();
     _log('Samba Air v0.6.0 iniciado');
+    _probeCaps();
   }
+
+  // What this phone can do, measured once per Android/app version (see device_capabilities.dart). The camera
+  // permission is asked here: the WebRTC (WHIP) check opens the camera for a few seconds, and the camera mode needs
+  // it anyway. Denied → only the native part is measured; WHIP is then verified live.
+  Future<void> _probeCaps() async {
+    final caps = DeviceCapabilities.instance;
+    caps.addListener(_onCapsChanged);
+    final granted = (await Permission.camera.request()).isGranted;
+    await caps.ensure(cameraGranted: granted);
+    final line = caps.summary();
+    if (line.isNotEmpty) _log('Este celular: $line');
+    for (final t in Transport.values) {
+      final sup = caps.support(t);
+      if (!sup.ok) _log('${labelFor(t)} no disponible — ${sup.reason}');
+    }
+  }
+
+  void _onCapsChanged() { if (mounted) setState(() {}); }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    DeviceCapabilities.instance.removeListener(_onCapsChanged);
     _renderer.dispose();
     _deviceCtrl.dispose();
     super.dispose();
@@ -208,9 +229,16 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     if (cfg == null) {
       _log('QR no reconocido como Samba Air'); return;
     }
+    // SAMBA's QR lists the transports in its order of preference; take the first one THIS phone can do.
+    final caps = DeviceCapabilities.instance;
+    final chosen = caps.firstSupported(cfg.availableTransports) ?? cfg.preferredTransport;
+    if (chosen != cfg.preferredTransport) {
+      _log('SAMBA sugiere ${labelFor(cfg.preferredTransport)}, pero ${caps.support(cfg.preferredTransport).reason} '
+           '→ uso ${labelFor(chosen)}');
+    }
     setState(() {
       _config    = cfg;
-      _transport = cfg.preferredTransport;
+      _transport = chosen;
     });
     LogService.instance.configure(host: cfg.host, device: _deviceCtrl.text.trim());
     SharedPreferences.getInstance().then((p) => p.setString('last_engine_host', cfg.host));
@@ -269,7 +297,15 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     // Every transport the app has, not only the three that had a manual path: SBL and OMT were reachable ONLY by
     // scanning SAMBA's QR.
     final items = <String>['WHIP (WebRTC)', 'SRT', 'RTMP', 'SBL', 'OMT'];
-    String selected = items.contains(_transportLabel) ? _transportLabel : items.first;
+    final caps = DeviceCapabilities.instance;
+    final itemT = <String, Transport>{
+      'WHIP (WebRTC)': Transport.whip, 'SRT': Transport.srt, 'RTMP': Transport.rtmp,
+      'SBL': Transport.sbl, 'OMT': Transport.omt,
+    };
+    bool okItem(String e) => caps.support(itemT[e]!).ok;
+    String selected = items.contains(_transportLabel) && okItem(_transportLabel)
+        ? _transportLabel : items.firstWhere(okItem, orElse: () => items.first);
+    final unsupported = items.where((e) => !okItem(e)).toList();
     final ctrl = TextEditingController();
 
     final result = await showDialog<Map<String, String>?>(
@@ -278,12 +314,30 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
         builder: (ctx, setState) => AlertDialog(
           title: const Text('Conexión manual'),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
+            if (caps.summary().isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text('Este celular: ${caps.summary()}',
+                    style: const TextStyle(fontSize: 12, color: Colors.white60)),
+              ),
             DropdownButtonFormField<String>(
               value: selected,
-              items: items.map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
+              // Only what this phone can do is selectable; the rest stays visible, greyed, with its reason below.
+              items: items.map((e) => DropdownMenuItem(
+                value: e,
+                enabled: okItem(e),
+                child: Text(okItem(e) ? e : '$e — no disponible',
+                    style: okItem(e) ? null : const TextStyle(color: Colors.white38)),
+              )).toList(),
               onChanged: (v) => setState(() => selected = v!),
               decoration: const InputDecoration(labelText: 'Protocolo'),
             ),
+            for (final e in unsupported)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text('$e: ${caps.support(itemT[e]!).reason}',
+                    style: const TextStyle(fontSize: 11, color: Colors.orangeAccent)),
+              ),
             const SizedBox(height: 12),
             TextField(
               controller: ctrl,
@@ -367,6 +421,8 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     if (_connecting || _live) { _log('Ya conectando/conectado — ignorando'); return; }
     final cfg = _config;
     if (cfg == null) { _log('Sin configuración'); return; }
+    final sup = DeviceCapabilities.instance.support(_transport);
+    if (!sup.ok) { _log('$_transportLabel no se puede usar en este celular: ${sup.reason}'); return; }
 
     setState(() => _connecting = true);
     try {
