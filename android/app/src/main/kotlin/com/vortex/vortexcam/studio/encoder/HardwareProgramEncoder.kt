@@ -4,7 +4,6 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
-import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.Surface
@@ -19,15 +18,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Concrete hardware pipeline:
- * MediaCodec (H.264, CBR, 720p) -> createInputSurface() -> Shared WebRTC EglBase -> ProgramCompositor (VideoFrameDrawer) -> MediaMuxer (.mp4) & RtmpStreamer (FLV).
- * Renders real camera VideoFrames from WebRTC into a valid, playable MP4 and RTMP live stream.
+ * MediaCodec (H.264, CBR) -> createInputSurface() -> Shared WebRTC EglBase -> ProgramCompositor (VideoFrameDrawer)
+ * -> MediaMuxer (.mp4) & RtmpStreamer (FLV), plus the switcher's microphone as AAC (MicAacEncoder) on the same clock.
  */
 class HardwareProgramEncoder(
     private val width: Int = 1280,
     private val height: Int = 720,
-    private var bitrate: Int = 3500000,
+    private var bitrate: Int = 4500000,
     private val fps: Int = 30,
-    private val outputPath: String? = null
+    private val outputPath: String? = null,
+    private val withAudio: Boolean = true,
 ) {
     companion object {
         private const val TAG = "HardwareProgramEncoder"
@@ -37,33 +37,46 @@ class HardwareProgramEncoder(
 
     private var mediaCodec: MediaCodec? = null
     private var inputSurface: Surface? = null
+
+    // Recording: the muxer starts once every track it will carry is known (video, and audio if the mic works).
+    private val muxLock = Any()
     private var mediaMuxer: MediaMuxer? = null
     private var videoTrackIndex = -1
+    private var audioTrackIndex = -1
     private var isMuxerStarted = false
 
     private var eglBase: EglBase? = null
     private var compositor: ProgramCompositor? = null
+    private var clockStartNano = 0L
+
+    private var audio: MicAacEncoder? = null
+    @Volatile private var audioReady = false          // the AAC format is known (or there is no audio)
+    @Volatile private var lastAsc: ByteArray? = null
+    val audioSampleRate: Int get() = audio?.sampleRate ?: 0
+    val audioChannels: Int get() = audio?.channels ?: 0
+    val audioKbps: Int get() = (audio?.bitrate ?: 0) / 1000
+    val programWidth get() = width
+    val programHeight get() = height
+    val programFps get() = fps
+    val programKbps get() = bitrate / 1000
 
     var primarySink: WebRtcSourceSink? = null
     var secondarySink: WebRtcSourceSink? = null
-    // SPS/PPS arrive ONCE (INFO_OUTPUT_FORMAT_CHANGED). An RTMP output attached later (the connect now runs on its own
+    // SPS/PPS arrive ONCE (INFO_OUTPUT_FORMAT_CHANGED). An RTMP output attached later (the connect runs on its own
     // thread, or "EMITIR" pressed while the encoder was already running) never got the AVC sequence header: the
-    // receiver could not decode (ffmpeg: "No start code is found", 2026-10-04). Keep them and hand them, plus a
-    // keyframe request, to every streamer attached afterwards.
+    // receiver could not decode (ffmpeg: "No start code is found", 2026-10-04). Keep them — and the AAC config — and
+    // hand them, plus a keyframe request, to every streamer attached afterwards.
     @Volatile private var lastSps: ByteArray? = null
     @Volatile private var lastPps: ByteArray? = null
     var rtmpStreamer: RtmpStreamer? = null
         set(value) {
             field = value
+            if (value == null) return
+            value.onNeedKeyframe = { requestKeyframe() }
             val sps = lastSps; val pps = lastPps
-            if (value != null && sps != null && pps != null) {
-                value.setSpsPps(sps, pps)
-                try {
-                    mediaCodec?.setParameters(android.os.Bundle().apply {
-                        putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
-                    })
-                } catch (e: Exception) { Log.w(TAG, "IDR request failed: ${e.message}") }
-            }
+            if (sps != null && pps != null) value.setSpsPps(sps, pps)
+            lastAsc?.let { if (it.isNotEmpty()) value.setAudioConfig(it) }
+            requestKeyframe()
         }
 
     private val isRunning = AtomicBoolean(false)
@@ -76,17 +89,23 @@ class HardwareProgramEncoder(
     var totalBytesWritten: Long = 0
         private set
 
+    fun requestKeyframe() {
+        try {
+            mediaCodec?.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
+        } catch (e: Exception) { Log.w(TAG, "IDR request failed: ${e.message}") }
+    }
+
     fun start() {
         if (isRunning.get()) return
 
-        Log.i(TAG, "Starting HardwareProgramEncoder: ${width}x${height} @ ${bitrate / 1000} kbps, out=$outputPath")
+        Log.i(TAG, "Starting HardwareProgramEncoder: ${width}x${height} @ ${bitrate / 1000} kbps, audio=$withAudio, out=$outputPath")
 
         // 1. Prepare MediaFormat for H.264
         val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1) // 1 second keyframe interval
+            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2) // platforms ask for a keyframe every 2 s
             setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
         }
 
@@ -139,23 +158,60 @@ class HardwareProgramEncoder(
         encodedFrames = 0
         totalBytesWritten = 0
         isMuxerStarted = false
+        videoTrackIndex = -1; audioTrackIndex = -1
+        clockStartNano = System.nanoTime()
 
-        // 5. Start Render Loop Thread (~30fps presentation to encoder surface)
+        // 5. Microphone (same clock as the video). No mic → the program goes on without audio.
+        audioReady = true
+        if (withAudio) {
+            val mic = MicAacEncoder(clockStartNano, object : MicAacEncoder.Listener {
+                override fun onAudioFormat(format: MediaFormat, asc: ByteArray) {
+                    lastAsc = asc
+                    if (asc.isNotEmpty()) rtmpStreamer?.setAudioConfig(asc)
+                    synchronized(muxLock) {
+                        mediaMuxer?.let { if (!isMuxerStarted && audioTrackIndex < 0) audioTrackIndex = it.addTrack(format) }
+                        audioReady = true
+                        maybeStartMuxer()
+                    }
+                }
+                override fun onAudioData(data: ByteBuffer, info: MediaCodec.BufferInfo) {
+                    rtmpStreamer?.sendAudioData(data, info)
+                    synchronized(muxLock) {
+                        if (isMuxerStarted && audioTrackIndex >= 0) {
+                            mediaMuxer?.writeSampleData(audioTrackIndex, data.duplicate().apply {
+                                position(info.offset); limit(info.offset + info.size) }, info)
+                        }
+                    }
+                }
+            })
+            audioReady = false
+            if (mic.start()) audio = mic else audioReady = true
+        }
+
+        // 6. Start Render Loop Thread (~30fps presentation to encoder surface)
         renderThread = Thread({ runRenderLoop() }, "ProgramRenderThread").apply { start() }
 
-        // 6. Start Drain Loop Thread (dequeueOutputBuffer -> MediaMuxer & RtmpStreamer)
+        // 7. Start Drain Loop Thread (dequeueOutputBuffer -> MediaMuxer & RtmpStreamer)
         drainThread = Thread({ runDrainLoop() }, "ProgramDrainThread").apply { start() }
 
         Log.i(TAG, "Hardware encoder and draining pipeline successfully active with WebRTC EglBase sharing")
     }
 
+    /** Caller holds muxLock. */
+    private fun maybeStartMuxer() {
+        val muxer = mediaMuxer ?: return
+        if (isMuxerStarted || videoTrackIndex < 0 || !audioReady) return
+        muxer.start()
+        isMuxerStarted = true
+        Log.i(TAG, "MediaMuxer started: video track $videoTrackIndex, audio track $audioTrackIndex")
+    }
+
     private fun runRenderLoop() {
         val frameIntervalMs = 1000L / fps
-        val startNano = System.nanoTime()
 
         while (isRunning.get()) {
             val loopStart = System.currentTimeMillis()
-            val nowNano = System.nanoTime() - startNano
+            val nowNano = System.nanoTime() - clockStartNano
 
             try {
                 val egl = eglBase
@@ -199,31 +255,28 @@ class HardwareProgramEncoder(
                     if (isDraining) break
                 }
                 outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    if (isMuxerStarted) {
-                        Log.w(TAG, "Format changed twice in muxer")
-                    } else {
-                        val newFormat = codec.outputFormat
-                        Log.i(TAG, "Encoder output format changed: $newFormat")
+                    val newFormat = codec.outputFormat
+                    Log.i(TAG, "Encoder output format changed: $newFormat")
 
-                        // Extract SPS and PPS for RTMP FLV sequence header
-                        try {
-                            val csd0 = newFormat.getByteBuffer("csd-0")
-                            val csd1 = newFormat.getByteBuffer("csd-1")
-                            if (csd0 != null && csd1 != null) {
-                                val spsBytes = ByteArray(csd0.remaining()).also { csd0.get(it); csd0.rewind() }
-                                val ppsBytes = ByteArray(csd1.remaining()).also { csd1.get(it); csd1.rewind() }
-                                lastSps = spsBytes; lastPps = ppsBytes
-                                rtmpStreamer?.setSpsPps(spsBytes, ppsBytes)
-                            }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Could not extract SPS/PPS: ${e.message}")
+                    // Extract SPS and PPS for RTMP FLV sequence header
+                    try {
+                        val csd0 = newFormat.getByteBuffer("csd-0")
+                        val csd1 = newFormat.getByteBuffer("csd-1")
+                        if (csd0 != null && csd1 != null) {
+                            val spsBytes = ByteArray(csd0.remaining()).also { csd0.duplicate().get(it) }
+                            val ppsBytes = ByteArray(csd1.remaining()).also { csd1.duplicate().get(it) }
+                            lastSps = spsBytes; lastPps = ppsBytes
+                            rtmpStreamer?.setSpsPps(spsBytes, ppsBytes)
                         }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Could not extract SPS/PPS: ${e.message}")
+                    }
 
-                        mediaMuxer?.let { muxer ->
+                    synchronized(muxLock) {
+                        val muxer = mediaMuxer
+                        if (muxer != null && !isMuxerStarted && videoTrackIndex < 0) {
                             videoTrackIndex = muxer.addTrack(newFormat)
-                            muxer.start()
-                            isMuxerStarted = true
-                            Log.i(TAG, "MediaMuxer started with video track index: $videoTrackIndex")
+                            maybeStartMuxer()
                         }
                     }
                 }
@@ -237,17 +290,19 @@ class HardwareProgramEncoder(
 
                         if (bufferInfo.size != 0) {
                             val isKeyFrame = (bufferInfo.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                            encodedFrames++
 
                             // 1. Send to RTMP Streamer (AVCC NALU packet)
-                            rtmpStreamer?.sendVideoData(encodedData.duplicate(), bufferInfo, isKeyFrame)
+                            rtmpStreamer?.sendVideoData(encodedData, bufferInfo, isKeyFrame)
 
                             // 2. Write to MediaMuxer (.mp4 file)
-                            if (isMuxerStarted && mediaMuxer != null) {
-                                encodedData.position(bufferInfo.offset)
-                                encodedData.limit(bufferInfo.offset + bufferInfo.size)
-                                mediaMuxer?.writeSampleData(videoTrackIndex, encodedData, bufferInfo)
-                                totalBytesWritten += bufferInfo.size
-                                encodedFrames++
+                            synchronized(muxLock) {
+                                if (isMuxerStarted) {
+                                    encodedData.position(bufferInfo.offset)
+                                    encodedData.limit(bufferInfo.offset + bufferInfo.size)
+                                    mediaMuxer?.writeSampleData(videoTrackIndex, encodedData, bufferInfo)
+                                    totalBytesWritten += bufferInfo.size
+                                }
                             }
                         }
 
@@ -263,16 +318,13 @@ class HardwareProgramEncoder(
         }
     }
 
-    private var isDraining = false
+    @Volatile private var isDraining = false
 
     fun updateBitrate(newBitrate: Int) {
         bitrate = newBitrate
         mediaCodec?.let { codec ->
-            if (isRunning.get() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-                val params = Bundle().apply {
-                    putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, newBitrate)
-                }
-                codec.setParameters(params)
+            if (isRunning.get()) {
+                codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, newBitrate) })
                 Log.d(TAG, "Updated dynamic bitrate to ${newBitrate / 1000} kbps")
             }
         }
@@ -283,6 +335,9 @@ class HardwareProgramEncoder(
 
         Log.i(TAG, "Stopping HardwareProgramEncoder...")
         isDraining = true
+
+        // 0. Microphone first (its callbacks write into the muxer)
+        audio?.stop(); audio = null
 
         // 1. Signal end of input stream on surface
         try {
@@ -309,17 +364,19 @@ class HardwareProgramEncoder(
         }
 
         // 4. Stop & release MediaMuxer
-        try {
-            if (isMuxerStarted) {
-                mediaMuxer?.stop()
+        synchronized(muxLock) {
+            try {
+                if (isMuxerStarted) {
+                    mediaMuxer?.stop()
+                }
+                mediaMuxer?.release()
+                Log.i(TAG, "MediaMuxer closed: $encodedFrames frames, $totalBytesWritten bytes written to $outputPath")
+            } catch (e: Exception) {
+                Log.w(TAG, "Error releasing MediaMuxer: ${e.message}")
+            } finally {
+                mediaMuxer = null
+                isMuxerStarted = false
             }
-            mediaMuxer?.release()
-            Log.i(TAG, "MediaMuxer closed: $encodedFrames frames, $totalBytesWritten bytes written to $outputPath")
-        } catch (e: Exception) {
-            Log.w(TAG, "Error releasing MediaMuxer: ${e.message}")
-        } finally {
-            mediaMuxer = null
-            isMuxerStarted = false
         }
 
         // 5. Release Compositor and EglBase

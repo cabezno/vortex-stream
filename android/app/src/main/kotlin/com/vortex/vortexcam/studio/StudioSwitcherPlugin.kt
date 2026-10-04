@@ -37,9 +37,10 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                 "startEncoder" -> {
                     val width = call.argument<Int>("width") ?: 1280
                     val height = call.argument<Int>("height") ?: 720
-                    val bitrate = call.argument<Int>("bitrate") ?: 3500000
+                    val bitrate = call.argument<Int>("bitrate") ?: 4500000
                     val fps = call.argument<Int>("fps") ?: 30
                     val outputPath = call.argument<String>("outputPath")
+                    val withAudio = call.argument<Boolean>("audio") ?: true
 
                     try {
                         stopHardwareEncoder()
@@ -48,7 +49,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                             height = height,
                             bitrate = bitrate,
                             fps = fps,
-                            outputPath = outputPath
+                            outputPath = outputPath,
+                            withAudio = withAudio
                         )
                         encoder.primarySink = primarySink
                         encoder.secondarySink = secondarySink
@@ -105,6 +107,10 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                         try {
                             rtmpStreamer?.disconnect()
                             val streamer = RtmpStreamer()
+                            programEncoder?.let { enc ->
+                                streamer.setMetadata(enc.programWidth, enc.programHeight, enc.programFps, enc.programKbps,
+                                                     enc.audioKbps, enc.audioSampleRate, enc.audioChannels)
+                            }
                             streamer.connect(url, key)
                             main.post {
                                 rtmpStreamer = streamer
@@ -132,7 +138,12 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                     val stats = mapOf(
                         "bytesSent" to (streamer?.bytesSent ?: 0L),
                         "droppedPackets" to (streamer?.droppedPackets ?: 0),
-                        "isStreaming" to (streamer != null)
+                        "isStreaming" to (streamer != null),
+                        // false while the link is down and reconnecting by itself
+                        "connected" to (streamer?.isConnected ?: false),
+                        "reconnects" to (streamer?.reconnects ?: 0),
+                        "lastError" to (streamer?.lastError ?: ""),
+                        "hasAudio" to ((programEncoder?.audioSampleRate ?: 0) > 0)
                     )
                     result.success(stats)
                 }

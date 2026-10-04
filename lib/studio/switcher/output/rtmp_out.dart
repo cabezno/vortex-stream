@@ -19,7 +19,7 @@ class RtmpOut extends ChangeNotifier {
   Timer? _metricsTimer;
 
   int _bytesSent = 0;
-  int _currentBitrateKbps = 3500;
+  int _currentBitrateKbps = 4500;
   String _errorMessage = '';
 
   RtmpOut({required this.encoder});
@@ -51,8 +51,17 @@ class RtmpOut extends ChangeNotifier {
   static const MethodChannel _channel = MethodChannel('com.samba.studio/program_encoder');
 
   int _droppedPackets = 0;
+  bool _linkUp = true;
+  int _reconnects = 0;
+  bool _hasAudio = false;
+  String _linkError = '';
 
   int get droppedPackets => _droppedPackets;
+  /// Live but the link fell: the native side is reconnecting by itself.
+  bool get reconnecting => isStreaming && !_linkUp;
+  int get reconnects => _reconnects;
+  bool get hasAudio => _hasAudio;
+  String get linkError => _linkError;
 
   /// Start real RTMP streaming via native FLV/TCP client
   Future<void> startStream() async {
@@ -75,6 +84,9 @@ class RtmpOut extends ChangeNotifier {
             'url': _rtmpUrl,
             'streamKey': _streamKey,
           });
+        } on PlatformException catch (e) {
+          // The server's own reason (refused key, TLS, unreachable…), shown to the user.
+          throw Exception(e.message ?? e.code);
         } on MissingPluginException {
           debugPrint('[RtmpOut] Platform channel mock/fallback active');
         }
@@ -86,7 +98,7 @@ class RtmpOut extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       _state = RtmpState.error;
-      _errorMessage = e.toString();
+      _errorMessage = e.toString().replaceFirst('Exception: ', '');
       notifyListeners();
     }
   }
@@ -103,6 +115,10 @@ class RtmpOut extends ChangeNotifier {
           if (stats != null) {
             _bytesSent = (stats['bytesSent'] as num?)?.toInt() ?? _bytesSent;
             _droppedPackets = (stats['droppedPackets'] as num?)?.toInt() ?? _droppedPackets;
+            _linkUp = stats['connected'] as bool? ?? _linkUp;
+            _reconnects = (stats['reconnects'] as num?)?.toInt() ?? _reconnects;
+            _hasAudio = stats['hasAudio'] as bool? ?? _hasAudio;
+            _linkError = stats['lastError'] as String? ?? '';
           }
         } catch (_) {}
       }
@@ -121,12 +137,12 @@ class RtmpOut extends ChangeNotifier {
     final dropped = _droppedPackets > 0 ? _droppedPackets : encoder.droppedFrames;
     if (dropped > 5 && _currentBitrateKbps > 1500) {
       // Throttle down on congestion
-      _currentBitrateKbps = (_currentBitrateKbps - 400).clamp(1200, 4500);
+      _currentBitrateKbps = (_currentBitrateKbps - 500).clamp(1200, 4500);
       encoder.updateBitrate(_currentBitrateKbps);
       debugPrint('[ABR] Real network congestion detected (dropped=$dropped), throttling bitrate to $_currentBitrateKbps kbps');
-    } else if (dropped == 0 && _currentBitrateKbps < 3500) {
+    } else if (dropped == 0 && _currentBitrateKbps < 4500) {
       // Step up when network stabilizes
-      _currentBitrateKbps = (_currentBitrateKbps + 200).clamp(1200, 3500);
+      _currentBitrateKbps = (_currentBitrateKbps + 200).clamp(1200, 4500);
       encoder.updateBitrate(_currentBitrateKbps);
     }
   }

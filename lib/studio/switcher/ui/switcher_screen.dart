@@ -282,9 +282,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 decoration: const InputDecoration(
                   labelText: 'URL del Servidor RTMP',
                   labelStyle: TextStyle(color: Colors.white70),
-                  helperText: 'SAMBA (PC en la LAN): rtmp://IP-DEL-PC:1935/live · cualquier stream key',
+                  helperText: 'SAMBA (PC en la LAN): rtmp://IP-DEL-PC:1935/live · cualquier clave · '
+                      'YouTube: rtmps://a.rtmps.youtube.com/live2 · Facebook: rtmps://live-api-s.facebook.com:443/rtmp/ · '
+                      'Twitch: rtmp://live.twitch.tv/app',
                   helperStyle: TextStyle(color: Colors.white38, fontSize: 10),
-                  helperMaxLines: 2,
+                  helperMaxLines: 4,
                   filled: true,
                   fillColor: Colors.white10,
                 ),
@@ -319,10 +321,27 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             ),
             ElevatedButton(
               style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
-              onPressed: () {
+              onPressed: () async {
                 _rtmpOut.configure(url: urlCtrl.text.trim(), streamKey: keyCtrl.text.trim(), abrEnabled: abr);
-                _rtmpOut.startStream();
                 Navigator.pop(ctx);
+                await _rtmpOut.startStream();
+                if (!mounted) return;
+                if (_rtmpOut.state == RtmpState.error) {
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                    backgroundColor: Colors.red.shade900,
+                    duration: const Duration(seconds: 8),
+                    content: Text('No se pudo salir en vivo: ${_rtmpOut.errorMessage}'),
+                  ));
+                } else if (_rtmpOut.isStreaming) {
+                  // Tell the user if the program goes out without sound (mic permission denied / busy).
+                  Future.delayed(const Duration(seconds: 3), () {
+                    if (mounted && _rtmpOut.isStreaming && !_rtmpOut.hasAudio) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('En vivo SIN AUDIO: no hay permiso o acceso al micrófono de este celular.'),
+                      ));
+                    }
+                  });
+                }
               },
               child: const Text('INICIAR EN VIVO'),
             ),
@@ -627,12 +646,14 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                                     decoration: BoxDecoration(
-                                      color: Colors.red.shade900,
+                                      color: _rtmpOut.reconnecting ? Colors.orange.shade900 : Colors.red.shade900,
                                       borderRadius: BorderRadius.circular(6),
-                                      border: Border.all(color: Colors.redAccent),
+                                      border: Border.all(color: _rtmpOut.reconnecting ? Colors.orangeAccent : Colors.redAccent),
                                     ),
                                     child: Text(
-                                      '● LIVE (${_rtmpOut.currentBitrateKbps} kbps)',
+                                      _rtmpOut.reconnecting
+                                          ? '● RECONECTANDO…'
+                                          : '● LIVE (${_rtmpOut.currentBitrateKbps} kbps${_rtmpOut.hasAudio ? '' : ' · SIN AUDIO'})',
                                       style: const TextStyle(
                                         color: Colors.white,
                                         fontWeight: FontWeight.bold,

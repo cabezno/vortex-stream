@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 enum EncoderCodec { h264, hevc }
 
@@ -29,7 +30,7 @@ class ProgramEncoder extends ChangeNotifier {
   bool _isEncoding = false;
   int _width = 1280;
   int _height = 720;
-  int _bitrateKbps = 3500;
+  int _bitrateKbps = 4500;
   int _fps = 30;
   EncoderCodec _codec = EncoderCodec.h264;
 
@@ -58,7 +59,7 @@ class ProgramEncoder extends ChangeNotifier {
   Future<void> start({
     int width = 1280,
     int height = 720,
-    int bitrateKbps = 3500,
+    int bitrateKbps = 4500,
     int fps = 30,
     EncoderCodec codec = EncoderCodec.h264,
     String? outputPath,
@@ -71,7 +72,12 @@ class ProgramEncoder extends ChangeNotifier {
 
     try {
       if (!kIsWeb) {
+        // Audio of the program = this phone's microphone. Asked here because the switcher never needed the mic
+        // before (2026-10-04: its output had no audio at all). Denied → the program goes out without audio.
+        bool mic = false;
+        try { mic = (await Permission.microphone.request()).isGranted; } catch (_) {}
         await _channel.invokeMethod('startEncoder', {
+          'audio': mic,
           'width': _width,
           'height': _height,
           'bitrate': _bitrateKbps * 1000,
