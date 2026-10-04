@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'device_capabilities.dart';
 
 enum CameraFacing { back, front }
 
@@ -66,8 +67,20 @@ class CameraService extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// The largest size this phone's H.264 HARDWARE encoder takes (DeviceCapabilities), else 4K. WebRTC asks the
+  /// encoder for the capture size: a 4K capture on a phone whose encoder tops out at 1080p fails InitEncode (-13),
+  /// Android has no software H.264 to fall back to, and nothing is sent — the Galaxy A10's WHIP (2026-10-04).
+  (int, int) _encoderCap() {
+    final m = DeviceCapabilities.instance.maxH264;
+    final p = m?.split('x');
+    final w = p != null && p.length == 2 ? int.tryParse(p[0]) : null;
+    final h = p != null && p.length == 2 ? int.tryParse(p[1]) : null;
+    return (w ?? 3840, h ?? 2160);
+  }
+
   Future<void> _buildStream() async {
     _stream?.getTracks().forEach((t) => t.stop());
+    final (capW, capH) = _encoderCap();
 
     // If the engine has requested a specific resolution, apply it with
     // min+ideal to lock it exactly. Otherwise use high ideal values
@@ -85,8 +98,8 @@ class CameraService extends ChangeNotifier {
       // format it supports.
       videoConstraints = {
         'facingMode': _facing == CameraFacing.back ? 'environment' : 'user',
-        'width':  _engineWidth,
-        'height': _engineHeight,
+        'width':  _engineWidth! < capW ? _engineWidth : capW,
+        'height': _engineHeight! < capH ? _engineHeight : capH,
         'frameRate': {'ideal': 60, 'min': 30},
       };
     } else {
@@ -97,8 +110,8 @@ class CameraService extends ChangeNotifier {
       // the data channel opens.
       videoConstraints = {
         'facingMode': _facing == CameraFacing.back ? 'environment' : 'user',
-        'width':  3840,                    // number, not {'ideal'} (see above)
-        'height': 2160,
+        'width':  capW,                    // number, not {'ideal'} (see above); capped to the encoder
+        'height': capH,
         'frameRate': {'ideal': 60, 'min': 30},
         'aspectRatio': {'ideal': 1.7778},  // force 16:9 (not 4:3 native sensor)
       };

@@ -312,6 +312,9 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setState) => AlertDialog(
+          // Scrollable: in landscape on a small phone (Galaxy A10, 720 px tall) the capability line + reasons pushed
+          // the buttons on top of the address field.
+          scrollable: true,
           title: const Text('Conexión manual'),
           content: Column(mainAxisSize: MainAxisSize.min, children: [
             if (caps.summary().isNotEmpty)
