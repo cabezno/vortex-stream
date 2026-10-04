@@ -98,17 +98,24 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                 "startRtmp" -> {
                     val url = call.argument<String>("url") ?: "rtmp://127.0.0.1/live"
                     val key = call.argument<String>("streamKey") ?: ""
-                    try {
-                        rtmpStreamer?.disconnect()
-                        val streamer = RtmpStreamer()
-                        streamer.connect(url, key)
-                        rtmpStreamer = streamer
-                        programEncoder?.rtmpStreamer = streamer
-                        result.success(true)
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Failed to start RTMP stream: ${e.message}", e)
-                        result.error("RTMP_ERROR", e.message, null)
-                    }
+                    // Network I/O off the main thread: connect() on it threw NetworkOnMainThreadException and the
+                    // switcher never went live (2026-10-04). Reply back on the main thread (Flutter requires it).
+                    val main = android.os.Handler(android.os.Looper.getMainLooper())
+                    Thread({
+                        try {
+                            rtmpStreamer?.disconnect()
+                            val streamer = RtmpStreamer()
+                            streamer.connect(url, key)
+                            main.post {
+                                rtmpStreamer = streamer
+                                programEncoder?.rtmpStreamer = streamer
+                                result.success(true)
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to start RTMP stream: ${e.message}", e)
+                            main.post { result.error("RTMP_ERROR", e.message ?: e.toString(), null) }
+                        }
+                    }, "StudioRtmpConnect").start()
                 }
                 "stopRtmp" -> {
                     try {

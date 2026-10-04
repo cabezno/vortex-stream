@@ -46,7 +46,25 @@ class HardwareProgramEncoder(
 
     var primarySink: WebRtcSourceSink? = null
     var secondarySink: WebRtcSourceSink? = null
+    // SPS/PPS arrive ONCE (INFO_OUTPUT_FORMAT_CHANGED). An RTMP output attached later (the connect now runs on its own
+    // thread, or "EMITIR" pressed while the encoder was already running) never got the AVC sequence header: the
+    // receiver could not decode (ffmpeg: "No start code is found", 2026-10-04). Keep them and hand them, plus a
+    // keyframe request, to every streamer attached afterwards.
+    @Volatile private var lastSps: ByteArray? = null
+    @Volatile private var lastPps: ByteArray? = null
     var rtmpStreamer: RtmpStreamer? = null
+        set(value) {
+            field = value
+            val sps = lastSps; val pps = lastPps
+            if (value != null && sps != null && pps != null) {
+                value.setSpsPps(sps, pps)
+                try {
+                    mediaCodec?.setParameters(android.os.Bundle().apply {
+                        putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0)
+                    })
+                } catch (e: Exception) { Log.w(TAG, "IDR request failed: ${e.message}") }
+            }
+        }
 
     private val isRunning = AtomicBoolean(false)
     private var renderThread: Thread? = null
@@ -102,6 +120,10 @@ class HardwareProgramEncoder(
         egl.createSurface(surface)
         egl.makeCurrent()
         val comp = ProgramCompositor(width, height)
+        // Release the context from THIS (main) thread: an EGL context can be current on one thread only, so the
+        // render thread's makeCurrent() failed on every frame ("eglMakeCurrent failed: 0x3000") and nothing was
+        // encoded — no recording, no RTMP (found 2026-10-04 testing the Switcher mode on a Galaxy A10).
+        egl.detachCurrent()
 
         eglBase = egl
         compositor = comp
@@ -190,6 +212,7 @@ class HardwareProgramEncoder(
                             if (csd0 != null && csd1 != null) {
                                 val spsBytes = ByteArray(csd0.remaining()).also { csd0.get(it); csd0.rewind() }
                                 val ppsBytes = ByteArray(csd1.remaining()).also { csd1.get(it); csd1.rewind() }
+                                lastSps = spsBytes; lastPps = ppsBytes
                                 rtmpStreamer?.setSpsPps(spsBytes, ppsBytes)
                             }
                         } catch (e: Exception) {

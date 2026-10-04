@@ -58,7 +58,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   // misma textura → el decoder VP8 se traba tras 1 frame y congela todo el flujo
   // (y por RTCP frena la cámara). Se desactiva para que el preview en vivo del
   // switcher funcione. Reactivar SOLO cuando el puente WebRTC→GL nativo esté hecho.
-  static const bool _kEnableNativeEncoderSources = false;
+  // 2026-10-04 (Samba Air): RE-ENABLED. The encoder made its EGL context (shared with libwebrtc) current on the main
+  // thread at start and never released it, so its render thread failed every frame — most likely the same root of
+  // the "freeze after 1 frame". Fixed in HardwareProgramEncoder (detachCurrent); without this the encoded program
+  // (RTMP / SD) carried NO camera, only the background. If the freeze ever comes back, set this to false again.
+  static const bool _kEnableNativeEncoderSources = true;
 
   void _syncNativeCameraSources() {
     if (!_kEnableNativeEncoderSources) return;
