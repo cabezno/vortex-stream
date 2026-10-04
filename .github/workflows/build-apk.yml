@@ -37,7 +37,7 @@ jobs:
           PLUGIN_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
           mkdir -p /tmp/vortex_plugins
           # ALL our .kt files (a fixed list silently dropped new ones, e.g. EncoderRotator.kt)
-          cp "$PLUGIN_DIR"/*.kt /tmp/vortex_plugins/
+          cp -r "$PLUGIN_DIR"/. /tmp/vortex_plugins/   # recursive: studio/ subpackages (Switcher mode)
           # Preserve JNI/C++ sources and prebuilt .so files.
           # Copy the CONTENTS into a temp dir (trailing /.) so restore lands them
           # back as cpp/ and jniLibs/ — not as a nested vortex_cpp/ folder.
@@ -51,7 +51,7 @@ jobs:
 
           DST_DIR="android/app/src/main/kotlin/com/vortex/vortexcam"
           mkdir -p "$DST_DIR"
-          cp /tmp/vortex_plugins/*.kt "$DST_DIR/"
+          cp -r /tmp/vortex_plugins/. "$DST_DIR/"
           # Restore JNI sources and prebuilt libraries into their real paths
           mkdir -p android/app/src/main/cpp android/app/src/main/jniLibs
           cp -r /tmp/vortex_cpp/.     android/app/src/main/cpp/
@@ -82,6 +82,9 @@ jobs:
               "android.permission.FOREGROUND_SERVICE_MICROPHONE",
               "android.permission.WAKE_LOCK",
               "android.permission.POST_NOTIFICATIONS",
+              # Switcher mode (room server, mDNS-style discovery on the LAN)
+              "android.permission.ACCESS_WIFI_STATE",
+              "android.permission.CHANGE_WIFI_MULTICAST_STATE",
           ]
           inject = "".join(
               f'    <uses-permission android:name="{p}"/>\n' for p in perms
@@ -138,6 +141,10 @@ jobs:
 
       - name: Get dependencies
         run: flutter pub get
+
+      # Switcher mode native code compiles against the WebRTC SDK bundled by flutter_webrtc (same version)
+      - name: WebRTC SDK for the Switcher mode
+        run: python3 tool/add_webrtc_compileonly.py
 
       - name: Generate launcher icons
         run: flutter pub run flutter_launcher_icons
