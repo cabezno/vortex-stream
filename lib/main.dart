@@ -29,6 +29,7 @@ import 'services/omt_connection_service.dart';
 import 'services/sbl_connection_service.dart';
 import 'services/camera_service.dart';
 import 'services/log_service.dart';
+import 'screens/mode_picker.dart';
 
 void main() {
   // runZonedGuarded + FlutterError.onError capture BOTH framework errors and any
@@ -76,7 +77,8 @@ class SambaAirApp extends StatelessWidget {
       scaffoldBackgroundColor: Colors.black,
       appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF0A0A0A), elevation: 0),
     ),
-    home: const _HomePage(),
+    // One app, three modes: Cámara → SAMBA (the classic flow below), Cámara → Studio, Switcher.
+    home: ModePicker(sambaHome: (_) => const _HomePage()),
   );
 }
 

@@ -1,0 +1,13 @@
+name: samba_protocol
+description: Shared protocol, models, and audio switching algorithms for SAMBA Móvil Studio.
+version: 0.1.0
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  meta: ^1.11.0
+
+dev_dependencies:
+  test: ^1.24.0
+  lints: ^3.0.0

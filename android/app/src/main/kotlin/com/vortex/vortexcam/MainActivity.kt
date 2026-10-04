@@ -4,14 +4,19 @@ import android.view.WindowManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import com.vortex.vortexcam.studio.StudioSwitcherPlugin
 
 class MainActivity : FlutterActivity() {
+    private var studioSwitcher: StudioSwitcherPlugin? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         // Register native streaming plugins
         VortexCamPlugin.registerWith(this, flutterEngine)
         OmtStreamPlugin.registerWith(this, flutterEngine)
+        // Switcher mode (ex SAMBA Móvil Studio): program compositor + encoder + RTMP
+        studioSwitcher = StudioSwitcherPlugin.registerWith(flutterEngine)
 
         // Keep-alive while live (any transport, WHIP included): foreground service + Wi-Fi/CPU locks
         // (StreamKeepAliveService) and the screen kept on while the app is in front.
@@ -32,5 +37,11 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    override fun onDestroy() {
+        studioSwitcher?.dispose()
+        studioSwitcher = null
+        super.onDestroy()
     }
 }

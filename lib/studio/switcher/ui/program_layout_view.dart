@@ -1,0 +1,249 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:samba_protocol/samba_protocol.dart';
+import '../mixer/program_mixer.dart';
+import '../transport/subscriber.dart';
+
+/// Renders the composed Program view based on ProgramMixer layout (Single, Split-Screen, PiP).
+class ProgramLayoutView extends StatelessWidget {
+  final ProgramMixer mixer;
+  final WebRtcSubscriber subscriber;
+  final List<Peer> cameras;
+  // Cámara local del switcher: su renderer no está en el subscriber (es captura
+  // local), así que se resuelve aparte.
+  final RTCVideoRenderer? localRenderer;
+  final String? localPeerId;
+
+  const ProgramLayoutView({
+    super.key,
+    required this.mixer,
+    required this.subscriber,
+    required this.cameras,
+    this.localRenderer,
+    this.localPeerId,
+  });
+
+  RTCVideoRenderer? _resolveRenderer(String? id) {
+    if (id == null) return null;
+    if (localPeerId != null && id == localPeerId) return localRenderer;
+    return subscriber.getRenderer(id);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: mixer,
+      builder: (context, _) {
+        final primaryId = mixer.primaryPeerId;
+        final secondaryId = mixer.secondaryPeerId;
+
+        final primaryCam = cameras.where((c) => c.id == primaryId).firstOrNull;
+        final secondaryCam = cameras.where((c) => c.id == secondaryId).firstOrNull;
+
+        final primaryRenderer = _resolveRenderer(primaryId);
+        final secondaryRenderer = _resolveRenderer(secondaryId);
+
+        final hasPrimaryVideo = primaryRenderer != null && primaryRenderer.srcObject != null;
+        final hasSecondaryVideo = secondaryRenderer != null && secondaryRenderer.srcObject != null;
+
+        debugPrint('[ProgramLayout] mode=${mixer.mode} primary=$primaryId '
+            '(r=${primaryRenderer != null} vid=$hasPrimaryVideo) '
+            'secondary=$secondaryId (r=${secondaryRenderer != null} vid=$hasSecondaryVideo) '
+            'localPeerId=$localPeerId localR=${localRenderer != null}');
+
+        return ClipRRect(
+          borderRadius: BorderRadius.circular(14),
+          child: switch (mixer.mode) {
+            LayoutMode.single => _buildSingleView(primaryCam, primaryRenderer, hasPrimaryVideo),
+            LayoutMode.splitScreen => _buildSplitView(
+                primaryCam,
+                primaryRenderer,
+                hasPrimaryVideo,
+                secondaryCam,
+                secondaryRenderer,
+                hasSecondaryVideo,
+              ),
+            LayoutMode.pip => _buildPipView(
+                primaryCam,
+                primaryRenderer,
+                hasPrimaryVideo,
+                secondaryCam,
+                secondaryRenderer,
+                hasSecondaryVideo,
+              ),
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildSingleView(Peer? cam, RTCVideoRenderer? renderer, bool hasVideo) {
+    if (hasVideo && renderer != null) {
+      return RTCVideoView(
+        renderer,
+        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+      );
+    }
+    return _buildPlaceholder(cam?.name ?? 'Sin cámara', 'SINGLE (1 FULL)');
+  }
+
+  Widget _buildSplitView(
+    Peer? pCam,
+    RTCVideoRenderer? pRenderer,
+    bool pHasVideo,
+    Peer? sCam,
+    RTCVideoRenderer? sRenderer,
+    bool sHasVideo,
+  ) {
+    return Row(
+      children: [
+        // Left Side: Primary Camera
+        Expanded(
+          flex: (mixer.splitRatio * 100).toInt(),
+          child: Container(
+            color: Colors.black,
+            child: pHasVideo && pRenderer != null
+                ? RTCVideoView(
+                    pRenderer,
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  )
+                : _buildPlaceholder(pCam?.name ?? 'Primaria', '50% IZQUIERDA'),
+          ),
+        ),
+
+        // Divider
+        Container(width: 3, color: Colors.redAccent.withOpacity(0.8)),
+
+        // Right Side: Secondary Camera
+        Expanded(
+          flex: ((1.0 - mixer.splitRatio) * 100).toInt(),
+          child: Container(
+            color: Colors.black,
+            child: sHasVideo && sRenderer != null
+                ? RTCVideoView(
+                    sRenderer,
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  )
+                : _buildPlaceholder(sCam?.name ?? 'Seleccionar Cámara 2', '50% DERECHA'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPipView(
+    Peer? pCam,
+    RTCVideoRenderer? pRenderer,
+    bool pHasVideo,
+    Peer? sCam,
+    RTCVideoRenderer? sRenderer,
+    bool sHasVideo,
+  ) {
+    return Stack(
+      children: [
+        // Background: Full Primary Camera
+        Positioned.fill(
+          child: pHasVideo && pRenderer != null
+              ? RTCVideoView(
+                  pRenderer,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                )
+              : _buildPlaceholder(pCam?.name ?? 'Primaria', 'FONDO COMPLETO'),
+        ),
+
+        // PiP Inset Window
+        _buildPipInset(sCam, sRenderer, sHasVideo),
+      ],
+    );
+  }
+
+  Widget _buildPipInset(Peer? sCam, RTCVideoRenderer? sRenderer, bool sHasVideo) {
+    const double pipWidth = 180.0;
+    const double pipHeight = 101.25; // 16:9
+    const double margin = 16.0;
+
+    double? top;
+    double? bottom;
+    double? left;
+    double? right;
+
+    switch (mixer.pipPosition) {
+      case PipPosition.bottomRight:
+        bottom = margin;
+        right = margin;
+        break;
+      case PipPosition.bottomLeft:
+        bottom = margin;
+        left = margin;
+        break;
+      case PipPosition.topRight:
+        top = margin + 40; // below top bar badges
+        right = margin;
+        break;
+      case PipPosition.topLeft:
+        top = margin + 40;
+        left = margin;
+        break;
+    }
+
+    return Positioned(
+      top: top,
+      bottom: bottom,
+      left: left,
+      right: right,
+      width: pipWidth,
+      height: pipHeight,
+      child: Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E1E26),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Colors.amberAccent, width: 2.0),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.7),
+              blurRadius: 12,
+              spreadRadius: 2,
+            ),
+          ],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: sHasVideo && sRenderer != null
+            ? RTCVideoView(
+                sRenderer,
+                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              )
+            : Center(
+                child: Text(
+                  sCam?.name ?? 'PiP: Elegir Cam',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+      ),
+    );
+  }
+
+  Widget _buildPlaceholder(String label, String sublabel) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.videocam, size: 48, color: Colors.white24),
+          const SizedBox(height: 8),
+          Text(
+            label.toUpperCase(),
+            style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 15),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            sublabel,
+            style: const TextStyle(color: Colors.white38, fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+}

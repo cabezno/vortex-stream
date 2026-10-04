@@ -34,6 +34,14 @@ dependencies:
   # UI
   cupertino_icons: ^1.0.6
 
+  # Studio modes (camera → phone switcher, switcher) — ex SAMBA Móvil Studio
+  samba_protocol:
+    path: packages/samba_protocol
+  web_socket_channel: ^3.0.0   # room control channel (camera ↔ switcher)
+  shelf: 1.4.1                 # switcher: local room server (:8088)
+  shelf_web_socket: ^2.0.0
+  qr_flutter: ^4.1.0           # switcher: pairing QR
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
