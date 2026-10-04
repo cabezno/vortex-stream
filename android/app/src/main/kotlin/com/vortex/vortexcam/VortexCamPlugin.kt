@@ -52,6 +52,7 @@ import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
+import com.vortex.vortexcam.studio.rtmp.RtmpStreamer
 
 private const val TAG     = "VortexCam"
 private const val CHANNEL = "com.vortex.vortexcam/native"
@@ -96,10 +97,8 @@ class VortexCamPlugin(
     // AE fps range the OPEN camera supports (asking for 30-60 on a 30 fps-only camera made the Galaxy A10's camera
     // service abort on the next reconfigure). Read once per camera open.
     @Volatile private var cachedFpsRange = android.util.Range(30, 30)
-    private var rtmpClient: RtmpClient? = null  // RTMP transport
-    @Volatile private var rtmpUrl = ""
-    @Volatile private var rtmpDown = false
-    @Volatile private var rtmpReconnects = 0
+    // RTMP / RTMPS transport — the same publisher as the Switcher mode (audio, TLS, server handshake, reconnects).
+    private var rtmpClient: RtmpStreamer? = null
     // Session clock shared by video and audio of whichever transport is up (new one per stream start).
     @Volatile private var streamClock = StreamClock()
 
@@ -231,8 +230,8 @@ class VortexCamPlugin(
 
             "getStats"     -> result.success(mapOf("bitrateMbps" to bitrateMbps, "rttMs" to rttMs,
                                   // false while SRT/RTMP is reconnecting by itself (the UI can say so)
-                                  "linkUp" to (srtSocket?.linkUp ?: !rtmpDown),
-                                  "reconnects" to ((srtSocket?.reconnects ?: 0) + rtmpReconnects)))
+                                  "linkUp" to (srtSocket?.linkUp ?: (rtmpClient?.isConnected ?: true)),
+                                  "reconnects" to ((srtSocket?.reconnects ?: 0) + (rtmpClient?.reconnects ?: 0))))
 
             "startSbl"         -> startSbl(call, result)
             "startSblStream"   -> startSbl(call, result)          // alias
@@ -560,7 +559,7 @@ class VortexCamPlugin(
         encoderSurface?.release(); encoderSurface = null
         srtSocket?.close(); srtSocket = null
         srtMuxer = null
-        rtmpClient?.close(); rtmpClient = null
+        rtmpClient?.disconnect(); rtmpClient = null
         stopReturnAudio()
         sblSocket?.close(); sblSocket = null
         bytesSent.set(0L); bitrateMbps = 0.0; rttMs = 0
@@ -749,18 +748,23 @@ class VortexCamPlugin(
                 if (!setupEncoder("h264", width, height, bitrate, keyframeMs)) {
                     result.error("ENC", "Encoder setup failed — $lastEncoderError", null); return@thread
                 }
+                setupAudio()                     // the mic → AAC, as SRT does (RTMP used to go out without audio)
                 streamClock = StreamClock()
-                rtmpUrl = url; rtmpDown = false; rtmpReconnects = 0
-                rtmpClient = RtmpClient(url)
-                rtmpClient!!.connect()
+                val st = RtmpStreamer()
+                st.onNeedKeyframe = { requestIdr() }
+                val hasAudio = audioEncoder != null
+                st.setMetadata(width, height, 30, bitrate / 1000, if (hasAudio) 128 else 0,
+                               if (hasAudio) audioSampleRate else 0, audioChannels)
+                st.connect(url, "")              // rtmp(s)://host[:port]/app/KEY — the key is the URL's last segment
+                rtmpClient = st
 
                 streaming.set(true)
-                encodeThread = thread(name = "RtmpEncode") {
-                    drainToRtmp()
-                }
+                startAudioInputThread()
+                startRtmpAudioOutputThread(st)
+                encodeThread = thread(name = "RtmpEncode") { drainToRtmp(st) }
 
                 result.success(null)
-                Log.i(TAG, "RTMP streaming → $url ${width}x$height @${bitrate/1000}kbps H.264")
+                Log.i(TAG, "RTMP streaming → $url ${width}x$height @${bitrate/1000}kbps H.264, audio=$hasAudio")
             } catch (e: Exception) {
                 Log.e(TAG, "startRtmp failed: $e")
                 stopStream()
@@ -769,23 +773,22 @@ class VortexCamPlugin(
         }
     }
 
-    private fun drainToRtmp() {
+    // The publisher reconnects by itself; this loop only keeps feeding it (frames are skipped while the link is down).
+    private fun drainToRtmp(st: RtmpStreamer) {
         val info = MediaCodec.BufferInfo()
+        val out = MediaCodec.BufferInfo()
         var spsData: ByteArray? = null
         var ppsData: ByteArray? = null
-        var seqHeaderSent = false
-        var rtmpLastTry = 0L
-        var rtmpDownSince = 0L
+        var headerSet = false
 
         while (streaming.get()) {
             val idx = encoder?.dequeueOutputBuffer(info, 10_000) ?: break
             when {
                 idx == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
                 idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-                    // Extract SPS/PPS from format for sequence header
                     val fmt = encoder!!.outputFormat
-                    spsData = fmt.getByteBuffer("csd-0")?.let { ByteArray(it.remaining()).also { a -> it.get(a) } }
-                    ppsData = fmt.getByteBuffer("csd-1")?.let { ByteArray(it.remaining()).also { a -> it.get(a) } }
+                    spsData = fmt.getByteBuffer("csd-0")?.let { ByteArray(it.remaining()).also { a -> it.duplicate().get(a) } }
+                    ppsData = fmt.getByteBuffer("csd-1")?.let { ByteArray(it.remaining()).also { a -> it.duplicate().get(a) } }
                     continue
                 }
                 idx < 0 -> continue
@@ -793,50 +796,49 @@ class VortexCamPlugin(
             val buf = encoder!!.getOutputBuffer(idx) ?: run {
                 encoder!!.releaseOutputBuffer(idx, false); continue
             }
-            val data = ByteArray(info.size).also { buf.position(info.offset); buf.get(it) }
-            val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
             if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
-                // Some encoders deliver SPS+PPS as a buffer instead of (or as well as) csd-0/csd-1: keep them as
-                // the sequence header, never send them as a frame.
-                if (spsData == null) spsData = data
+                // Some encoders deliver SPS+PPS as a buffer instead of (or as well as) csd-0/csd-1.
+                if (spsData == null) spsData = ByteArray(info.size).also { buf.duplicate().apply { position(info.offset) }.get(it) }
                 encoder!!.releaseOutputBuffer(idx, false); continue
             }
-
-            // Link down: keep draining the encoder (camera + encoder stay alive), reconnect once a second.
-            if (rtmpDown) {
-                val now = System.currentTimeMillis()
-                if (now - rtmpLastTry >= 1000) {
-                    rtmpLastTry = now
-                    try {
-                        val c = RtmpClient(rtmpUrl); c.connect()
-                        rtmpClient = c; rtmpDown = false; rtmpReconnects++; seqHeaderSent = false
-                        requestIdr()
-                        Log.i(TAG, "RTMP reconnected after ${now - rtmpDownSince} ms (#$rtmpReconnects)")
-                    } catch (e: Exception) { Log.w(TAG, "RTMP reconnect failed: $e") }
-                }
-                if (rtmpDown) { encoder!!.releaseOutputBuffer(idx, false); continue }
+            // csd-0 may hold SPS and PPS together (csd-1 absent): the header builder finds each by NAL type.
+            if (!headerSet && spsData != null) {
+                val all = spsData!! + (ppsData ?: ByteArray(0))
+                st.setSpsPps(all, all); headerSet = true
             }
-
-            // csd-0 may hold SPS and PPS together (csd-1 absent) — the header builder splits them.
-            if (!seqHeaderSent && spsData != null) {
-                seqHeaderSent = rtmpClient?.sendVideoSequenceHeader(spsData, ppsData ?: ByteArray(0)) == true
-            }
-            if (seqHeaderSent) {
-                try {
-                    rtmpClient?.sendVideoData(data, streamClock.video.sessionUs(info.presentationTimeUs) / 1000, isKey)
-                    bytesSent.addAndGet(data.size.toLong())
-                } catch (e: java.io.IOException) {
-                    // The receiver went away (Broken pipe / reset). This used to escape the encode thread and kill
-                    // the whole app; now the link goes DOWN and the loop above reconnects every second.
-                    Log.w(TAG, "RTMP link DOWN: $e — reconnecting every 1 s")
-                    try { rtmpClient?.close() } catch (_: Exception) {}
-                    rtmpDown = true; rtmpDownSince = System.currentTimeMillis(); rtmpLastTry = rtmpDownSince
-                }
-            }
-
+            val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+            out.set(info.offset, info.size, streamClock.video.sessionUs(info.presentationTimeUs), info.flags)
+            st.sendVideoData(buf, out, isKey)
+            bytesSent.addAndGet(info.size.toLong())
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
             if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+        }
+    }
+
+    private fun startRtmpAudioOutputThread(st: RtmpStreamer) {
+        val enc = audioEncoder ?: return
+        audioOutThread = thread(name = "RtmpAudioOut") {
+            val info = MediaCodec.BufferInfo()
+            val out = MediaCodec.BufferInfo()
+            while (streaming.get()) {
+                val idx = enc.dequeueOutputBuffer(info, 10_000)
+                when {
+                    idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        enc.outputFormat.getByteBuffer("csd-0")?.let { b ->
+                            st.setAudioConfig(ByteArray(b.remaining()).also { b.duplicate().get(it) })
+                        }
+                        continue
+                    }
+                    idx < 0 -> continue
+                }
+                if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) { enc.releaseOutputBuffer(idx, false); continue }
+                val buf = enc.getOutputBuffer(idx) ?: run { enc.releaseOutputBuffer(idx, false); continue }
+                out.set(info.offset, info.size, streamClock.audio.sessionUs(info.presentationTimeUs), info.flags)
+                st.sendAudioData(buf, out)
+                enc.releaseOutputBuffer(idx, false)
+                if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+            }
         }
     }
 
@@ -1851,270 +1853,6 @@ class TsMuxer(private val mimeType: String, private val clock: StreamClock) {
                 repeat(8) { crc = if (crc < 0) (crc shl 1) xor 0x04C11DB7 else crc shl 1 }
             }
             return crc
-        }
-    }
-}
-
-// =============================================================================
-// RtmpClient — pure Kotlin RTMP publisher
-// Implements: handshake → connect → createStream → publish → video data
-// =============================================================================
-class RtmpClient(private val rtmpUrl: String) {
-    private var socket: Socket? = null
-    private var output: OutputStream? = null
-    private var streamId = 1
-    private var timestamp = 0
-
-    fun connect() {
-        // Parse rtmp://host:port/app/streamkey
-        val noScheme = rtmpUrl.removePrefix("rtmp://")
-        val slashIdx = noScheme.indexOf('/')
-        val hostPort = if (slashIdx >= 0) noScheme.substring(0, slashIdx) else noScheme
-        val pathPart = if (slashIdx >= 0) noScheme.substring(slashIdx + 1) else ""
-        val colonIdx = hostPort.lastIndexOf(':')
-        val host = if (colonIdx >= 0) hostPort.substring(0, colonIdx) else hostPort
-        val port = if (colonIdx >= 0) hostPort.substring(colonIdx + 1).toIntOrNull() ?: 1935 else 1935
-        val lastSlash = pathPart.lastIndexOf('/')
-        val app       = if (lastSlash >= 0) pathPart.substring(0, lastSlash) else pathPart
-        val streamKey = if (lastSlash >= 0) pathPart.substring(lastSlash + 1) else "live"
-
-        socket = Socket().also {
-            it.tcpNoDelay = true; it.setSoTimeout(5000)
-            it.connect(java.net.InetSocketAddress(host, port), 3000)
-        }
-        output = socket!!.getOutputStream()
-        val input = socket!!.getInputStream()
-
-        // C0+C1 handshake
-        val c0c1 = ByteArray(1537)
-        c0c1[0] = 0x03
-        System.currentTimeMillis().let {
-            c0c1[1] = ((it shr 24) and 0xFF).toByte()
-            c0c1[2] = ((it shr 16) and 0xFF).toByte()
-            c0c1[3] = ((it shr  8) and 0xFF).toByte()
-            c0c1[4] = (it and 0xFF).toByte()
-        }
-        // bytes 5-8 = zeros, rest = random
-        for (i in 9 until 1537) c0c1[i] = (i and 0xFF).toByte()
-        output!!.write(c0c1)
-
-        // S0+S1+S2
-        val s0s1s2 = ByteArray(3073)
-        var totalRead = 0
-        while (totalRead < s0s1s2.size) {
-            val n = input.read(s0s1s2, totalRead, s0s1s2.size - totalRead)
-            if (n < 0) throw Exception("RTMP handshake EOF")
-            totalRead += n
-        }
-        // C2 = echo of S1
-        val c2 = s0s1s2.copyOfRange(1, 1537)
-        output!!.write(c2)
-        socket!!.setSoTimeout(0)
-
-        // Announce our chunk size BEFORE using it. sendRtmpChunk() always cut at 4096 but never said so, and every
-        // receiver (SAMBA's ingest included) reads chunks at the default 128 bytes → the stream was garbage.
-        sendRtmpChunk(chunkStreamId = 2, msgTypeId = 1, msgStreamId = 0, timestamp = 0,
-                      data = byteArrayOf(0, 0, (CHUNK_SIZE shr 8).toByte(), CHUNK_SIZE.toByte()))
-
-        // connect command
-        sendRtmpConnect(app)
-        readAck()
-        // createStream
-        sendCreateStream()
-        readAck()
-        // publish
-        sendPublish(streamKey)
-        readAck()
-
-        Log.i("RtmpClient", "Connected to $rtmpUrl (app=$app stream=$streamKey)")
-    }
-
-    // MediaCodec hands out Annex-B (start codes, csd-0/csd-1 included); FLV wants raw parameter sets in the
-    // AVCDecoderConfigurationRecord and 4-byte length-prefixed NALs. Sending Annex-B made the profile bytes read
-    // as 00 00 01 and every frame undecodable.
-    fun sendVideoSequenceHeader(csd0: ByteArray, csd1: ByteArray): Boolean {
-        val nals = splitAnnexB(csd0) + splitAnnexB(csd1)
-        val sps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 7 } ?: return false
-        val pps = nals.firstOrNull { it.isNotEmpty() && (it[0].toInt() and 0x1F) == 8 } ?: return false
-        if (sps.size < 4) return false
-        val buf = java.io.ByteArrayOutputStream()
-        buf.write(0x17)                 // keyframe + AVC
-        buf.write(0x00)                 // AVC sequence header
-        buf.write(0); buf.write(0); buf.write(0)   // composition time = 0
-        buf.write(1)                    // configurationVersion
-        buf.write(sps[1].toInt()); buf.write(sps[2].toInt()); buf.write(sps[3].toInt())  // profile/compat/level
-        buf.write(0xFF)                 // lengthSizeMinusOne = 3
-        buf.write(0xE1)                 // numSequenceParameterSets = 1
-        buf.write(sps.size shr 8); buf.write(sps.size and 0xFF); buf.write(sps)
-        buf.write(1)                    // numPictureParameterSets = 1
-        buf.write(pps.size shr 8); buf.write(pps.size and 0xFF); buf.write(pps)
-        sendRtmpVideo(buf.toByteArray(), 0, true)
-        return true
-    }
-
-    fun sendVideoData(data: ByteArray, timestampMs: Long, isKeyframe: Boolean) {
-        // RTMP video tag: frameType + codecId + avcPacketType + compositionTime + AVCC NALs
-        val buf = java.io.ByteArrayOutputStream(data.size + 32)
-        buf.write(if (isKeyframe) 0x17 else 0x27)  // keyframe/interframe + AVC
-        buf.write(0x01)                            // AVC NALU
-        buf.write(0); buf.write(0); buf.write(0)   // composition time offset (no B-frames)
-        for (nal in splitAnnexB(data)) {
-            if (nal.isEmpty() || (nal[0].toInt() and 0x1F) == 9) continue   // drop access-unit delimiters
-            buf.write(nal.size ushr 24); buf.write(nal.size ushr 16); buf.write(nal.size ushr 8); buf.write(nal.size)
-            buf.write(nal)
-        }
-        sendRtmpVideo(buf.toByteArray(), timestampMs.toInt(), isKeyframe)
-    }
-
-    private fun sendRtmpConnect(app: String) {
-        val amf = encodeAmfConnect(app)
-        sendRtmpChunk(chunkStreamId = 3, msgTypeId = 20, msgStreamId = 0,
-                      timestamp = 0, data = amf)
-    }
-
-    private fun sendCreateStream() {
-        val amf = buildAmfCmd("createStream", 2.0)
-        sendRtmpChunk(3, 20, 0, 0, amf)
-    }
-
-    private fun sendPublish(streamKey: String) {
-        val amf = buildAmfPublish(streamKey)
-        sendRtmpChunk(3, 20, streamId, 0, amf)
-    }
-
-    private fun sendRtmpVideo(data: ByteArray, ts: Int, isKey: Boolean) {
-        sendRtmpChunk(chunkStreamId = 4, msgTypeId = 9, msgStreamId = streamId,
-                      timestamp = ts, data = data)
-    }
-
-    private fun sendRtmpChunk(
-        chunkStreamId: Int, msgTypeId: Int, msgStreamId: Int,
-        timestamp: Int, data: ByteArray,
-    ) {
-        val out = output ?: return
-        // Timestamps at or above 0xFFFFFF (4.6 h) go in the 4-byte extended field, which is then repeated after
-        // every continuation header. They used to be clamped, freezing every later frame on the same timestamp.
-        val extended = timestamp >= 0xFFFFFF
-        val ts = if (extended) 0xFFFFFF else timestamp
-        val ext = byteArrayOf((timestamp ushr 24).toByte(), (timestamp ushr 16).toByte(),
-                              (timestamp ushr 8).toByte(), timestamp.toByte())
-        // Basic header (fmt=0) + message header type 0 (11 bytes)
-        val hdr = ByteArray(12)
-        hdr[0] = (chunkStreamId and 0x3F).toByte()
-        hdr[1] = ((ts shr 16) and 0xFF).toByte()
-        hdr[2] = ((ts shr  8) and 0xFF).toByte()
-        hdr[3] = (ts and 0xFF).toByte()
-        // message length (3 bytes)
-        hdr[4] = ((data.size shr 16) and 0xFF).toByte()
-        hdr[5] = ((data.size shr  8) and 0xFF).toByte()
-        hdr[6] = (data.size and 0xFF).toByte()
-        // message type id (1 byte)
-        hdr[7] = msgTypeId.toByte()
-        // message stream id (4 bytes little-endian)
-        hdr[8] = (msgStreamId and 0xFF).toByte()
-        hdr[9] = ((msgStreamId shr 8) and 0xFF).toByte()
-        hdr[10]= ((msgStreamId shr 16) and 0xFF).toByte()
-        hdr[11]= ((msgStreamId shr 24) and 0xFF).toByte()
-
-        out.write(hdr)
-        if (extended) out.write(ext)
-        var offset = 0
-        var first  = true
-        while (offset < data.size) {
-            if (!first) {
-                // Continuation chunk: fmt=3 basic header
-                out.write(0xC0 or (chunkStreamId and 0x3F))
-                if (extended) out.write(ext)
-            }
-            val len = minOf(CHUNK_SIZE, data.size - offset)
-            out.write(data, offset, len)
-            offset += len; first = false
-        }
-        out.flush()
-    }
-
-    private fun readAck() {
-        // Minimal read to drain server responses
-        val input = socket?.getInputStream() ?: return
-        Thread.sleep(50)
-        val available = input.available()
-        if (available > 0) {
-            val buf = ByteArray(available)
-            input.read(buf)
-        }
-    }
-
-    // AMF0 encoding helpers
-    private fun encodeAmfConnect(app: String): ByteArray {
-        val buf = mutableListOf<Byte>()
-        amfString(buf, "connect")
-        amfNumber(buf, 1.0)
-        amfObjectStart(buf)
-        amfKvString(buf, "app", app)
-        amfKvString(buf, "type", "nonprivate")
-        amfKvString(buf, "flashVer", "FMLE/3.0")
-        amfKvString(buf, "tcUrl", rtmpUrl.substringBeforeLast('/'))
-        amfObjectEnd(buf)
-        return buf.toByteArray()
-    }
-
-    private fun buildAmfCmd(name: String, txId: Double): ByteArray {
-        val buf = mutableListOf<Byte>()
-        amfString(buf, name); amfNumber(buf, txId); buf.add(5)  // AMF0 null
-        return buf.toByteArray()
-    }
-
-    private fun buildAmfPublish(streamKey: String): ByteArray {
-        val buf = mutableListOf<Byte>()
-        amfString(buf, "publish"); amfNumber(buf, 4.0); buf.add(5)
-        amfString(buf, streamKey); amfString(buf, "live")
-        return buf.toByteArray()
-    }
-
-    private fun amfString(buf: MutableList<Byte>, s: String) {
-        buf.add(2)  // AMF0 string type
-        val bytes = s.toByteArray(Charsets.UTF_8)
-        buf.add(((bytes.size shr 8) and 0xFF).toByte())
-        buf.add((bytes.size and 0xFF).toByte())
-        buf.addAll(bytes.toList())
-    }
-    private fun amfNumber(buf: MutableList<Byte>, n: Double) {
-        buf.add(0)  // AMF0 number type
-        val bits = java.lang.Double.doubleToRawLongBits(n)
-        for (i in 7 downTo 0) buf.add(((bits shr (i * 8)) and 0xFF).toByte())
-    }
-    private fun amfObjectStart(buf: MutableList<Byte>) { buf.add(3) }
-    private fun amfObjectEnd(buf: MutableList<Byte>)   { buf.add(0); buf.add(0); buf.add(9) }
-    private fun amfKvString(buf: MutableList<Byte>, k: String, v: String) {
-        val kb = k.toByteArray(Charsets.UTF_8)
-        buf.add(((kb.size shr 8) and 0xFF).toByte())
-        buf.add((kb.size and 0xFF).toByte())
-        buf.addAll(kb.toList())
-        amfString(buf, v)
-    }
-
-    fun close() { try { socket?.close() } catch (_: Exception) {}; socket = null; output = null }
-
-    companion object {
-        private const val CHUNK_SIZE = 4096
-
-        // NAL units of an Annex-B buffer, start codes removed. No start code at all → the whole buffer is one NAL.
-        fun splitAnnexB(data: ByteArray): List<ByteArray> {
-            val starts = ArrayList<Int>()   // index of the first NAL byte after each start code
-            var i = 0
-            while (i + 2 < data.size) {
-                if (data[i].toInt() == 0 && data[i + 1].toInt() == 0 && data[i + 2].toInt() == 1) {
-                    starts.add(i + 3); i += 3
-                } else i++
-            }
-            if (starts.isEmpty()) return if (data.isEmpty()) emptyList() else listOf(data)
-            val nals = ArrayList<ByteArray>(starts.size)
-            for ((k, st) in starts.withIndex()) {
-                var end = if (k + 1 < starts.size) starts[k + 1] - 3 else data.size
-                while (end > st && data[end - 1].toInt() == 0) end--   // trailing zero of a 4-byte start code
-                if (end > st) nals.add(data.copyOfRange(st, end))
-            }
-            return nals
         }
     }
 }
