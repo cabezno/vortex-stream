@@ -1,9 +1,10 @@
 // =============================================================================
-// Mode picker — one app, three modes (Samba Air + ex SAMBA Móvil Studio):
-//   • Cámara → SAMBA   : the classic Samba Air (SBL / SRT / WHIP / OMT / RTMP to SAMBA desktop)
-//   • Cámara → Studio  : this phone is a camera of a phone switcher (WebRTC room, VP8)
-//   • Switcher         : this phone hosts the room, switches cameras, records and streams
-// The last mode used is remembered and highlighted.
+// Mode picker — one app, what the PHONE does (Samba Air + ex SAMBA Móvil Studio):
+//   • Cámara   → then the destination:
+//        – SAMBA (PC)          : the classic Samba Air (SBL / SRT / WHIP / OMT / RTMP to SAMBA desktop)
+//        – Switcher (celular)  : camera of a phone switcher (WebRTC room, VP8)
+//   • Switcher : hosts the room, switches cameras (manual / by audio), records and streams (platforms or SAMBA)
+// The last choice at each level is remembered and highlighted.
 // =============================================================================
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -19,20 +20,41 @@ class ModePicker extends StatefulWidget {
 }
 
 class _ModePickerState extends State<ModePicker> {
-  static const _prefKey = 'last_mode';
-  String? _last;
+  static const _prefKey = 'last_mode';        // 'camera' | 'switcher'
+  static const _prefDest = 'last_camera_dest'; // 'samba' | 'studio_cam'
+  String? _last, _lastDest;
 
   @override
   void initState() {
     super.initState();
     SharedPreferences.getInstance().then((p) {
-      if (mounted) setState(() => _last = p.getString(_prefKey));
+      if (mounted) setState(() { _last = p.getString(_prefKey); _lastDest = p.getString(_prefDest); });
     });
   }
 
-  Future<void> _open(String mode) async {
-    (await SharedPreferences.getInstance()).setString(_prefKey, mode);
+  Future<void> _remember(String key, String value) async =>
+      (await SharedPreferences.getInstance()).setString(key, value);
+
+  Future<void> _pick(String mode) async {
+    _remember(_prefKey, mode);
     setState(() => _last = mode);
+    if (mode == 'switcher') return _open('switcher');
+    // Cámara → choose where it sends
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => _Chooser(
+      title: 'Cámara',
+      subtitle: '¿A dónde manda este celular?',
+      last: _lastDest,
+      options: const [
+        _Option('samba', Icons.desktop_windows, Color(0xFF00BBDD), 'SAMBA (PC)',
+            'Transmite a SAMBA en la computadora: SBL, SRT, WHIP, OMT o RTMP.'),
+        _Option('studio_cam', Icons.phone_android, Colors.redAccent, 'Switcher (celular)',
+            'Es una cámara de un celular switcher, por Wi-Fi (escaneá su QR).'),
+      ],
+      onPick: (dest) { _remember(_prefDest, dest); setState(() => _lastDest = dest); _open(dest); },
+    )));
+  }
+
+  Future<void> _open(String mode) async {
     if (!mounted) return;
     final Widget page = switch (mode) {
       'studio_cam' => _StudioMode(
@@ -49,6 +71,35 @@ class _ModePickerState extends State<ModePicker> {
   }
 
   @override
+  Widget build(BuildContext context) => _Chooser(
+        title: 'Samba Air',
+        subtitle: '¿Qué hace este celular?',
+        last: _last,
+        options: const [
+          _Option('camera', Icons.videocam, Color(0xFF00BBDD), 'Cámara',
+              'Filma y transmite: a SAMBA en la PC o a un celular switcher.'),
+          _Option('switcher', Icons.dashboard_customize, Colors.amberAccent, 'Switcher',
+              'Recibe las cámaras, corta (a mano o por audio), graba y emite a plataformas o a SAMBA.'),
+        ],
+        onPick: _pick,
+      );
+}
+
+class _Option {
+  final String id; final IconData icon; final Color color; final String title, subtitle;
+  const _Option(this.id, this.icon, this.color, this.title, this.subtitle);
+}
+
+// A full-screen list of big option cards; the last one used is outlined.
+class _Chooser extends StatelessWidget {
+  final String title, subtitle;
+  final String? last;
+  final List<_Option> options;
+  final void Function(String id) onPick;
+  const _Chooser({required this.title, required this.subtitle, required this.last,
+                  required this.options, required this.onPick});
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
@@ -56,49 +107,43 @@ class _ModePickerState extends State<ModePicker> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(20, 28, 20, 20),
           children: [
-            const Text('Samba Air',
-                style: TextStyle(color: Colors.white, fontSize: 30, fontWeight: FontWeight.bold)),
+            Text(title, style: const TextStyle(color: Colors.white, fontSize: 30, fontWeight: FontWeight.bold)),
             const SizedBox(height: 4),
-            const Text('¿Qué hace este celular?', style: TextStyle(color: Colors.white60, fontSize: 15)),
+            Text(subtitle, style: const TextStyle(color: Colors.white60, fontSize: 15)),
             const SizedBox(height: 24),
-            _card('samba', Icons.videocam, const Color(0xFF00BBDD), 'Cámara → SAMBA',
-                'Transmite a SAMBA en la PC (SBL, SRT, WHIP, OMT o RTMP).'),
-            _card('studio_cam', Icons.phone_android, Colors.redAccent, 'Cámara → Studio',
-                'Es una cámara de un celular switcher, por Wi-Fi (escaneá su QR).'),
-            _card('switcher', Icons.dashboard_customize, Colors.amberAccent, 'Switcher',
-                'Recibe las cámaras, corta (a mano o por audio), graba y emite.'),
+            for (final o in options) _card(o),
           ],
         ),
       ),
     );
   }
 
-  Widget _card(String mode, IconData icon, Color color, String title, String subtitle) {
-    final last = _last == mode;
+  Widget _card(_Option o) {
+    final isLast = last == o.id;
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Material(
         color: const Color(0xFF14141A),
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: last ? color : Colors.white12, width: last ? 2 : 1),
+          side: BorderSide(color: isLast ? o.color : Colors.white12, width: isLast ? 2 : 1),
         ),
         child: InkWell(
           borderRadius: BorderRadius.circular(16),
-          onTap: () => _open(mode),
+          onTap: () => onPick(o.id),
           child: Padding(
             padding: const EdgeInsets.all(18),
             child: Row(children: [
-              Icon(icon, color: color, size: 40),
+              Icon(o.icon, color: o.color, size: 40),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(title, style: const TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.w600)),
+                  Text(o.title, style: const TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.w600)),
                   const SizedBox(height: 4),
-                  Text(subtitle, style: const TextStyle(color: Colors.white60, fontSize: 13)),
+                  Text(o.subtitle, style: const TextStyle(color: Colors.white60, fontSize: 13)),
                 ]),
               ),
-              if (last) Text('último', style: TextStyle(color: color, fontSize: 12)),
+              if (isLast) Text('último', style: TextStyle(color: o.color, fontSize: 12)),
             ]),
           ),
         ),
