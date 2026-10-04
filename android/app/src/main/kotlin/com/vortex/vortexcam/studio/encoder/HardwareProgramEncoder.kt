@@ -53,8 +53,8 @@ class HardwareProgramEncoder(
         }
     }
 
-    private val width: Int
-    private val height: Int
+    private var width: Int
+    private var height: Int
     init {
         val (w, h) = supportedSize(requestedWidth, requestedHeight, fps)
         width = w; height = h
@@ -138,20 +138,37 @@ class HardwareProgramEncoder(
 
         Log.i(TAG, "Starting HardwareProgramEncoder: ${width}x${height} @ ${bitrate / 1000} kbps, audio camera=$audioCamera mic=$audioMic, out=$outputPath")
 
-        // 1. Prepare MediaFormat for H.264
-        val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2) // platforms ask for a keyframe every 2 s
-            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+        // 1–2. H.264 encoder on an input surface. The phone's video hardware is SHARED with the decoders of the cameras
+        // the switcher receives: a Galaxy A10 decoding two 1080p cameras refused a 1080p encoder ("codec capacity",
+        // 0xffffec77) and nothing went out (2026-10-04). Detected here, live: step down until the encoder accepts.
+        var codec: MediaCodec? = null
+        var surface: Surface? = null
+        val ladder = listOf(width to height, 1280 to 720, 960 to 540, 640 to 360).filter { it.first <= width }.distinct()
+        for ((w, h) in ladder) {
+            val format = MediaFormat.createVideoFormat(MIME_TYPE, w, h).apply {
+                setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+                setInteger(MediaFormat.KEY_BIT_RATE, if (w == width) bitrate else minOf(bitrate, w * h * 3))
+                setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+                setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2) // platforms ask for a keyframe every 2 s
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            }
+            val c = MediaCodec.createEncoderByType(MIME_TYPE)
+            try {
+                c.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                surface = c.createInputSurface()
+                c.start()
+                codec = c
+                if (w != width) {
+                    Log.w(TAG, "Encoder refused ${width}x$height (video hardware busy decoding the cameras) → ${w}x$h")
+                    width = w; height = h; bitrate = minOf(bitrate, w * h * 3)
+                }
+                break
+            } catch (e: Exception) {
+                Log.w(TAG, "H.264 encoder ${w}x$h refused: ${e.message}")
+                try { c.release() } catch (_: Exception) {}
+            }
         }
-
-        // 2. Instantiate & Configure MediaCodec with Input Surface
-        val codec = MediaCodec.createEncoderByType(MIME_TYPE)
-        codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        val surface = codec.createInputSurface()
-        codec.start()
+        if (codec == null || surface == null) throw IllegalStateException("el encoder de video de este celular no tiene capacidad libre (está decodificando las cámaras)")
         mediaCodec = codec
         inputSurface = surface
 

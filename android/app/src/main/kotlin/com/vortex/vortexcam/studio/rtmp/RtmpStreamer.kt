@@ -421,7 +421,13 @@ class RtmpStreamer {
         val inp = input ?: return
         try {
             while (wanted.get()) {
-                val b0 = inp.readUnsignedByte(); count(1)
+                // A quiet server is not a dead link: most servers (ffmpeg, SAMBA) send nothing after publish. The
+                // setup timeout (10 s) stays on a read that was already blocked when it is lifted, so a silent server
+                // looked like "Read timed out" after 10 s and the stream reconnected (found 2026-10-04, Mi A3).
+                val b0 = try { inp.readUnsignedByte() } catch (_: java.net.SocketTimeoutException) {
+                    if (linkUp.get()) continue else throw IOException("el servidor no respondió")
+                }
+                count(1)
                 val fmt = b0 ushr 6
                 var csid = b0 and 0x3F
                 if (csid == 0) { csid = 64 + inp.readUnsignedByte(); count(1) }

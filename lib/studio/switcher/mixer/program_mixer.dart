@@ -48,13 +48,28 @@ class ProgramMixer extends ChangeNotifier {
   void _syncFromRoomHost() {
     // Redibujar el programa cada vez que cambia la cámara activa (o join/leave):
     // el getter primaryPeerId ya lee activePeerId en vivo, solo hay que notificar.
+    if (_mode != LayoutMode.single) _autoSecondary();
     notifyListeners();
+  }
+
+  /// Split / PiP need a second camera: if none is chosen (or the chosen one left, or it became the on-air one),
+  /// take the first OTHER connected camera instead of leaving half the program black with "SELECCIONAR CÁMARA 2"
+  /// (found 2026-10-04 with three phones). A camera the user picked is kept while it is valid.
+  void _autoSecondary() {
+    final primary = primaryPeerId;
+    final others = roomHost.cameras.where((p) => p.connected && p.id != primary).map((p) => p.id).toList();
+    if (_secondaryPeerId != null && others.contains(_secondaryPeerId)) return;
+    final next = others.isNotEmpty ? others.first : null;
+    if (next == _secondaryPeerId) return;
+    _secondaryPeerId = next;
+    _applyLayerPromotions();
   }
 
   /// Sets the program composition layout mode
   void setLayoutMode(LayoutMode newMode) {
     if (_mode == newMode) return;
     _mode = newMode;
+    _autoSecondary();
     encoder?.setLayoutMode(newMode.name);
     _applyLayerPromotions();
     notifyListeners();

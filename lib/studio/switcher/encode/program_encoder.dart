@@ -37,6 +37,11 @@ class ProgramEncoder extends ChangeNotifier {
   int _encodedFrames = 0;
   int _droppedFrames = 0;
 
+  /// Layout last chosen (single / splitScreen / pip). Kept even while not encoding and applied when the encoder
+  /// starts: choosing SPLIT before EMITIR used to be dropped, and the transmitted program stayed "1 CAM" while the
+  /// switcher's own screen showed the split (found 2026-10-04 with three phones).
+  String _layoutMode = 'single';
+
   /// Program audio: the on-air camera's (audio follows video) and/or this phone's microphone.
   bool audioCamera = true;
   bool audioMic = false;
@@ -98,6 +103,7 @@ class ProgramEncoder extends ChangeNotifier {
     }
 
     _isEncoding = true;
+    if (_layoutMode != 'single') await setLayoutMode(_layoutMode);   // the layout chosen before starting
     _encodedFrames = 0;
     _droppedFrames = 0;
     notifyListeners();
@@ -105,6 +111,7 @@ class ProgramEncoder extends ChangeNotifier {
 
   /// Inform hardware GPU compositor of layout changes (single, splitScreen, pip)
   Future<void> setLayoutMode(String mode) async {
+    _layoutMode = mode;
     try {
       if (!kIsWeb && _isEncoding) {
         await _channel.invokeMethod('setLayoutMode', {'mode': mode});
