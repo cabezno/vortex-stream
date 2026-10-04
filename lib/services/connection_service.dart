@@ -47,6 +47,7 @@ class ConnectionService extends ChangeNotifier {
   RTCRtpSender?       _videoSender;
   RTCRtpSender?       _audioSender;
   Timer?              _statsTimer;
+  int                 _statsTick = 0;
   Timer?              _heartbeatTimer;
 
   // Return audio (talkback): the engine sends the program mix back over the
@@ -197,7 +198,7 @@ class ConnectionService extends ChangeNotifier {
         final params = videoSender.parameters;
         if (params.encodings != null && params.encodings!.isNotEmpty) {
           for (final enc in params.encodings!) {
-            enc.minBitrate            = 1500000;  // 1.5 Mbps floor
+            enc.minBitrate            = 3000000;  // 3 Mbps floor (LAN)
             enc.maxBitrate            = 12000000; // 12 Mbps cap (was 6: low once 1080p/4K really arrive)
             enc.maxFramerate          = 60;
             enc.scaleResolutionDownBy = 1.0;       // never downscale
@@ -364,7 +365,15 @@ class ConnectionService extends ChangeNotifier {
       if (_peerConnection == null) return;
       final stats = await _peerConnection!.getStats();
       for (final report in stats) {
-        if (report.type == 'outbound-rtp' && report.values['mediaType'] == 'video') {
+        final v = report.values;
+        if (report.type == 'outbound-rtp' && (v['mediaType'] == 'video' || v['kind'] == 'video')) {
+          // What the encoder actually sends and why it would send less (cpu / bandwidth / none).
+          _statsTick++;
+          if (_statsTick % 3 == 0) {
+            debugPrint('[SambaAir] WHIP envío: ${v['frameWidth']}x${v['frameHeight']} '
+                '${v['framesPerSecond']} fps · objetivo ${((v['targetBitrate'] as num?) ?? 0) ~/ 1000} kbps · '
+                'límite=${v['qualityLimitationReason']} · encoder=${v['encoderImplementation']}');
+          }
           break;
         }
       }
@@ -460,7 +469,9 @@ class ConnectionService extends ChangeNotifier {
       (m) {
         final line = m.group(1)!;
         if (line.contains('x-google-min-bitrate')) return line;
-        return '$line;x-google-min-bitrate=1500;x-google-max-bitrate=6000;x-google-start-bitrate=3000';
+        // LAN to SAMBA: start high so the encoder's first frames are not judged against a low estimate and scaled
+        // down (WHIP arrived at 720p with a 1080p capture, 2026-10-04).
+        return '$line;x-google-min-bitrate=3000;x-google-max-bitrate=12000;x-google-start-bitrate=6000';
       },
     );
   }
