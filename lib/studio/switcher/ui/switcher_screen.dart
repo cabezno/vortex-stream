@@ -70,9 +70,13 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     final secondaryPeerId = _mixer.secondaryPeerId;
     final primaryRenderer = primaryPeerId != null ? _subscriber.getRenderer(primaryPeerId) : null;
     final secondaryRenderer = secondaryPeerId != null ? _subscriber.getRenderer(secondaryPeerId) : null;
+    // Audio follows video: the program carries the on-air camera's audio track.
+    final primaryStream = primaryPeerId != null ? _subscriber.remoteStreams[primaryPeerId] : null;
+    final audioTracks = primaryStream?.getAudioTracks() ?? const [];
     _encoder.setCameraSources(
       primaryTextureId: primaryRenderer?.textureId,
       secondaryTextureId: secondaryRenderer?.textureId,
+      primaryAudioTrackId: audioTracks.isNotEmpty ? audioTracks.first.id : null,
     );
   }
 
@@ -260,6 +264,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     final urlCtrl = TextEditingController(text: _rtmpOut.rtmpUrl);
     final keyCtrl = TextEditingController(text: _rtmpOut.streamKey);
     bool abr = _rtmpOut.abrEnabled;
+    bool audioCam = _encoder.audioCamera;
+    bool audioMic = _encoder.audioMic;
 
     showDialog(
       context: context,
@@ -312,6 +318,24 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 activeColor: Colors.redAccent,
                 onChanged: (val) => setModal(() => abr = val),
               ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Audio de la cámara al aire', style: TextStyle(color: Colors.white)),
+                subtitle: const Text('El sonido sigue al corte: se escucha a quien está en pantalla',
+                    style: TextStyle(color: Colors.white54, fontSize: 11)),
+                value: audioCam,
+                activeColor: Colors.redAccent,
+                onChanged: (val) => setModal(() => audioCam = val),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Micrófono de este celular', style: TextStyle(color: Colors.white)),
+                subtitle: const Text('Para un presentador junto al switcher (usar con auriculares: el parlante se acopla)',
+                    style: TextStyle(color: Colors.white54, fontSize: 11)),
+                value: audioMic,
+                activeColor: Colors.redAccent,
+                onChanged: (val) => setModal(() => audioMic = val),
+              ),
             ],
           ),
           actions: [
@@ -324,6 +348,12 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
               onPressed: () async {
                 _rtmpOut.configure(url: urlCtrl.text.trim(), streamKey: keyCtrl.text.trim(), abrEnabled: abr);
                 Navigator.pop(ctx);
+                if (_encoder.isEncoding) {
+                  await _encoder.setAudioSources(camera: audioCam, mic: audioMic);
+                } else {
+                  _encoder.audioCamera = audioCam;
+                  _encoder.audioMic = audioMic;
+                }
                 await _rtmpOut.startStream();
                 if (!mounted) return;
                 if (_rtmpOut.state == RtmpState.error) {
@@ -337,7 +367,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                   Future.delayed(const Duration(seconds: 3), () {
                     if (mounted && _rtmpOut.isStreaming && !_rtmpOut.hasAudio) {
                       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                        content: Text('En vivo SIN AUDIO: no hay permiso o acceso al micrófono de este celular.'),
+                        content: Text('En vivo SIN AUDIO: la cámara al aire no manda sonido y el micrófono está apagado o sin permiso.'),
                       ));
                     }
                   });

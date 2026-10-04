@@ -29,6 +29,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private var primarySink: WebRtcSourceSink? = null
     private var secondarySink: WebRtcSourceSink? = null
     private var primaryTrack: VideoTrack? = null
+    private var primaryAudioTrack: org.webrtc.AudioTrack? = null
+    private var primaryAudioTrackId: String? = null
     private var secondaryTrack: VideoTrack? = null
 
     private fun register() {
@@ -40,7 +42,9 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                     val bitrate = call.argument<Int>("bitrate") ?: 4500000
                     val fps = call.argument<Int>("fps") ?: 30
                     val outputPath = call.argument<String>("outputPath")
-                    val withAudio = call.argument<Boolean>("audio") ?: true
+                    // Program audio: the on-air camera's (audio follows video, default) and/or this phone's mic.
+                    val audioCamera = call.argument<Boolean>("audioCamera") ?: true
+                    val audioMic = call.argument<Boolean>("audioMic") ?: false
 
                     try {
                         stopHardwareEncoder()
@@ -50,8 +54,10 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                             bitrate = bitrate,
                             fps = fps,
                             outputPath = outputPath,
-                            withAudio = withAudio
+                            audioMic = audioMic,
+                            audioCamera = audioCamera
                         )
+                        encoder.setCameraAudioTrack(primaryAudioTrack)
                         encoder.primarySink = primarySink
                         encoder.secondarySink = secondarySink
                         encoder.rtmpStreamer = rtmpStreamer
@@ -67,6 +73,12 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                     val primaryId = call.argument<Int>("primaryTextureId")
                     val secondaryId = call.argument<Int>("secondaryTextureId")
                     setCameraSources(primaryId, secondaryId)
+                    setPrimaryAudio(call.argument<String>("primaryAudioTrackId"))
+                    result.success(true)
+                }
+                "setAudioSources" -> {
+                    programEncoder?.setAudioSources(call.argument<Boolean>("mic") ?: false,
+                                                    call.argument<Boolean>("camera") ?: true)
                     result.success(true)
                 }
                 "setLayoutMode" -> {
@@ -143,7 +155,10 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                         "connected" to (streamer?.isConnected ?: false),
                         "reconnects" to (streamer?.reconnects ?: 0),
                         "lastError" to (streamer?.lastError ?: ""),
-                        "hasAudio" to ((programEncoder?.audioSampleRate ?: 0) > 0)
+                        "hasAudio" to ((programEncoder?.audioSampleRate ?: 0) > 0),
+                        "audioCamera" to (programEncoder?.audioCameraOn ?: false),
+                        "audioMic" to (programEncoder?.audioMicOn ?: false),
+                        "cameraAudioTrack" to (primaryAudioTrack != null)
                     )
                     result.success(stats)
                 }
@@ -174,6 +189,23 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
             Log.w(TAG, "Could not extract VideoTrack for textureId $textureId: ${e.message}")
             return null
         }
+    }
+
+    /** The on-air camera's remote audio track, looked up by id in flutter_webrtc (MethodCallHandlerImpl.getTrackForId). */
+    private fun setPrimaryAudio(trackId: String?) {
+        if (trackId == primaryAudioTrackId && (trackId == null || primaryAudioTrack != null)) return
+        primaryAudioTrackId = trackId
+        primaryAudioTrack = trackId?.let { id ->
+            try {
+                val plugin = engine.plugins.get(FlutterWebRTCPlugin::class.java) as? FlutterWebRTCPlugin ?: return@let null
+                val hf = FlutterWebRTCPlugin::class.java.getDeclaredField("methodCallHandler").apply { isAccessible = true }
+                val handler = hf.get(plugin) ?: return@let null
+                handler.javaClass.getMethod("getTrackForId", String::class.java, String::class.java)
+                    .invoke(handler, id, null) as? org.webrtc.AudioTrack
+            } catch (e: Exception) { Log.w(TAG, "Audio track $id not found: ${e.message}"); null }
+        }
+        Log.i(TAG, "On-air audio track: ${primaryAudioTrack?.id() ?: "none"} (asked $trackId)")
+        programEncoder?.setCameraAudioTrack(primaryAudioTrack)
     }
 
     private fun setCameraSources(primaryTextureId: Int?, secondaryTextureId: Int?) {

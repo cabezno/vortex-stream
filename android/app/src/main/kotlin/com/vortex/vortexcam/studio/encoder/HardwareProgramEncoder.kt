@@ -19,7 +19,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Concrete hardware pipeline:
  * MediaCodec (H.264, CBR) -> createInputSurface() -> Shared WebRTC EglBase -> ProgramCompositor (VideoFrameDrawer)
- * -> MediaMuxer (.mp4) & RtmpStreamer (FLV), plus the switcher's microphone as AAC (MicAacEncoder) on the same clock.
+ * -> MediaMuxer (.mp4) & RtmpStreamer (FLV), plus the program audio as AAC (ProgramAudioEncoder: the on-air camera's
+ * audio and/or the switcher's mic) on the same clock.
  */
 class HardwareProgramEncoder(
     private val width: Int = 1280,
@@ -27,7 +28,8 @@ class HardwareProgramEncoder(
     private var bitrate: Int = 4500000,
     private val fps: Int = 30,
     private val outputPath: String? = null,
-    private val withAudio: Boolean = true,
+    private val audioMic: Boolean = false,
+    private val audioCamera: Boolean = true,
 ) {
     companion object {
         private const val TAG = "HardwareProgramEncoder"
@@ -49,12 +51,24 @@ class HardwareProgramEncoder(
     private var compositor: ProgramCompositor? = null
     private var clockStartNano = 0L
 
-    private var audio: MicAacEncoder? = null
+    private var audio: ProgramAudioEncoder? = null
+    @Volatile private var cameraAudioTrack: org.webrtc.AudioTrack? = null
     @Volatile private var audioReady = false          // the AAC format is known (or there is no audio)
     @Volatile private var lastAsc: ByteArray? = null
-    val audioSampleRate: Int get() = audio?.sampleRate ?: 0
-    val audioChannels: Int get() = audio?.channels ?: 0
-    val audioKbps: Int get() = (audio?.bitrate ?: 0) / 1000
+    val audioSampleRate: Int get() = if (audio != null) ProgramAudioEncoder.SAMPLE_RATE else 0
+    val audioChannels: Int get() = if (audio != null) ProgramAudioEncoder.CHANNELS else 0
+    val audioKbps: Int get() = if (audio != null) ProgramAudioEncoder.BITRATE / 1000 else 0
+    /** What the program's audio carries right now (for the UI). */
+    val audioCameraOn: Boolean get() = audio?.useCamera == true
+    val audioMicOn: Boolean get() = audio?.micActive == true
+
+    /** The on-air camera's WebRTC audio track (audio follows video). */
+    fun setCameraAudioTrack(track: org.webrtc.AudioTrack?) {
+        cameraAudioTrack = track
+        audio?.setCameraTrack(track)
+    }
+
+    fun setAudioSources(mic: Boolean, camera: Boolean) { audio?.setSources(mic, camera) }
     val programWidth get() = width
     val programHeight get() = height
     val programFps get() = fps
@@ -98,7 +112,7 @@ class HardwareProgramEncoder(
     fun start() {
         if (isRunning.get()) return
 
-        Log.i(TAG, "Starting HardwareProgramEncoder: ${width}x${height} @ ${bitrate / 1000} kbps, audio=$withAudio, out=$outputPath")
+        Log.i(TAG, "Starting HardwareProgramEncoder: ${width}x${height} @ ${bitrate / 1000} kbps, audio camera=$audioCamera mic=$audioMic, out=$outputPath")
 
         // 1. Prepare MediaFormat for H.264
         val format = MediaFormat.createVideoFormat(MIME_TYPE, width, height).apply {
@@ -161,10 +175,10 @@ class HardwareProgramEncoder(
         videoTrackIndex = -1; audioTrackIndex = -1
         clockStartNano = System.nanoTime()
 
-        // 5. Microphone (same clock as the video). No mic → the program goes on without audio.
+        // 5. Program audio (same clock as the video): the on-air camera and/or this phone's mic.
         audioReady = true
-        if (withAudio) {
-            val mic = MicAacEncoder(clockStartNano, object : MicAacEncoder.Listener {
+        if (audioMic || audioCamera) {
+            val pa = ProgramAudioEncoder(clockStartNano, object : ProgramAudioEncoder.Listener {
                 override fun onAudioFormat(format: MediaFormat, asc: ByteArray) {
                     lastAsc = asc
                     if (asc.isNotEmpty()) rtmpStreamer?.setAudioConfig(asc)
@@ -183,9 +197,9 @@ class HardwareProgramEncoder(
                         }
                     }
                 }
-            })
+            }, audioMic, audioCamera)
             audioReady = false
-            if (mic.start()) audio = mic else audioReady = true
+            if (pa.start()) { audio = pa; pa.setCameraTrack(cameraAudioTrack) } else audioReady = true
         }
 
         // 6. Start Render Loop Thread (~30fps presentation to encoder surface)
@@ -336,7 +350,7 @@ class HardwareProgramEncoder(
         Log.i(TAG, "Stopping HardwareProgramEncoder...")
         isDraining = true
 
-        // 0. Microphone first (its callbacks write into the muxer)
+        // 0. Audio first (its callbacks write into the muxer)
         audio?.stop(); audio = null
 
         // 1. Signal end of input stream on surface

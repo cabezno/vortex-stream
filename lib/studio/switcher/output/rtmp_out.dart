@@ -117,7 +117,9 @@ class RtmpOut extends ChangeNotifier {
             _droppedPackets = (stats['droppedPackets'] as num?)?.toInt() ?? _droppedPackets;
             _linkUp = stats['connected'] as bool? ?? _linkUp;
             _reconnects = (stats['reconnects'] as num?)?.toInt() ?? _reconnects;
-            _hasAudio = stats['hasAudio'] as bool? ?? _hasAudio;
+            _hasAudio = (stats['hasAudio'] as bool? ?? false) &&
+                (((stats['audioCamera'] as bool? ?? false) && (stats['cameraAudioTrack'] as bool? ?? false)) ||
+                 (stats['audioMic'] as bool? ?? false));
             _linkError = stats['lastError'] as String? ?? '';
           }
         } catch (_) {}

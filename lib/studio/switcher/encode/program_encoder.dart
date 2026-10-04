@@ -37,6 +37,10 @@ class ProgramEncoder extends ChangeNotifier {
   int _encodedFrames = 0;
   int _droppedFrames = 0;
 
+  /// Program audio: the on-air camera's (audio follows video) and/or this phone's microphone.
+  bool audioCamera = true;
+  bool audioMic = false;
+
   bool get isEncoding => _isEncoding;
   int get width => _width;
   int get height => _height;
@@ -72,12 +76,14 @@ class ProgramEncoder extends ChangeNotifier {
 
     try {
       if (!kIsWeb) {
-        // Audio of the program = this phone's microphone. Asked here because the switcher never needed the mic
-        // before (2026-10-04: its output had no audio at all). Denied → the program goes out without audio.
+        // The mic permission is asked only if the mic goes into the program (the switcher never needed it before).
         bool mic = false;
-        try { mic = (await Permission.microphone.request()).isGranted; } catch (_) {}
+        if (audioMic) {
+          try { mic = (await Permission.microphone.request()).isGranted; } catch (_) {}
+        }
         await _channel.invokeMethod('startEncoder', {
-          'audio': mic,
+          'audioCamera': audioCamera,
+          'audioMic': mic,
           'width': _width,
           'height': _height,
           'bitrate': _bitrateKbps * 1000,
@@ -107,15 +113,32 @@ class ProgramEncoder extends ChangeNotifier {
   }
 
   /// Inform native pipeline of active WebRTC VideoTracks by their Flutter textureIds
-  Future<void> setCameraSources({int? primaryTextureId, int? secondaryTextureId}) async {
+  Future<void> setCameraSources({int? primaryTextureId, int? secondaryTextureId, String? primaryAudioTrackId}) async {
     try {
       if (!kIsWeb) {
         await _channel.invokeMethod('setCameraSources', {
           'primaryTextureId': primaryTextureId,
           'secondaryTextureId': secondaryTextureId,
+          'primaryAudioTrackId': primaryAudioTrackId,
         });
       }
     } catch (_) {}
+  }
+
+  /// Changes what the program's audio carries, live.
+  Future<void> setAudioSources({required bool camera, required bool mic}) async {
+    audioCamera = camera;
+    bool micOk = false;
+    if (mic) {
+      try { micOk = (await Permission.microphone.request()).isGranted; } catch (_) {}
+    }
+    audioMic = micOk;
+    try {
+      if (!kIsWeb && _isEncoding) {
+        await _channel.invokeMethod('setAudioSources', {'camera': camera, 'mic': micOk});
+      }
+    } catch (_) {}
+    notifyListeners();
   }
 
   /// Fetch real metrics from the hardware MediaCodec pipeline
