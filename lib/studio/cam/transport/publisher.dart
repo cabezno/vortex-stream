@@ -17,6 +17,17 @@ class WebRtcPublisher {
   CameraFacing _facing = CameraFacing.back;
   bool _encoderKickChecked = false;
 
+  /// H.264 (the phone's HARDWARE encoder) is tried first: VP8 is software and a phone's CPU tops out around 720p30
+  /// (Xiaomi measured 2026-10-04: qualityLimitationReason=cpu, 1080p capture sent as 720p). If the H.264 encoder does
+  /// not start (framesEncoded=0 after connecting — the Galaxy A10 / Exynos case that made VP8 the default on
+  /// 2026-09-29), this flips to VP8 for the rest of the app's life and asks for a new session. Detected live, never
+  /// from a list of phones.
+  static bool _h264Failed = false;
+  bool _usingH264 = false;
+
+  /// Called when the session must be renegotiated (new offer), e.g. after falling back from H.264 to VP8.
+  Future<void> Function()? onRenegotiate;
+
   /// Se dispara cuando el "destrabe" del encoder re-adquiere la cámara, para que
   /// la UI re-apunte su preview al nuevo stream.
   void Function(MediaStream stream)? onLocalStreamReplaced;
@@ -47,14 +58,12 @@ class WebRtcPublisher {
       },
       'video': {
         'facingMode': facing == CameraFacing.back ? 'environment' : 'user',
-        'width': {
-          'min': SimulcastLayers.highWidth,
-          'ideal': SimulcastLayers.highWidth,
-        },
-        'height': {
-          'min': SimulcastLayers.highHeight,
-          'ideal': SimulcastLayers.highHeight,
-        },
+        // Plain numbers, not {'ideal': N}: flutter_webrtc (GetUserMediaImpl.getConstrainInt, 1.6.2) looks for "ideal"
+        // in the OUTER map, so a map is ignored and it falls back to its 1280x720 default — that is why WHIP and the
+        // Studio camera always arrived at 720p (found 2026-10-04). A number is a target: the camera takes the closest
+        // format it supports.
+        'width': SimulcastLayers.highWidth,
+        'height': SimulcastLayers.highHeight,
         'frameRate': {'ideal': 30, 'min': 15},
       },
     };
@@ -143,25 +152,48 @@ class WebRtcPublisher {
       try {
         final caps = await getRtpSenderCapabilities('video');
         final all = caps.codecs ?? [];
-        // Preferir VP8 (+ RTX asociado) y mantenerlo primero en la lista.
-        final preferred = all.where((c) {
-          final m = c.mimeType.toUpperCase();
-          return m == 'VIDEO/VP8' || m == 'VIDEO/RTX';
-        }).toList();
+        // H.264 first (hardware) unless it already failed on this phone, then VP8 (+ RTX).
+        String m(RTCRtpCodecCapability c) => c.mimeType.toUpperCase();
+        final h264 = _h264Failed ? <RTCRtpCodecCapability>[] : all.where((c) => m(c) == 'VIDEO/H264').toList();
+        final preferred = [
+          ...h264,
+          ...all.where((c) => m(c) == 'VIDEO/VP8'),
+          ...all.where((c) => m(c) == 'VIDEO/RTX'),
+        ];
+        _usingH264 = h264.isNotEmpty;
         final hasVp8 =
-            preferred.any((c) => c.mimeType.toUpperCase() == 'VIDEO/VP8');
+            preferred.any((c) => m(c) == 'VIDEO/VP8');
         debugPrint(
             '[WebRtcPublisher] codecs disponibles: ${all.map((c) => c.mimeType).join(", ")}');
-        if (hasVp8) {
+        if (hasVp8 || _usingH264) {
           await transceiver.setCodecPreferences(preferred);
           debugPrint(
-              '[WebRtcPublisher] Codec preference => VP8 (${preferred.length} entradas)');
+              '[WebRtcPublisher] Codec preference => ${_usingH264 ? 'H264 (hardware) → VP8' : 'VP8'} (${preferred.length} entradas)');
         } else {
           debugPrint(
               '[WebRtcPublisher] VP8 no disponible, se deja negociación por defecto');
         }
       } catch (e) {
         debugPrint('[WebRtcPublisher] setCodecPreferences falló: $e');
+      }
+      // Bitrate ceiling: without it WebRTC caps 720p VP8 at ~2.5 Mbps (default) and the program looks soft.
+      try {
+        final params = transceiver.sender.parameters;
+        final encs = params.encodings;
+        if (encs != null && encs.isNotEmpty) {
+          for (final e in encs) {
+            e.maxBitrate = SimulcastLayers.highMaxBitrate;
+            // Floor: on Wi-Fi ~1 % packet loss made WebRTC's loss-based estimate fall to 300–700 kbps and the
+            // on-air camera reached the switcher at 640x360 (measured 2026-10-04, Xiaomi → A10). On a LAN that
+            // loss does not justify it; the floor keeps the picture (same as the WHIP path's 1.5 Mbps floor).
+            e.minBitrate = SimulcastLayers.highMinBitrate;
+            e.maxFramerate = SimulcastLayers.highMaxFramerate;
+          }
+          await transceiver.sender.setParameters(params);
+          debugPrint('[WebRtcPublisher] maxBitrate ${SimulcastLayers.highMaxBitrate ~/ 1000} kbps');
+        }
+      } catch (e) {
+        debugPrint('[WebRtcPublisher] setParameters (bitrate) falló: $e');
       }
     }
 
@@ -179,7 +211,8 @@ class WebRtcPublisher {
           if (r.type == 'outbound-rtp' &&
               (v['mediaType'] == 'video' || v['kind'] == 'video')) {
             debugPrint(
-                '[Publisher STATS] framesEncoded=${v['framesEncoded']} framesSent=${v['framesSent']} bytesSent=${v['bytesSent']} qpSum=${v['qpSum']} active=${v['active']}');
+                '[Publisher STATS] framesEncoded=${v['framesEncoded']} framesSent=${v['framesSent']} bytesSent=${v['bytesSent']} qpSum=${v['qpSum']} active=${v['active']} '
+                'size=${v['frameWidth']}x${v['frameHeight']} limit=${v['qualityLimitationReason']}');
           }
           if (r.type == 'media-source' &&
               (v['mediaType'] == 'video' || v['kind'] == 'video')) {
@@ -306,7 +339,12 @@ class WebRtcPublisher {
         }
       }
     } catch (_) {}
-    if (encoded == 0) {
+    if (encoded == 0 && _usingH264 && !_h264Failed && onRenegotiate != null) {
+      // The hardware H.264 encoder did not start: VP8 from now on, new session.
+      _h264Failed = true;
+      debugPrint('[WebRtcPublisher] H.264 por hardware no arrancó (framesEncoded=0) → VP8 y renegocio');
+      try { await onRenegotiate!(); } catch (e) { debugPrint('[WebRtcPublisher] renegociar falló: $e'); }
+    } else if (encoded == 0) {
       debugPrint(
           '[WebRtcPublisher] encoder no arrancó (framesEncoded=0) → re-adquiriendo cámara (auto-kick)');
       try {

@@ -28,9 +28,9 @@ class ProgramEncoder extends ChangeNotifier {
   static const MethodChannel _channel = MethodChannel('com.samba.studio/program_encoder');
 
   bool _isEncoding = false;
-  int _width = 1280;
-  int _height = 720;
-  int _bitrateKbps = 4500;
+  int _width = 1920;
+  int _height = 1080;
+  int _bitrateKbps = 6000;
   int _fps = 30;
   EncoderCodec _codec = EncoderCodec.h264;
 
@@ -61,9 +61,9 @@ class ProgramEncoder extends ChangeNotifier {
 
   /// Start hardware encoding the Program stream
   Future<void> start({
-    int width = 1280,
-    int height = 720,
-    int bitrateKbps = 4500,
+    int width = 1920,
+    int height = 1080,
+    int bitrateKbps = 6000,
     int fps = 30,
     EncoderCodec codec = EncoderCodec.h264,
     String? outputPath,
@@ -148,6 +148,8 @@ class ProgramEncoder extends ChangeNotifier {
         final res = await _channel.invokeMapMethod<String, dynamic>('getStats');
         if (res != null) {
           _encodedFrames = (res['encodedFrames'] as num?)?.toInt() ?? _encodedFrames;
+          final w = (res['width'] as num?)?.toInt() ?? 0, h = (res['height'] as num?)?.toInt() ?? 0;
+          if (w > 0 && h > 0) { _width = w; _height = h; }
           notifyListeners();
           return res;
         }

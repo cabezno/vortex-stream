@@ -198,7 +198,7 @@ class ConnectionService extends ChangeNotifier {
         if (params.encodings != null && params.encodings!.isNotEmpty) {
           for (final enc in params.encodings!) {
             enc.minBitrate            = 1500000;  // 1.5 Mbps floor
-            enc.maxBitrate            = 6000000;  // 6 Mbps cap
+            enc.maxBitrate            = 12000000; // 12 Mbps cap (was 6: low once 1080p/4K really arrive)
             enc.maxFramerate          = 60;
             enc.scaleResolutionDownBy = 1.0;       // never downscale
           }

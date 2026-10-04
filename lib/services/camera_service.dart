@@ -79,10 +79,14 @@ class CameraService extends ChangeNotifier {
       // can't reach the target, getUserMedia falls back to its best instead of
       // failing. The engine's director sees the actual delivered resolution
       // (via SPS) and settles there. "Max quality with graceful fallback."
+      // Plain numbers, not {'ideal': N}: flutter_webrtc (GetUserMediaImpl.getConstrainInt, 1.6.2) looks for "ideal"
+      // in the OUTER map, so a map is ignored and it falls back to its 1280x720 default — that is why WHIP and the
+      // Studio camera always arrived at 720p (found 2026-10-04). A number is a target: the camera takes the closest
+      // format it supports.
       videoConstraints = {
         'facingMode': _facing == CameraFacing.back ? 'environment' : 'user',
-        'width':  {'ideal': _engineWidth,  'max': _engineWidth},
-        'height': {'ideal': _engineHeight, 'max': _engineHeight},
+        'width':  _engineWidth,
+        'height': _engineHeight,
         'frameRate': {'ideal': 60, 'min': 30},
       };
     } else {
@@ -93,8 +97,8 @@ class CameraService extends ChangeNotifier {
       // the data channel opens.
       videoConstraints = {
         'facingMode': _facing == CameraFacing.back ? 'environment' : 'user',
-        'width':  {'ideal': 3840},
-        'height': {'ideal': 2160},
+        'width':  3840,                    // number, not {'ideal'} (see above)
+        'height': 2160,
         'frameRate': {'ideal': 60, 'min': 30},
         'aspectRatio': {'ideal': 1.7778},  // force 16:9 (not 4:3 native sensor)
       };

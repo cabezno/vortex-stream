@@ -29,6 +29,13 @@ class _CameraScreenState extends State<CameraScreen> {
   void initState() {
     super.initState();
     _publisher = WebRtcPublisher();
+    // H.264 → VP8 fallback: a fresh session and offer to the switcher.
+    _publisher.onRenegotiate = () async {
+      if (!_control.isConnected) return;
+      await _publisher.createPeerConnectionSession();
+      final offer = await _publisher.createOffer();
+      _control.sendMessage(OfferMessage(from: _control.peerId, to: 'switcher', sdp: offer.sdp ?? ''));
+    };
     _control = CameraControlClient(
       peerId: 'cam_${DateTime.now().millisecondsSinceEpoch % 10000}',
       name: _nameController.text,

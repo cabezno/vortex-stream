@@ -23,8 +23,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * audio and/or the switcher's mic) on the same clock.
  */
 class HardwareProgramEncoder(
-    private val width: Int = 1280,
-    private val height: Int = 720,
+    requestedWidth: Int = 1920,
+    requestedHeight: Int = 1080,
     private var bitrate: Int = 4500000,
     private val fps: Int = 30,
     private val outputPath: String? = null,
@@ -35,6 +35,30 @@ class HardwareProgramEncoder(
         private const val TAG = "HardwareProgramEncoder"
         private const val MIME_TYPE = MediaFormat.MIMETYPE_VIDEO_AVC
         private const val TIMEOUT_USEC = 10000L
+
+        /** The requested size if this phone's H.264 encoder can do it at `fps`, else the largest 16:9 step it can. */
+        fun supportedSize(w: Int, h: Int, fps: Int): Pair<Int, Int> {
+            val caps = try {
+                android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos
+                    .filter { it.isEncoder && it.supportedTypes.any { t -> t.equals(MIME_TYPE, true) } }
+                    .mapNotNull { try { it.getCapabilitiesForType(MIME_TYPE).videoCapabilities } catch (_: Exception) { null } }
+            } catch (_: Exception) { emptyList() }
+            if (caps.isEmpty()) return w to h
+            for ((cw, ch) in listOf(w to h, 1920 to 1080, 1280 to 720, 960 to 540)) {
+                if (cw > w) continue
+                if (caps.any { c -> try { c.areSizeAndRateSupported(cw, ch, fps.toDouble()) } catch (_: Exception) { false } })
+                    return cw to ch
+            }
+            return 1280 to 720
+        }
+    }
+
+    private val width: Int
+    private val height: Int
+    init {
+        val (w, h) = supportedSize(requestedWidth, requestedHeight, fps)
+        width = w; height = h
+        if (w != requestedWidth) Log.i(TAG, "Encoder can't do ${requestedWidth}x$requestedHeight@$fps → ${w}x$h")
     }
 
     private var mediaCodec: MediaCodec? = null

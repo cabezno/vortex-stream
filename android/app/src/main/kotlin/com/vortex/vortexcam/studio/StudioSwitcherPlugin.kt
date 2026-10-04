@@ -37,8 +37,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
         MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "startEncoder" -> {
-                    val width = call.argument<Int>("width") ?: 1280
-                    val height = call.argument<Int>("height") ?: 720
+                    val width = call.argument<Int>("width") ?: 1920
+                    val height = call.argument<Int>("height") ?: 1080
                     val bitrate = call.argument<Int>("bitrate") ?: 4500000
                     val fps = call.argument<Int>("fps") ?: 30
                     val outputPath = call.argument<String>("outputPath")
@@ -49,8 +49,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                     try {
                         stopHardwareEncoder()
                         val encoder = HardwareProgramEncoder(
-                            width = width,
-                            height = height,
+                            requestedWidth = width,
+                            requestedHeight = height,
                             bitrate = bitrate,
                             fps = fps,
                             outputPath = outputPath,
@@ -105,7 +105,10 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                     val stats = mapOf(
                         "encodedFrames" to (encoder?.encodedFrames ?: 0L),
                         "totalBytesWritten" to (encoder?.totalBytesWritten ?: 0L),
-                        "isEncoding" to (encoder != null)
+                        "isEncoding" to (encoder != null),
+                        // the size actually encoded (720p if this phone's encoder can't do 1080p)
+                        "width" to (encoder?.programWidth ?: 0),
+                        "height" to (encoder?.programHeight ?: 0)
                     )
                     result.success(stats)
                 }

@@ -19,7 +19,7 @@ class RtmpOut extends ChangeNotifier {
   Timer? _metricsTimer;
 
   int _bytesSent = 0;
-  int _currentBitrateKbps = 4500;
+  int _currentBitrateKbps = 6000;
   String _errorMessage = '';
 
   RtmpOut({required this.encoder});
@@ -139,12 +139,12 @@ class RtmpOut extends ChangeNotifier {
     final dropped = _droppedPackets > 0 ? _droppedPackets : encoder.droppedFrames;
     if (dropped > 5 && _currentBitrateKbps > 1500) {
       // Throttle down on congestion
-      _currentBitrateKbps = (_currentBitrateKbps - 500).clamp(1200, 4500);
+      _currentBitrateKbps = (_currentBitrateKbps - 600).clamp(1500, 6000);
       encoder.updateBitrate(_currentBitrateKbps);
       debugPrint('[ABR] Real network congestion detected (dropped=$dropped), throttling bitrate to $_currentBitrateKbps kbps');
-    } else if (dropped == 0 && _currentBitrateKbps < 4500) {
+    } else if (dropped == 0 && _currentBitrateKbps < 6000) {
       // Step up when network stabilizes
-      _currentBitrateKbps = (_currentBitrateKbps + 200).clamp(1200, 4500);
+      _currentBitrateKbps = (_currentBitrateKbps + 300).clamp(1500, 6000);
       encoder.updateBitrate(_currentBitrateKbps);
     }
   }
