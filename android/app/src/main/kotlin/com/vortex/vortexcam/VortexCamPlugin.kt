@@ -238,7 +238,8 @@ class VortexCamPlugin(
             "getStats"     -> result.success(mapOf("bitrateMbps" to bitrateMbps, "rttMs" to rttMs,
                                   // false while SRT/RTMP is reconnecting by itself (the UI can say so)
                                   "linkUp" to (srtSocket?.linkUp ?: (rtmpClient?.isConnected ?: true)),
-                                  "reconnects" to ((srtSocket?.reconnects ?: 0) + (rtmpClient?.reconnects ?: 0))))
+                                  "reconnects" to ((srtSocket?.reconnects ?: 0) + (rtmpClient?.reconnects ?: 0)),
+                                  "targetMbps" to ((abr?.currentBps ?: encBitrate) / 1e6)))
 
             "startSbl"         -> startSbl(call, result)
             "startSblStream"   -> startSbl(call, result)          // alias
@@ -464,6 +465,16 @@ class VortexCamPlugin(
     // (30 Mbps → 45 Mbps bursts) while encoding 1080p @16 Mbps lost the big IDR fragments on the A10's Wi-Fi →
     // no complete keyframe ever → grey picture in SAMBA (2026-10-03).
     @Volatile private var encBitrate = 0
+    // SBL / SRT bitrate that follows the network (AdaptiveBitrate.kt). null when not streaming one of them.
+    @Volatile private var abr: AdaptiveBitrate? = null
+
+    private fun startAbr(label: String) {
+        abr = AdaptiveBitrate(encBitrate, label) { bps ->
+            encoder?.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bps) })
+            sblPaceBps = bps.toLong()            // SBL paces at 1.5x the bitrate: follow it down and up
+            Thread { sendLogBytes("[abr] $label ${bps / 1000} kbps\n", "abr") }.start()
+        }
+    }
 
     private fun setupEncoder(
         codec: String, width: Int, height: Int,
@@ -567,6 +578,7 @@ class VortexCamPlugin(
         srtSocket?.close(); srtSocket = null
         srtMuxer = null
         rtmpClient?.disconnect(); rtmpClient = null
+        abr = null
         stopReturnAudio()
         sblSocket?.close(); sblSocket = null
         bytesSent.set(0L); bitrateMbps = 0.0; rttMs = 0
@@ -678,6 +690,7 @@ class VortexCamPlugin(
                     }
                 }
                 if (!srtSocket!!.connect()) throw Exception("SRT connect to $ip:$port failed")
+                startAbr("SRT")
 
                 val mime = if (codec == "hevc") MediaFormat.MIMETYPE_VIDEO_HEVC
                            else MediaFormat.MIMETYPE_VIDEO_AVC
@@ -897,6 +910,7 @@ class VortexCamPlugin(
                 // The size and bitrate the encoder accepted, not the ones requested (see encWidth / encBitrate).
                 val w = encWidth; val h = encHeight
                 sblPaceBps = encBitrate.toLong()
+                startAbr("SBL")
                 encodeThread = thread(name = "SblEncode") { drainToSbl(w, h) }
                 result.success(null)
                 Log.i(TAG, "SBL streaming → $host:$port ${w}x${h} @${encBitrate/1000}kbps (pedido ${width}x${height} @${bitrate/1000}kbps)")
@@ -1399,6 +1413,7 @@ class VortexCamPlugin(
         @Volatile var linkUp = false; private set
         @Volatile var reconnects = 0; private set
         @Volatile private var writeStartMs = 0L        // > 0 while a write is in progress
+        @Volatile private var maxWriteMs = 0L          // longest write since the last bitrate sample
         @Volatile private var closed = false
         @Volatile private var downSinceMs = 0L
         private var watchdog: Thread? = null
@@ -1425,9 +1440,14 @@ class VortexCamPlugin(
         fun send(data: ByteArray) {
             val o = out ?: return
             if (!linkUp) return
-            writeStartMs = System.currentTimeMillis()
+            val t0 = System.currentTimeMillis()
+            writeStartMs = t0
             try { o.write(data) } catch (e: Exception) { markDown("write failed: $e") }
-            finally { writeStartMs = 0L }
+            finally {
+                writeStartMs = 0L
+                val dt = System.currentTimeMillis() - t0
+                if (dt > maxWriteMs) maxWriteMs = dt
+            }
         }
 
         private fun markDown(why: String) {
@@ -1448,6 +1468,10 @@ class VortexCamPlugin(
                     if (linkUp) {
                         val ws = writeStartMs
                         if (ws > 0 && now - ws > 3000) markDown("write blocked ${now - ws} ms")
+                        // A write that waits > 150 ms = the TCP send buffer is full: the Wi-Fi does not carry this rate.
+                        val mw = maxOf(maxWriteMs, if (ws > 0) now - ws else 0L)
+                        maxWriteMs = 0L
+                        abr?.report(mw > 150, "escritura TCP trabada $mw ms")
                     } else if (!closed && now - lastTry >= 1000) {
                         lastTry = now
                         if (open()) {
@@ -1565,7 +1589,15 @@ class VortexCamPlugin(
         // joins the stream or loses sync. It arrives on the Control stream, so
         // it must be handled before the AudioReturn filter below. Without this
         // the engine asked once per second and nothing ever answered.
+        // Feedback (packet type 6, every 0.5 s): SAMBA's measured loss rate (SblFeedbackPayload.lossRatePct, a
+        // big-endian float right after the bandwidth estimate). Ignored until 2026-10-04; now drives the bitrate.
+        if ((buf[4].toInt() and 0xFF) == 6 && len >= 32 + 8) {
+            val loss = java.nio.ByteBuffer.wrap(buf, 32 + 4, 4).order(java.nio.ByteOrder.BIG_ENDIAN).float
+            if (!loss.isNaN()) abr?.report(loss > 1.5f, "pérdida %.1f %%".format(loss))
+            return
+        }
         if ((buf[4].toInt() and 0xFF) == 7) {
+            abr?.report(true, "SAMBA pidió un cuadro completo (perdió fragmentos)")
             val now = System.currentTimeMillis()
             if (now - lastForcedIdrMs < 1000) return          // at most one forced IDR per second
             lastForcedIdrMs = now
