@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../../../theme/sd_icons.dart';
+import '../../../theme/samba_theme.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:samba_protocol/samba_protocol.dart';
 import '../mixer/program_mixer.dart';
@@ -101,7 +103,7 @@ class ProgramLayoutView extends StatelessWidget {
         Expanded(
           flex: (mixer.splitRatio * 100).toInt(),
           child: Container(
-            color: Colors.black,
+            color: Sd.void_,
             child: pHasVideo && pRenderer != null
                 ? RTCVideoView(
                     pRenderer,
@@ -112,13 +114,13 @@ class ProgramLayoutView extends StatelessWidget {
         ),
 
         // Divider
-        Container(width: 3, color: Colors.redAccent.withOpacity(0.8)),
+        Container(width: 2, color: Sd.wash(Sd.t1, 0.25)),
 
         // Right Side: Secondary Camera
         Expanded(
           flex: ((1.0 - mixer.splitRatio) * 100).toInt(),
           child: Container(
-            color: Colors.black,
+            color: Sd.void_,
             child: sHasVideo && sRenderer != null
                 ? RTCVideoView(
                     sRenderer,
@@ -195,16 +197,10 @@ class ProgramLayoutView extends StatelessWidget {
       height: pipHeight,
       child: Container(
         decoration: BoxDecoration(
-          color: const Color(0xFF1E1E26),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: Colors.amberAccent, width: 2.0),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.7),
-              blurRadius: 12,
-              spreadRadius: 2,
-            ),
-          ],
+          color: Sd.raised,
+          borderRadius: BorderRadius.circular(Sd.r2),
+          border: Border.all(color: Sd.wash(Sd.cyan, 0.7), width: 1.5),
+          boxShadow: const [BoxShadow(color: Color(0x99000000), blurRadius: 14)],
         ),
         clipBehavior: Clip.antiAlias,
         child: sHasVideo && sRenderer != null
@@ -214,12 +210,8 @@ class ProgramLayoutView extends StatelessWidget {
               )
             : Center(
                 child: Text(
-                  sCam?.name ?? 'PiP: Elegir Cam',
-                  style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                  ),
+                  sCam?.name ?? 'PiP: elegir cámara',
+                  style: SdText.label,
                 ),
               ),
       ),
@@ -231,17 +223,11 @@ class ProgramLayoutView extends StatelessWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Icon(Icons.videocam, size: 48, color: Colors.white24),
-          const SizedBox(height: 8),
-          Text(
-            label.toUpperCase(),
-            style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 15),
-          ),
+          const Icon(SdIcons.videoCamera, size: 40, color: Sd.t3),
+          const SizedBox(height: 10),
+          Text(label, style: SdText.heading.copyWith(color: Sd.t2)),
           const SizedBox(height: 4),
-          Text(
-            sublabel,
-            style: const TextStyle(color: Colors.white38, fontSize: 11),
-          ),
+          Text(sublabel, style: SdText.caption),
         ],
       ),
     );

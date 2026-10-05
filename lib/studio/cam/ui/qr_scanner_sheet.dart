@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../../../theme/sd_icons.dart';
+import '../../../theme/samba_theme.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';  // ZXing via FFI, no ML Kit (like the rest of Samba Air)
 import 'package:samba_protocol/samba_protocol.dart';
 
@@ -14,7 +16,7 @@ class QrScannerSheet extends StatefulWidget {
     return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.black87,
+      backgroundColor: Sd.raised,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -51,16 +53,9 @@ class _QrScannerSheetState extends State<QrScannerSheet> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  'Escanear QR del Switcher',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 18,
-                  ),
-                ),
+                const Text('Escanear el QR del switcher', style: SdText.title),
                 IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white70),
+                  icon: const Icon(SdIcons.x),
                   onPressed: () => Navigator.pop(context),
                 ),
               ],
@@ -81,8 +76,8 @@ class _QrScannerSheetState extends State<QrScannerSheet> {
                     width: 240,
                     height: 240,
                     decoration: BoxDecoration(
-                      border: Border.all(color: Colors.redAccent, width: 3),
-                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: Sd.magenta, width: 1.5),
+                      borderRadius: BorderRadius.circular(18),
                     ),
                   ),
                 ),
@@ -92,9 +87,9 @@ class _QrScannerSheetState extends State<QrScannerSheet> {
           Padding(
             padding: const EdgeInsets.all(16),
             child: Text(
-              'Apunta la cámara hacia el código QR mostrado en la pantalla del Switcher',
+              'Apuntá la cámara al QR que muestra la pantalla del switcher.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white.withOpacity(0.7), fontSize: 13),
+              style: SdText.body,
             ),
           ),
         ],

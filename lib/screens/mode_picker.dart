@@ -8,7 +8,9 @@
 // =============================================================================
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../theme/sd_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../theme/samba_theme.dart';
 import '../studio/cam/ui/camera_screen.dart' as studio_cam;
 import '../studio/switcher/ui/switcher_screen.dart' as studio_switcher;
 
@@ -45,9 +47,9 @@ class _ModePickerState extends State<ModePicker> {
       subtitle: '¿A dónde manda este celular?',
       last: _lastDest,
       options: const [
-        _Option('samba', Icons.desktop_windows, Color(0xFF00BBDD), 'SAMBA (PC)',
+        _Option('samba', SdIcons.desktop, Sd.cyan, 'SAMBA (PC)',
             'Transmite a SAMBA en la computadora: SBL, SRT, WHIP, OMT o RTMP.'),
-        _Option('studio_cam', Icons.phone_android, Colors.redAccent, 'Switcher (celular)',
+        _Option('studio_cam', SdIcons.deviceMobile, Sd.magenta, 'Switcher (celular)',
             'Es una cámara de un celular switcher, por Wi-Fi (escaneá su QR).'),
       ],
       onPick: (dest) { _remember(_prefDest, dest); setState(() => _lastDest = dest); _open(dest); },
@@ -76,9 +78,9 @@ class _ModePickerState extends State<ModePicker> {
         subtitle: '¿Qué hace este celular?',
         last: _last,
         options: const [
-          _Option('camera', Icons.videocam, Color(0xFF00BBDD), 'Cámara',
+          _Option('camera', SdIcons.videoCamera, Sd.cyan, 'Cámara',
               'Filma y transmite: a SAMBA en la PC o a un celular switcher.'),
-          _Option('switcher', Icons.dashboard_customize, Colors.amberAccent, 'Switcher',
+          _Option('switcher', SdIcons.squaresFour, Sd.magenta, 'Switcher',
               'Recibe las cámaras, corta (a mano o por audio), graba y emite a plataformas o a SAMBA.'),
         ],
         onPick: _pick,
@@ -101,16 +103,27 @@ class _Chooser extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final canPop = Navigator.of(context).canPop();
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Sd.void_,
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 28, 20, 20),
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
           children: [
-            Text(title, style: const TextStyle(color: Colors.white, fontSize: 30, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
-            Text(subtitle, style: const TextStyle(color: Colors.white60, fontSize: 15)),
-            const SizedBox(height: 24),
+            Row(children: [
+              if (canPop)
+                IconButton(
+                  icon: const Icon(SdIcons.arrowLeft),
+                  onPressed: () => Navigator.of(context).maybePop(),
+                  padding: EdgeInsets.zero, visualDensity: VisualDensity.compact,
+                ),
+              Text('SAMBA', style: SdText.overline.copyWith(color: Sd.cyan, letterSpacing: 2.4)),
+            ]),
+            const SizedBox(height: 14),
+            Text(title, style: SdText.display),
+            const SizedBox(height: 6),
+            Text(subtitle, style: SdText.body),
+            const SizedBox(height: 28),
             for (final o in options) _card(o),
           ],
         ),
@@ -121,46 +134,61 @@ class _Chooser extends StatelessWidget {
   Widget _card(_Option o) {
     final isLast = last == o.id;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Material(
-        color: const Color(0xFF14141A),
+      padding: const EdgeInsets.only(bottom: 12),
+      // One stable label for screen readers (and UI tests): title + description, whatever badge is shown.
+      child: Semantics(
+        button: true,
+        label: '${o.title} ${o.subtitle}',
+        excludeSemantics: true,
+        child: Material(
+        color: Sd.raised,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: BorderSide(color: isLast ? o.color : Colors.white12, width: isLast ? 2 : 1),
+          borderRadius: BorderRadius.circular(Sd.r2),
+          side: BorderSide(color: isLast ? Sd.wash(o.color, 0.55) : Sd.border),
         ),
         child: InkWell(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(Sd.r2),
+          splashColor: Sd.wash(o.color, 0.10),
+          highlightColor: Sd.wash(o.color, 0.05),
           onTap: () => onPick(o.id),
           child: Padding(
-            padding: const EdgeInsets.all(18),
+            padding: const EdgeInsets.fromLTRB(18, 18, 14, 18),
             child: Row(children: [
-              Icon(o.icon, color: o.color, size: 40),
+              Container(
+                width: 52, height: 52,
+                decoration: BoxDecoration(
+                  color: Sd.wash(o.color, 0.10),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Sd.wash(o.color, 0.30)),
+                ),
+                child: Icon(o.icon, color: o.color, size: 26),
+              ),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(o.title, style: const TextStyle(color: Colors.white, fontSize: 19, fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 4),
-                  Text(o.subtitle, style: const TextStyle(color: Colors.white60, fontSize: 13)),
+                  Row(children: [
+                    Text(o.title, style: SdText.heading.copyWith(fontSize: 17)),
+                    if (isLast) ...[const SizedBox(width: 10), SdPill('ÚLTIMO', color: o.color)],
+                  ]),
+                  const SizedBox(height: 5),
+                  Text(o.subtitle, style: SdText.body.copyWith(fontSize: 13)),
                 ]),
               ),
-              if (isLast) Text('último', style: TextStyle(color: o.color, fontSize: 12)),
+              const SizedBox(width: 8),
+              const Icon(SdIcons.caretRight, color: Sd.t3, size: 18),
             ]),
           ),
         ),
+      ),
       ),
     );
   }
 }
 
 // Themes the Studio screens were designed with (their own MaterialApp before the merge).
-final _studioCamTheme = ThemeData.dark(useMaterial3: true).copyWith(
-  scaffoldBackgroundColor: Colors.black,
-  colorScheme: const ColorScheme.dark(primary: Colors.redAccent, secondary: Colors.red),
-);
-final _studioSwitcherTheme = ThemeData.dark(useMaterial3: true).copyWith(
-  scaffoldBackgroundColor: const Color(0xFF0F0F12),
-  colorScheme: const ColorScheme.dark(primary: Colors.redAccent, secondary: Colors.amberAccent),
-);
+// (Now the same SAMBA theme for every mode.)
+final _studioCamTheme = sambaTheme();
+final _studioSwitcherTheme = sambaTheme();
 
 // A Studio screen with its own theme, kept alive like a Samba Air live session: foreground service + Wi-Fi/CPU
 // locks + screen on (StreamKeepAliveService via the "keepalive" channel). The switcher hosts the room server in

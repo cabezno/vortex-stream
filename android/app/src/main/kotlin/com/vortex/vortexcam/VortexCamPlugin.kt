@@ -213,6 +213,16 @@ class VortexCamPlugin(
             "flipCamera"   -> { flipCamera(result) }
             "setTorch"     -> { setTorch(call.argument<Boolean>("on") ?: false); result.success(null) }
 
+            // Wi-Fi band the phone is on (MHz; 0 = not on Wi-Fi). 2.4 GHz is crowded and slow: with several phones or
+            // 4K the app recommends 5 GHz or above (2026-10-05, after the three-phone tests).
+            "wifiBand" -> {
+                val mhz = try {
+                    @Suppress("DEPRECATION")
+                    (context.applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager)
+                        .connectionInfo?.frequency ?: 0
+                } catch (_: Exception) { 0 }
+                result.success(mhz)
+            }
             // Changes when Android or the app is updated → the capability probe must run again.
             "capsStamp" -> result.success(DeviceCaps.stamp(context))
             // What this phone can do (encoders, cameras, OMT speed) — the app offers only what works.

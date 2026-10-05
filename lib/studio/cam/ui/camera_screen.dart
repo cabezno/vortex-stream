@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../../../theme/sd_icons.dart';
+import '../../../theme/samba_theme.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:samba_protocol/samba_protocol.dart';
@@ -137,255 +139,79 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Sd.void_,
       body: SafeArea(
         child: Stack(
           children: [
-            // 1. Camera Viewport
-            Center(
+            // 1. Camera viewport
+            Positioned.fill(
               child: _isRendererReady
                   ? RTCVideoView(
                       _localRenderer,
                       mirror: _facing == CameraFacing.front,
                       objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                     )
-                  : const CircularProgressIndicator(color: Colors.redAccent),
+                  : const Center(child: CircularProgressIndicator(strokeWidth: 1.6)),
             ),
 
-            // 2. Top Tally & Status Bar
+            // 2. Tally: a soft red frame while on air
+            ListenableBuilder(
+              listenable: _control,
+              builder: (context, _) => _control.isOnAir
+                  ? IgnorePointer(child: Container(decoration: BoxDecoration(
+                      border: Border.all(color: Sd.wash(Sd.red, 0.85), width: 4))))
+                  : const SizedBox.shrink(),
+            ),
+
+            // 3. Status pills
             Positioned(
-              top: 16,
-              left: 16,
-              right: 16,
+              top: 14, left: 16, right: 16,
               child: ListenableBuilder(
                 listenable: _control,
                 builder: (context, _) {
                   final onAir = _control.isOnAir;
                   final connected = _control.isConnected;
-
-                  return Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: onAir
-                          ? Colors.red.withOpacity(0.9)
-                          : Colors.black.withOpacity(0.7),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: onAir ? Colors.redAccent : Colors.white24,
-                        width: onAir ? 2.5 : 1.0,
-                      ),
-                      boxShadow: onAir
-                          ? [
-                              BoxShadow(
-                                color: Colors.red.withOpacity(0.6),
-                                blurRadius: 16,
-                                spreadRadius: 4,
-                              )
-                            ]
-                          : [],
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(
-                              onAir ? Icons.sensors : Icons.sensors_off,
-                              color: onAir ? Colors.white : Colors.white60,
-                            ),
-                            const SizedBox(width: 8),
-                            Text(
-                              onAir ? '● EN EL AIRE (HD)' : '○ EN ESPERA (PREVIEW)',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 15,
-                              ),
-                            ),
-                          ],
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: connected ? Colors.green.withOpacity(0.3) : Colors.white10,
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            connected ? 'CONECTADO' : 'DESCONECTADO',
-                            style: TextStyle(
-                              color: connected ? Colors.greenAccent : Colors.white60,
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  );
+                  return Row(children: [
+                    onAir
+                        ? const SdPill('EN EL AIRE', color: Sd.red, icon: SdIcons.record, solid: true)
+                        : const SdPill('EN ESPERA', color: Sd.t2, icon: SdIcons.circle),
+                    const Spacer(),
+                    connected
+                        ? const SdPill('CONECTADO', color: Sd.green, icon: SdIcons.plugsConnected)
+                        : const SdPill('SIN CONEXIÓN', color: Sd.t3, icon: SdIcons.plugs),
+                  ]);
                 },
               ),
             ),
 
-            // 3. Bottom Controls & Setup
+            // 4. Bottom: join card / connected bar
             Positioned(
-              bottom: 16,
-              left: 16,
-              right: 16,
+              bottom: 16, left: 16, right: 16,
               child: ListenableBuilder(
                 listenable: _control,
                 builder: (context, _) {
-                  if (!_control.isConnected) {
-                    return Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1E1E24).withOpacity(0.95),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white24),
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Text(
-                            'Conectar a SAMBA Switcher',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Expanded(
-                                flex: 2,
-                                child: TextField(
-                                  controller: _ipController,
-                                  style: const TextStyle(color: Colors.white),
-                                  decoration: InputDecoration(
-                                    labelText: 'IP del Switcher',
-                                    labelStyle: const TextStyle(color: Colors.white70),
-                                    filled: true,
-                                    fillColor: Colors.white10,
-                                    suffixIcon: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        IconButton(
-                                          icon: const Icon(Icons.qr_code_scanner, color: Colors.redAccent, size: 22),
-                                          tooltip: 'Escanear QR del Switcher',
-                                          onPressed: () {
-                                            QrScannerSheet.show(
-                                              context,
-                                              onScanned: (payload) {
-                                                setState(() {
-                                                  // Conservar ip:puerto del QR (no
-                                                  // solo la ip) para no perder el port.
-                                                  _ipController.text =
-                                                      '${payload.ip}:${payload.port}';
-                                                });
-                                                _connect();
-                                              },
-                                            );
-                                          },
-                                        ),
-                                        IconButton(
-                                          icon: const Icon(Icons.paste, color: Colors.white70, size: 20),
-                                          tooltip: 'Pegar IP o JSON del QR',
-                                          onPressed: () async {
-                                            final messenger = ScaffoldMessenger.of(context);
-                                            final data = await Clipboard.getData('text/plain');
-                                            if (data?.text != null && data!.text!.trim().isNotEmpty) {
-                                              final parsed = PairingPayload.parse(data.text!);
-                                              if (mounted) {
-                                                setState(() {
-                                                  _ipController.text =
-                                                      '${parsed.ip}:${parsed.port}';
-                                                });
-                                                messenger.showSnackBar(
-                                                  SnackBar(content: Text('Detectado: ${parsed.ip}:${parsed.port}')),
-                                                );
-                                              }
-                                            }
-                                          },
-                                        ),
-                                      ],
-                                    ),
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                flex: 1,
-                                child: TextField(
-                                  controller: _nameController,
-                                  style: const TextStyle(color: Colors.white),
-                                  decoration: InputDecoration(
-                                    labelText: 'Nombre',
-                                    labelStyle: const TextStyle(color: Colors.white70),
-                                    filled: true,
-                                    fillColor: Colors.white10,
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 12),
-                          SizedBox(
-                            width: double.infinity,
-                            height: 48,
-                            child: ElevatedButton.icon(
-                              onPressed: _connect,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.redAccent,
-                                foregroundColor: Colors.white,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                              ),
-                              icon: const Icon(Icons.link),
-                              label: const Text(
-                                'UNIRSE A LA SALA',
-                                style: TextStyle(fontWeight: FontWeight.bold),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  }
-
-                  // Connected bar
+                  if (!_control.isConnected) return _joinCard(context);
                   return Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.8),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.white24),
+                      color: const Color(0xCC000000),
+                      borderRadius: BorderRadius.circular(Sd.r3),
+                      border: Border.all(color: Sd.borderStrong),
                     ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        IconButton(
-                          onPressed: _flipCamera,
-                          icon: const Icon(Icons.flip_camera_ios, color: Colors.white),
-                          tooltip: 'Girar cámara',
-                        ),
-                        Text(
-                          'ID: ${_control.peerId}',
-                          style: const TextStyle(color: Colors.white70, fontSize: 13),
-                        ),
-                        IconButton(
-                          onPressed: _control.disconnect,
-                          icon: const Icon(Icons.close, color: Colors.redAccent),
-                          tooltip: 'Desconectar',
-                        ),
-                      ],
-                    ),
+                    child: Row(children: [
+                      IconButton(
+                        onPressed: _flipCamera,
+                        icon: const Icon(SdIcons.cameraRotate, color: Sd.t1),
+                        tooltip: 'Girar cámara',
+                      ),
+                      Expanded(child: Text(_control.peerId, textAlign: TextAlign.center,
+                          style: SdText.label, overflow: TextOverflow.ellipsis)),
+                      IconButton(
+                        onPressed: _control.disconnect,
+                        icon: const Icon(SdIcons.x, color: Sd.red),
+                        tooltip: 'Salir de la sala',
+                      ),
+                    ]),
                   );
                 },
               ),
@@ -395,4 +221,79 @@ class _CameraScreenState extends State<CameraScreen> {
       ),
     );
   }
+
+  Widget _joinCard(BuildContext context) => Container(
+    padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+    decoration: BoxDecoration(
+      color: const Color(0xF2111111),
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: Sd.borderStrong),
+    ),
+    child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('SWITCHER', style: SdText.overline.copyWith(color: Sd.magenta, letterSpacing: 1.6)),
+      const SizedBox(height: 4),
+      const Text('Unirse a un switcher', style: SdText.heading),
+      const SizedBox(height: 2),
+      const Text('Escaneá su QR o escribí su IP.', style: SdText.caption),
+      const SizedBox(height: 14),
+      Row(children: [
+        Expanded(
+          flex: 2,
+          child: TextField(
+            controller: _ipController,
+            style: SdText.bodyHi,
+            decoration: InputDecoration(
+              labelText: 'IP del switcher',
+              suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                  icon: const Icon(SdIcons.qrCode, color: Sd.magenta, size: 22),
+                  tooltip: 'Escanear el QR del switcher',
+                  onPressed: () {
+                    QrScannerSheet.show(context, onScanned: (payload) {
+                      // Keep ip:port from the QR (not just the ip) so the port is not lost.
+                      setState(() => _ipController.text = '${payload.ip}:${payload.port}');
+                      _connect();
+                    });
+                  },
+                ),
+                IconButton(
+                  icon: const Icon(SdIcons.clipboardText, size: 20),
+                  tooltip: 'Pegar la IP o el JSON del QR',
+                  onPressed: () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    final data = await Clipboard.getData('text/plain');
+                    if (data?.text != null && data!.text!.trim().isNotEmpty) {
+                      final parsed = PairingPayload.parse(data.text!);
+                      if (mounted) {
+                        setState(() => _ipController.text = '${parsed.ip}:${parsed.port}');
+                        messenger.showSnackBar(SnackBar(content: Text('Detectado: ${parsed.ip}:${parsed.port}')));
+                      }
+                    }
+                  },
+                ),
+              ]),
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: TextField(
+            controller: _nameController,
+            style: SdText.bodyHi,
+            decoration: const InputDecoration(labelText: 'Nombre'),
+          ),
+        ),
+      ]),
+      const SizedBox(height: 14),
+      SizedBox(
+        width: double.infinity,
+        child: FilledButton.icon(
+          onPressed: _connect,
+          style: FilledButton.styleFrom(backgroundColor: Sd.magenta),
+          icon: const Icon(SdIcons.link, size: 20),
+          label: const Text('Unirse a la sala'),
+        ),
+      ),
+    ]),
+  );
 }

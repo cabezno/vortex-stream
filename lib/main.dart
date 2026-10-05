@@ -18,6 +18,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:flutter_zxing/flutter_zxing.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'theme/sd_icons.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -29,6 +30,7 @@ import 'services/omt_connection_service.dart';
 import 'services/sbl_connection_service.dart';
 import 'services/camera_service.dart';
 import 'services/device_capabilities.dart';
+import 'theme/samba_theme.dart';
 import 'services/log_service.dart';
 import 'screens/mode_picker.dart';
 
@@ -73,11 +75,7 @@ class SambaAirApp extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
     title: 'Samba Air',
     debugShowCheckedModeBanner: false,
-    theme: ThemeData.dark(useMaterial3: true).copyWith(
-      colorScheme: const ColorScheme.dark(primary: Color(0xFF00BBDD)),
-      scaffoldBackgroundColor: Colors.black,
-      appBarTheme: const AppBarTheme(backgroundColor: Color(0xFF0A0A0A), elevation: 0),
-    ),
+    theme: sambaTheme(),   // SAMBA's look (SODA): Inter, black surfaces, cyan accent — lib/theme/samba_theme.dart
     // One app, three modes: Cámara → SAMBA (the classic flow below), Cámara → Studio, Switcher.
     home: ModePicker(sambaHome: (_) => const _HomePage()),
   );
@@ -129,6 +127,19 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     _loadSaved();
     _log('Samba Air v0.6.0 iniciado');
     _probeCaps();
+    _probeWifiBand();
+    _bandTimer = Timer.periodic(const Duration(seconds: 6), (_) => _probeWifiBand());
+  }
+
+  // Wi-Fi band the phone is on, read live (the phone can roam between bands): 2.4 GHz → recommend 5 GHz.
+  int _wifiMhz = 0;
+  Timer? _bandTimer;
+  Future<void> _probeWifiBand() async {
+    if (_live) return;
+    try {
+      final mhz = await _nativeChannel.invokeMethod<int>('wifiBand') ?? 0;
+      if (mounted && mhz != _wifiMhz) setState(() => _wifiMhz = mhz);
+    } catch (_) {}
   }
 
   // What this phone can do, measured once per Android/app version (see device_capabilities.dart). The camera
@@ -153,6 +164,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     DeviceCapabilities.instance.removeListener(_onCapsChanged);
+    _bandTimer?.cancel();
     _renderer.dispose();
     _deviceCtrl.dispose();
     super.dispose();
@@ -205,11 +217,11 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   };
 
   static Color colorFor(Transport t) => switch (t) {
-    Transport.whip => const Color(0xFF00BBDD),
-    Transport.srt  => const Color(0xFF34D399),
-    Transport.rtmp => const Color(0xFFF59E0B),
-    Transport.omt  => const Color(0xFFB57BFF),
-    Transport.sbl  => const Color(0xFF7C3AED),
+    Transport.sbl  => Sd.cyan,       // SAMBA's own protocol: the accent
+    Transport.srt  => Sd.green,
+    Transport.whip => Sd.magenta,
+    Transport.rtmp => Sd.amber,
+    Transport.omt  => Sd.violet,
   };
 
   String get _transportLabel => labelFor(_transport);
@@ -321,7 +333,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Text('Este celular: ${caps.summary()}',
-                    style: const TextStyle(fontSize: 12, color: Colors.white60)),
+                    style: SdText.caption),
               ),
             DropdownButtonFormField<String>(
               value: selected,
@@ -330,7 +342,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
                 value: e,
                 enabled: okItem(e),
                 child: Text(okItem(e) ? e : '$e — no disponible',
-                    style: okItem(e) ? null : const TextStyle(color: Colors.white38)),
+                    style: okItem(e) ? SdText.bodyHi : SdText.bodyHi.copyWith(color: Sd.t3)),
               )).toList(),
               onChanged: (v) => setState(() => selected = v!),
               decoration: const InputDecoration(labelText: 'Protocolo'),
@@ -339,7 +351,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
               Padding(
                 padding: const EdgeInsets.only(top: 6),
                 child: Text('$e: ${caps.support(itemT[e]!).reason}',
-                    style: const TextStyle(fontSize: 11, color: Colors.orangeAccent)),
+                    style: SdText.caption.copyWith(color: Sd.amber)),
               ),
             const SizedBox(height: 12),
             TextField(
@@ -775,89 +787,56 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   // -----------------------------------------------------------------------
   Widget _buildConnectView() {
     final configured = _config != null;
+    final caps = DeviceCapabilities.instance.summary();
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Samba Air'),
+        titleSpacing: 4,
+        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('CÁMARA  →  SAMBA', style: SdText.overline.copyWith(color: Sd.cyan, letterSpacing: 1.6)),
+          const SizedBox(height: 2),
+          const Text('Samba Air'),
+        ]),
         actions: [
-          IconButton(tooltip: 'Registro', icon: const Icon(Icons.article_outlined), onPressed: _showLogs),
+          IconButton(tooltip: 'Registro', icon: const Icon(SdIcons.article), onPressed: _showLogs),
+          const SizedBox(width: 4),
         ],
       ),
-      body: SafeArea(child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-
-          // Status card
+      body: SafeArea(child: ListView(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+        children: [
+          // Destination
           if (_config != null) ...[
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: _transportColor.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: _transportColor.withOpacity(0.3)),
-              ),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [
-                  Icon(Icons.check_circle, color: _transportColor, size: 18),
-                  const SizedBox(width: 8),
-                  Expanded(child: Text(
-                    '${_config!.host}  •  $_transportLabel',
-                    style: TextStyle(color: _transportColor, fontWeight: FontWeight.w600),
-                  )),
-                ]),
-                // WiFi status row (only when hotspot credentials present)
-                if (_config!.hasWifi) ...[
-                  const SizedBox(height: 6),
-                  Row(children: [
-                    if (_wifiConnecting)
-                      const SizedBox(width: 14, height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    else
-                      Icon(
-                        _wifiStatus.startsWith('✓') ? Icons.wifi : Icons.wifi_off,
-                        size: 14,
-                        color: _wifiStatus.startsWith('✓') ? Colors.green : Colors.orange,
-                      ),
-                    const SizedBox(width: 6),
-                    Expanded(child: Text(
-                      _wifiStatus.isEmpty ? 'WiFi: ${_config!.wifi!.ssid}' : _wifiStatus,
-                      style: TextStyle(
-                        fontSize: 12,
-                        color: _wifiStatus.startsWith('✓') ? Colors.green : Colors.orange[300],
-                      ),
-                    )),
-                  ]),
-                ],
-              ]),
-            ),
+            _destinationCard(),
             const SizedBox(height: 12),
           ],
+          _wifiBandHint(),
+          const SizedBox(height: 16),
 
           // Camera name
           TextField(
             controller: _deviceCtrl,
+            style: SdText.bodyHi,
             decoration: const InputDecoration(
               labelText: 'Nombre de cámara',
               hintText: 'cam1',
-              border: OutlineInputBorder(),
-              isDense: true,
-              prefixIcon: Icon(Icons.videocam_outlined),
+              prefixIcon: Icon(SdIcons.videoCamera, size: 20),
             ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 16),
 
-          // Transport selector (only when multiple options available)
-          if (_config != null && _transportOptions.length > 1)
+          // Transport selector (only when several are offered)
+          if (_config != null && _transportOptions.length > 1) ...[
             _buildTransportPicker(),
+            const SizedBox(height: 16),
+          ],
 
-          const SizedBox(height: 12),
-
-          // QR + Go live
+          // QR + go live
           Row(children: [
             Expanded(
               child: OutlinedButton.icon(
                 onPressed: _scan,
-                icon: const Icon(Icons.qr_code_scanner),
-                label: const Text('Scan QR'),
+                icon: const Icon(SdIcons.qrCode, size: 20),
+                label: const Text('Escanear QR'),
               ),
             ),
             const SizedBox(width: 12),
@@ -865,27 +844,102 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
               child: FilledButton.icon(
                 onPressed: (configured && !_connecting && !_wifiConnecting) ? _connect : null,
                 icon: _connecting
-                    ? const SizedBox(width: 18, height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                    : const Icon(Icons.videocam),
-                label: Text(_wifiConnecting ? 'Conectando WiFi...' : _connecting ? 'Conectando...' : 'Go live  $_transportLabel'),
+                    ? const SizedBox(width: 16, height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Sd.onAccent))
+                    : const Icon(SdIcons.broadcast, size: 20),
+                label: Text(_wifiConnecting ? 'Conectando Wi-Fi…'
+                    : _connecting ? 'Conectando…' : 'Salir en vivo · $_transportLabel',
+                    overflow: TextOverflow.ellipsis),
                 style: FilledButton.styleFrom(backgroundColor: _transportColor),
               ),
             ),
           ]),
-
-          TextButton.icon(
-            onPressed: _manualEntry,
-            icon: const Icon(Icons.keyboard, size: 18),
-            label: const Text('Ingresar manualmente'),
+          const SizedBox(height: 4),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _manualEntry,
+              icon: const Icon(SdIcons.keyboard, size: 18),
+              label: const Text('Ingresar manualmente'),
+            ),
           ),
-
-          const Spacer(),
-
-          // Transport legend
+          if (caps.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Row(children: [
+              const Icon(SdIcons.deviceMobile, size: 15, color: Sd.t3),
+              const SizedBox(width: 6),
+              Expanded(child: Text('Este celular: $caps', style: SdText.caption)),
+            ]),
+          ],
+          const SizedBox(height: 24),
           _buildTransportLegend(),
-        ]),
+        ],
       )),
+    );
+  }
+
+  // Where the phone sends + the hotspot Wi-Fi it joins (only when the QR brought one).
+  Widget _destinationCard() => Container(
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: Sd.wash(_transportColor, 0.07),
+      borderRadius: BorderRadius.circular(Sd.r2),
+      border: Border.all(color: Sd.wash(_transportColor, 0.35)),
+    ),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Icon(SdIcons.desktop, color: _transportColor, size: 20),
+        const SizedBox(width: 10),
+        Expanded(child: Text(_config!.host, style: SdText.heading)),
+        SdPill(_transportLabel, color: _transportColor),
+      ]),
+      if (_config!.hasWifi) ...[
+        const SizedBox(height: 10),
+        Row(children: [
+          if (_wifiConnecting)
+            const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.6))
+          else
+            Icon(_wifiStatus.startsWith('✓') ? SdIcons.wifiHigh : SdIcons.wifiSlash,
+                size: 16, color: _wifiStatus.startsWith('✓') ? Sd.green : Sd.amber),
+          const SizedBox(width: 8),
+          Expanded(child: Text(
+            _wifiStatus.isEmpty ? 'Wi-Fi: ${_config!.wifi!.ssid}' : _wifiStatus,
+            style: SdText.label.copyWith(color: _wifiStatus.startsWith('✓') ? Sd.green : Sd.amber),
+          )),
+        ]),
+      ],
+    ]),
+  );
+
+  // 2.4 GHz is crowded and slower: with several phones or 4K, SAMBA recommends 5 GHz or above (Wi-Fi 5/6/6E/7).
+  // Read live from the phone (it can roam between bands).
+  Widget _wifiBandHint() {
+    if (_wifiMhz <= 0) return const SizedBox.shrink();
+    final is24 = _wifiMhz < 3000;
+    final band = is24 ? '2,4 GHz' : _wifiMhz < 5925 ? '5 GHz' : '6 GHz';
+    if (!is24) {
+      return Row(children: [
+        const Icon(SdIcons.wifiHigh, size: 15, color: Sd.green),
+        const SizedBox(width: 6),
+        Text('Wi-Fi $band', style: SdText.caption.copyWith(color: Sd.green)),
+      ]);
+    }
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+      decoration: BoxDecoration(
+        color: Sd.wash(Sd.amber, 0.07),
+        borderRadius: BorderRadius.circular(Sd.r1),
+        border: Border.all(color: Sd.wash(Sd.amber, 0.35)),
+      ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Icon(SdIcons.wifiMedium, size: 18, color: Sd.amber),
+        const SizedBox(width: 10),
+        Expanded(child: Text(
+          'Estás en Wi-Fi de 2,4 GHz. Para varias cámaras o 4K se recomienda una red de 5 GHz o superior: '
+          'con 2,4 GHz pueden perderse cuadros.',
+          style: SdText.label.copyWith(color: Sd.amber, height: 1.35),
+        )),
+      ]),
     );
   }
 
@@ -900,50 +954,46 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     ];
   }
 
-  Widget _buildTransportPicker() => Container(
-    padding: const EdgeInsets.symmetric(vertical: 4),
-    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('Transporte', style: TextStyle(color: Colors.white54, fontSize: 12)),
-      const SizedBox(height: 6),
-      Row(children: _transportOptions.map((t) {
-        final active = _transport == t;
-        final color  = colorFor(t);
-        final label  = labelFor(t);
-        return Padding(
-          padding: const EdgeInsets.only(right: 8),
-          child: GestureDetector(
-            onTap: () => setState(() => _transport = t),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              decoration: BoxDecoration(
-                color:        active ? color.withOpacity(0.2) : Colors.white.withOpacity(0.05),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: active ? color : Colors.white24),
-              ),
-              child: Text(label,
-                style: TextStyle(
-                  color:      active ? color : Colors.white54,
-                  fontWeight: active ? FontWeight.bold : FontWeight.normal,
-                  fontSize:   13,
-                )),
-            ),
+  Widget _buildTransportPicker() => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    Text('TRANSPORTE', style: SdText.overline),
+    const SizedBox(height: 8),
+    Wrap(spacing: 8, runSpacing: 8, children: _transportOptions.map((t) {
+      final active = _transport == t;
+      final color  = colorFor(t);
+      return InkWell(
+        borderRadius: BorderRadius.circular(Sd.r3),
+        onTap: () => setState(() => _transport = t),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? Sd.wash(color, 0.14) : Sd.raised,
+            borderRadius: BorderRadius.circular(Sd.r3),
+            border: Border.all(color: active ? Sd.wash(color, 0.6) : Sd.borderStrong),
           ),
-        );
-      }).toList()),
-    ]),
-  );
+          child: Text(labelFor(t), style: SdText.label.copyWith(
+              color: active ? color : Sd.t2, fontWeight: active ? FontWeight.w600 : FontWeight.w500)),
+        ),
+      );
+    }).toList()),
+  ]);
 
-  Widget _buildTransportLegend() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: const [
-      Divider(),
-      SizedBox(height: 4),
-      _LegendRow(color: Color(0xFF7C3AED), label: 'SBL',  desc: 'LAN, H.264, protocolo nativo SAMBA'),
-      _LegendRow(color: Color(0xFFB57BFF), label: 'OMT',  desc: 'LAN, VMX 4:2:2, ~16ms, máxima calidad'),
-      _LegendRow(color: Color(0xFF34D399), label: 'SRT',  desc: 'LAN, H.265, baja latencia'),
-      _LegendRow(color: Color(0xFF00BBDD), label: 'WHIP', desc: 'LAN + internet, H.264, WebRTC'),
-      _LegendRow(color: Color(0xFFF59E0B), label: 'RTMP', desc: 'LAN + internet, H.264, compatible'),
-    ],
+  Widget _buildTransportLegend() => Container(
+    padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+    decoration: BoxDecoration(
+      color: Sd.surface,
+      borderRadius: BorderRadius.circular(Sd.r2),
+      border: Border.all(color: Sd.border),
+    ),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text('PROTOCOLOS', style: SdText.overline),
+      const SizedBox(height: 8),
+      _LegendRow(color: colorFor(Transport.sbl),  label: 'SBL',  desc: 'LAN · H.264 · protocolo propio de SAMBA'),
+      _LegendRow(color: colorFor(Transport.srt),  label: 'SRT',  desc: 'LAN · H.265 · baja latencia'),
+      _LegendRow(color: colorFor(Transport.whip), label: 'WHIP', desc: 'LAN e internet · H.264 · WebRTC, se adapta a la red'),
+      _LegendRow(color: colorFor(Transport.rtmp), label: 'RTMP', desc: 'LAN e internet · H.264 · compatible'),
+      _LegendRow(color: colorFor(Transport.omt),  label: 'OMT',  desc: 'LAN · VMX 4:2:2 · máxima calidad'),
+    ]),
   );
 
   // -----------------------------------------------------------------------
@@ -1028,34 +1078,24 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
                   aspectRatio: (_previewPortraitBuf != (_previewTurns.isOdd)) ? 9 / 16 : 16 / 9,
                   child: RotatedBox(quarterTurns: _previewTurns, child: Texture(textureId: texId)),
                 )),
-                Positioned(left: 8, bottom: 8, child: Text(_previewDbg,
-                    style: const TextStyle(color: Colors.white38, fontSize: 10))),
+                Positioned(left: 10, bottom: 10, child: Text(_previewDbg, style: SdText.caption)),
               ])
             : const Center(child: CircularProgressIndicator());
       case Transport.omt:
         // OMT uses Camera2 directly in native code — show status overlay
         final omt = context.watch<OmtConnectionService>();
         preview = Container(
-          color: Colors.black,
+          color: Sd.void_,
           child: Center(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Icon(Icons.videocam,
-                  size: 64,
-                  color: omt.connected ? const Color(0xFFB57BFF) : Colors.white24),
-              const SizedBox(height: 12),
-              Text(
-                omt.connected ? 'OMT — VortexEngine conectado' : 'OMT — esperando receptor...',
-                style: TextStyle(
-                  color: omt.connected ? const Color(0xFFB57BFF) : Colors.white38,
-                  fontSize: 14,
-                ),
-              ),
+              Icon(SdIcons.videoCamera, size: 56, color: omt.connected ? Sd.violet : Sd.t3),
+              const SizedBox(height: 14),
+              Text(omt.connected ? 'OMT — SAMBA conectado' : 'OMT — esperando a SAMBA…',
+                  style: SdText.heading.copyWith(color: omt.connected ? Sd.violet : Sd.t2)),
               if (omt.isStreaming) ...[
                 const SizedBox(height: 8),
-                Text('Puerto :${omt.listenPort}   ${omt.mbpsSent.toStringAsFixed(1)} Mbps',
-                    style: const TextStyle(color: Colors.white38, fontSize: 12)),
-                Text('${omt.framesSent} frames enviados',
-                    style: const TextStyle(color: Colors.white24, fontSize: 11)),
+                Text('Puerto ${omt.listenPort} · ${omt.mbpsSent.toStringAsFixed(1)} Mbps', style: SdText.label),
+                Text('${omt.framesSent} cuadros enviados', style: SdText.caption),
               ],
             ]),
           ),
@@ -1063,7 +1103,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     }
 
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Sd.void_,
       body: GestureDetector(
         onTap: () => setState(() => _showCtrl = !_showCtrl),
         child: Stack(fit: StackFit.expand, children: [
@@ -1073,9 +1113,10 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
           if (onAir)
             IgnorePointer(
               child: AnimatedOpacity(
-                opacity: 0.12,
+                opacity: 1,
                 duration: const Duration(milliseconds: 300),
-                child: Container(color: Colors.red),
+                // Tally as a soft red frame, not a red wash over the picture.
+                child: Container(decoration: BoxDecoration(border: Border.all(color: Sd.wash(Sd.red, 0.85), width: 4))),
               ),
             ),
 
@@ -1094,7 +1135,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
           Positioned(
             top: 4, right: 4,
             child: IconButton(
-              icon: const Icon(Icons.article_outlined, size: 16, color: Colors.white24),
+              icon: const Icon(SdIcons.article, size: 18, color: Sd.t3),
               onPressed: _showLogs,
             ),
           ),
@@ -1111,62 +1152,62 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   }
 
   Widget _statsBar(double bitMbps, int latMs, String proto, Color color, {bool reconnecting = false}) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
     decoration: BoxDecoration(
-      color: Colors.black54,
-      borderRadius: BorderRadius.circular(20),
+      color: const Color(0xB3000000),
+      borderRadius: BorderRadius.circular(Sd.r3),
+      border: Border.all(color: Sd.borderStrong),
     ),
     child: Row(mainAxisSize: MainAxisSize.min, children: [
-      Container(width: 7, height: 7,
-        decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-      const SizedBox(width: 6),
-      Text(proto, style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold)),
-      const SizedBox(width: 8),
+      Container(width: 6, height: 6, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+      const SizedBox(width: 7),
+      Text(proto, style: SdText.overline.copyWith(color: color, letterSpacing: 0.8)),
+      const SizedBox(width: 10),
       // The link dropped and the app is reconnecting by itself (camera and encoder keep running).
       if (reconnecting)
-        const Text('Reconectando…', style: TextStyle(color: Colors.orangeAccent, fontSize: 11, fontWeight: FontWeight.bold))
+        Text('Reconectando…', style: SdText.label.copyWith(color: Sd.amber, fontWeight: FontWeight.w600))
       else if (bitMbps > 0)
-        Text('${bitMbps.toStringAsFixed(1)} Mbps',
-            style: const TextStyle(color: Colors.white70, fontSize: 11)),
+        Text('${bitMbps.toStringAsFixed(1)} Mbps', style: SdText.label.copyWith(color: Sd.t1)),
       if (latMs > 0) ...[
-        const SizedBox(width: 4),
-        Text('${latMs}ms',
-            style: const TextStyle(color: Colors.white38, fontSize: 10)),
+        const SizedBox(width: 8),
+        Text('$latMs ms', style: SdText.caption),
       ],
     ]),
   );
 
   Widget _controlBar() => Container(
-    padding: const EdgeInsets.fromLTRB(20, 16, 20, 40),
+    padding: const EdgeInsets.fromLTRB(20, 28, 20, 36),
     decoration: const BoxDecoration(
       gradient: LinearGradient(
         begin: Alignment.bottomCenter, end: Alignment.topCenter,
-        colors: [Colors.black87, Colors.transparent],
+        colors: [Color(0xE6000000), Color(0x00000000)],
       ),
     ),
     child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-      _ctrlBtn(_frontCam ? Icons.camera_front : Icons.camera_rear, 'Flip', _flip),
-      _ctrlBtn(
-        _torchOn ? Icons.flashlight_on : Icons.flashlight_off,
-        'Linterna', _toggleTorch,
-        color: _torchOn ? Colors.yellow : Colors.white,
-      ),
-      _ctrlBtn(
-        _talkbackMuted ? Icons.headset_off : Icons.headset,
-        'Retorno', _toggleTalkback,
-        color: _talkbackMuted ? Colors.white38 : Colors.white,
-      ),
-      _ctrlBtn(Icons.link_off, 'Detener', _disconnect, color: Colors.red.shade400),
+      _ctrlBtn(SdIcons.cameraRotate, 'Girar', _flip),
+      _ctrlBtn(_torchOn ? SdIcons.flashlight : SdIcons.lightningSlash,
+          'Linterna', _toggleTorch, color: _torchOn ? Sd.amber : Sd.t1, on: _torchOn),
+      _ctrlBtn(_talkbackMuted ? SdIcons.speakerSlash : SdIcons.headphones,
+          'Retorno', _toggleTalkback, color: _talkbackMuted ? Sd.t3 : Sd.t1),
+      _ctrlBtn(SdIcons.stop, 'Detener', _disconnect, color: Sd.red),
     ]),
   );
 
-  Widget _ctrlBtn(IconData icon, String label, VoidCallback fn, {Color color = Colors.white}) =>
+  Widget _ctrlBtn(IconData icon, String label, VoidCallback fn, {Color color = Sd.t1, bool on = false}) =>
     GestureDetector(
       onTap: fn,
       child: Column(mainAxisSize: MainAxisSize.min, children: [
-        Icon(icon, color: color, size: 28),
-        const SizedBox(height: 4),
-        Text(label, style: TextStyle(color: color.withOpacity(0.8), fontSize: 10)),
+        Container(
+          width: 54, height: 54,
+          decoration: BoxDecoration(
+            color: on ? Sd.wash(color, 0.18) : const Color(0x99000000),
+            shape: BoxShape.circle,
+            border: Border.all(color: on ? Sd.wash(color, 0.6) : Sd.borderStrong),
+          ),
+          child: Icon(icon, color: color, size: 24),
+        ),
+        const SizedBox(height: 6),
+        Text(label, style: SdText.caption.copyWith(color: color == Sd.t1 ? Sd.t2 : color)),
       ]),
     );
 
@@ -1174,31 +1215,32 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   void _showLogs() {
     showModalBottomSheet<void>(
       context: context,
-      backgroundColor: const Color(0xFF101418),
       isScrollControlled: true,
       builder: (_) => Padding(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           Row(children: [
-            const Text('Registro', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+            const Icon(SdIcons.article, size: 20, color: Sd.t2),
+            const SizedBox(width: 10),
+            const Text('Registro', style: SdText.title),
             const Spacer(),
             TextButton.icon(
-              icon: const Icon(Icons.copy, size: 16),
+              icon: const Icon(SdIcons.copy, size: 16),
               label: const Text('Copiar'),
               onPressed: () => Clipboard.setData(ClipboardData(text: _logs.reversed.join('\n'))),
             ),
           ]),
-          const Divider(height: 8),
+          const SizedBox(height: 8),
+          const Divider(),
           SizedBox(
             height: 360,
             child: _logs.isEmpty
-                ? const Center(child: Text('Sin eventos', style: TextStyle(color: Colors.white38)))
+                ? const Center(child: Text('Sin eventos', style: SdText.body))
                 : ListView.builder(
                     itemCount: _logs.length,
                     itemBuilder: (_, i) => Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 1),
-                      child: SelectableText(_logs[i],
-                          style: const TextStyle(fontSize: 11, color: Colors.white60)),
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: SelectableText(_logs[i], style: SdText.caption.copyWith(color: Sd.t2, height: 1.4)),
                     ),
                   ),
           ),
@@ -1214,17 +1256,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
 class _OnAirBadge extends StatelessWidget {
   const _OnAirBadge();
   @override
-  Widget build(BuildContext context) => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-    decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(4)),
-    child: const Row(mainAxisSize: MainAxisSize.min, children: [
-      CircleAvatar(radius: 4, backgroundColor: Colors.white),
-      SizedBox(width: 6),
-      Text('ON AIR',
-        style: TextStyle(color: Colors.white, fontSize: 12,
-            fontWeight: FontWeight.w800, letterSpacing: 1)),
-    ]),
-  );
+  Widget build(BuildContext context) => const SdPill('EN EL AIRE', color: Sd.red, icon: SdIcons.record, solid: true);
 }
 
 class _LegendRow extends StatelessWidget {
@@ -1234,12 +1266,13 @@ class _LegendRow extends StatelessWidget {
   const _LegendRow({required this.color, required this.label, required this.desc});
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 3),
-    child: Row(children: [
-      Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-      const SizedBox(width: 8),
-      Text('$label — ', style: TextStyle(color: color, fontWeight: FontWeight.bold, fontSize: 12)),
-      Text(desc, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+    padding: const EdgeInsets.symmetric(vertical: 5),
+    child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Padding(padding: const EdgeInsets.only(top: 5),
+          child: Container(width: 6, height: 6, decoration: BoxDecoration(color: color, shape: BoxShape.circle))),
+      const SizedBox(width: 10),
+      SizedBox(width: 44, child: Text(label, style: SdText.label.copyWith(color: color, fontWeight: FontWeight.w600))),
+      Expanded(child: Text(desc, style: SdText.label.copyWith(color: Sd.t3))),
     ]),
   );
 }
@@ -1257,7 +1290,7 @@ class _ScanPageState extends State<_ScanPage> {
   bool _done = false;
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Escaneá el QR de VortexEngine')),
+    appBar: AppBar(title: const Text('Escaneá el QR de SAMBA')),
     body: ReaderWidget(
       cropPercent: 0.9,
       tryHarder: true,

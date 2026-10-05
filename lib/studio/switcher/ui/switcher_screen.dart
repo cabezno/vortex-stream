@@ -1,7 +1,9 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import '../../../theme/sd_icons.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import '../../../theme/samba_theme.dart';
 import '../encode/program_encoder.dart';
 import '../local/local_camera.dart';
 import '../mixer/program_mixer.dart';
@@ -114,48 +116,31 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   }
 
   void _showQrPairingDialog() {
-    // Refrescar la IP por si al arrancar la WiFi no estaba lista.
+    // Refresh the IP in case the Wi-Fi was not ready at start.
     _detectLocalIp();
     final connectionPayload = '{"ip":"$_localIp","port":8088,"room":"samba_studio"}';
     debugPrint('[QR] payload=$connectionPayload');
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E1E26),
-        title: const Text('Emparejar Cámara (QR)', style: TextStyle(color: Colors.white)),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: QrImageView(
-                data: connectionPayload,
-                version: QrVersions.auto,
-                size: 200.0,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'IP del Switcher: $_localIp',
-              style: const TextStyle(color: Colors.white70, fontWeight: FontWeight.bold, fontSize: 16),
-            ),
-            const SizedBox(height: 4),
-            const Text(
-              'Puerto: 8088',
-              style: TextStyle(color: Colors.white38, fontSize: 13),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('CERRAR', style: TextStyle(color: Colors.redAccent)),
+        title: const Row(children: [
+          Icon(SdIcons.qrCode, color: Sd.magenta, size: 22),
+          SizedBox(width: 10),
+          Text('Emparejar una cámara'),
+        ]),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(color: Sd.t1, borderRadius: BorderRadius.circular(Sd.r2)),
+            child: QrImageView(data: connectionPayload, version: QrVersions.auto, size: 200.0),
           ),
-        ],
+          const SizedBox(height: 16),
+          Text('$_localIp : 8088', style: SdText.heading),
+          const SizedBox(height: 4),
+          const Text('En otro celular: Samba Air → Cámara → Switcher (celular)', style: SdText.caption,
+              textAlign: TextAlign.center),
+        ]),
+        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cerrar'))],
       ),
     );
   }
@@ -169,92 +154,42 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
         double onset = cfg.onsetMs;
         double hold = cfg.holdSec;
         double silence = cfg.silenceSec;
-
+        Widget slider(String label, String value, double v, double min, double max, int div, ValueChanged<double> on) =>
+            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Expanded(child: Text(label, style: SdText.label)),
+                Text(value, style: SdText.label.copyWith(color: Sd.t1, fontWeight: FontWeight.w600)),
+              ]),
+              Slider(value: v, min: min, max: max, divisions: div, onChanged: on),
+              const SizedBox(height: 4),
+            ]);
         return StatefulBuilder(
-          builder: (context, setModalState) {
-            return AlertDialog(
-              backgroundColor: const Color(0xFF1E1E26),
-              title: const Row(
-                children: [
-                  Icon(Icons.tune, color: Colors.amberAccent),
-                  SizedBox(width: 8),
-                  Text('Ajustes del Audio Switcher', style: TextStyle(color: Colors.white, fontSize: 16)),
-                ],
-              ),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Threshold
-                    Text('Umbral de Voz: ${threshold.toStringAsFixed(0)} dBFS', style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                    Slider(
-                      value: threshold,
-                      min: -60.0,
-                      max: -10.0,
-                      divisions: 50,
-                      activeColor: Colors.amberAccent,
-                      onChanged: (val) {
-                        setModalState(() => threshold = val);
-                        _director.updateConfig(thresholdDbfs: val);
-                      },
-                    ),
-                    const SizedBox(height: 8),
-
-                    // Onset
-                    Text('Onset Mínimo: ${onset.toStringAsFixed(0)} ms', style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                    Slider(
-                      value: onset,
-                      min: 20.0,
-                      max: 300.0,
-                      divisions: 28,
-                      activeColor: Colors.amberAccent,
-                      onChanged: (val) {
-                        setModalState(() => onset = val);
-                        _director.updateConfig(onsetMs: val);
-                      },
-                    ),
-                    const SizedBox(height: 8),
-
-                    // Hold time (anti-chatter)
-                    Text('Retención (Anti-Chatter): ${hold.toStringAsFixed(1)} s', style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                    Slider(
-                      value: hold,
-                      min: 0.5,
-                      max: 4.0,
-                      divisions: 35,
-                      activeColor: Colors.amberAccent,
-                      onChanged: (val) {
-                        setModalState(() => hold = val);
-                        _director.updateConfig(holdSec: val);
-                      },
-                    ),
-                    const SizedBox(height: 8),
-
-                    // Silence delay
-                    Text('Tiempo para Silencio: ${silence.toStringAsFixed(1)} s', style: const TextStyle(color: Colors.white70, fontSize: 13)),
-                    Slider(
-                      value: silence,
-                      min: 1.0,
-                      max: 6.0,
-                      divisions: 25,
-                      activeColor: Colors.amberAccent,
-                      onChanged: (val) {
-                        setModalState(() => silence = val);
-                        _director.updateConfig(silenceSec: val);
-                      },
-                    ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('LISTO', style: TextStyle(color: Colors.amberAccent, fontWeight: FontWeight.bold)),
-                ),
-              ],
-            );
-          },
+          builder: (context, setModalState) => AlertDialog(
+            title: const Row(children: [
+              Icon(SdIcons.waveform, color: Sd.cyan, size: 22),
+              SizedBox(width: 10),
+              Expanded(child: Text('Corte automático por audio')),
+            ]),
+            content: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Corta a la cámara cuyo micrófono habla.', style: SdText.caption),
+                const SizedBox(height: 14),
+                slider('Umbral de voz', '${threshold.toStringAsFixed(0)} dBFS', threshold, -60, -10, 50, (val) {
+                  setModalState(() => threshold = val); _director.updateConfig(thresholdDbfs: val);
+                }),
+                slider('Inicio mínimo', '${onset.toStringAsFixed(0)} ms', onset, 20, 300, 28, (val) {
+                  setModalState(() => onset = val); _director.updateConfig(onsetMs: val);
+                }),
+                slider('Retención (evita cortes de ida y vuelta)', '${hold.toStringAsFixed(1)} s', hold, 0.5, 4, 35, (val) {
+                  setModalState(() => hold = val); _director.updateConfig(holdSec: val);
+                }),
+                slider('Tiempo para silencio', '${silence.toStringAsFixed(1)} s', silence, 1, 6, 25, (val) {
+                  setModalState(() => silence = val); _director.updateConfig(silenceSec: val);
+                }),
+              ]),
+            ),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
+          ),
         );
       },
     );
@@ -266,85 +201,55 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     bool abr = _rtmpOut.abrEnabled;
     bool audioCam = _encoder.audioCamera;
     bool audioMic = _encoder.audioMic;
+    Widget sw(String title, String sub, bool v, ValueChanged<bool> on) => SwitchListTile(
+          contentPadding: EdgeInsets.zero, dense: true,
+          title: Text(title, style: SdText.bodyHi),
+          subtitle: Text(sub, style: SdText.caption),
+          value: v, onChanged: on,
+        );
 
     showDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (context, setModal) => AlertDialog(
-          backgroundColor: const Color(0xFF1E1E26),
-          title: const Row(
-            children: [
-              Icon(Icons.cell_tower, color: Colors.redAccent),
-              SizedBox(width: 8),
-              Text('Emisión RTMP (En Vivo)', style: TextStyle(color: Colors.white, fontSize: 16)),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: urlCtrl,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: 'URL del Servidor RTMP',
-                  labelStyle: TextStyle(color: Colors.white70),
-                  helperText: 'SAMBA (PC en la LAN): rtmp://IP-DEL-PC:1935/live · cualquier clave · '
-                      'YouTube: rtmps://a.rtmps.youtube.com/live2 · Facebook: rtmps://live-api-s.facebook.com:443/rtmp/ · '
-                      'Twitch: rtmp://live.twitch.tv/app',
-                  helperStyle: TextStyle(color: Colors.white38, fontSize: 10),
-                  helperMaxLines: 4,
-                  filled: true,
-                  fillColor: Colors.white10,
-                ),
+          scrollable: true,
+          title: const Row(children: [
+            Icon(SdIcons.broadcast, color: Sd.red, size: 22),
+            SizedBox(width: 10),
+            Text('Emitir en vivo'),
+          ]),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+              controller: urlCtrl,
+              style: SdText.bodyHi,
+              decoration: const InputDecoration(
+                labelText: 'URL del servidor (RTMP / RTMPS)',
+                helperText: 'SAMBA en la PC: rtmp://IP-DEL-PC:1935/live · cualquier clave · '
+                    'YouTube: rtmps://a.rtmps.youtube.com/live2 · Facebook: rtmps://live-api-s.facebook.com:443/rtmp/ · '
+                    'Twitch: rtmp://live.twitch.tv/app',
+                helperMaxLines: 4,
               ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: keyCtrl,
-                obscureText: true,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: 'Clave de Transmisión (Stream Key)',
-                  labelStyle: TextStyle(color: Colors.white70),
-                  filled: true,
-                  fillColor: Colors.white10,
-                ),
-              ),
-              const SizedBox(height: 12),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('ABR para 5G/Móvil', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Ajuste dinámico según saturación de red', style: TextStyle(color: Colors.white54, fontSize: 11)),
-                value: abr,
-                activeColor: Colors.redAccent,
-                onChanged: (val) => setModal(() => abr = val),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Audio de la cámara al aire', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('El sonido sigue al corte: se escucha a quien está en pantalla',
-                    style: TextStyle(color: Colors.white54, fontSize: 11)),
-                value: audioCam,
-                activeColor: Colors.redAccent,
-                onChanged: (val) => setModal(() => audioCam = val),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Micrófono de este celular', style: TextStyle(color: Colors.white)),
-                subtitle: const Text('Para un presentador junto al switcher (usar con auriculares: el parlante se acopla)',
-                    style: TextStyle(color: Colors.white54, fontSize: 11)),
-                value: audioMic,
-                activeColor: Colors.redAccent,
-                onChanged: (val) => setModal(() => audioMic = val),
-              ),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('CANCELAR', style: TextStyle(color: Colors.white60)),
             ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
+            const SizedBox(height: 12),
+            TextField(
+              controller: keyCtrl,
+              obscureText: true,
+              style: SdText.bodyHi,
+              decoration: const InputDecoration(labelText: 'Clave de transmisión'),
+            ),
+            const SizedBox(height: 8),
+            sw('Bitrate adaptativo', 'Baja la calidad si la red se satura', abr, (v) => setModal(() => abr = v)),
+            sw('Audio de la cámara al aire', 'El sonido sigue al corte: se escucha a quien está en pantalla',
+                audioCam, (v) => setModal(() => audioCam = v)),
+            sw('Micrófono de este celular', 'Para un presentador junto al switcher (con auriculares)',
+                audioMic, (v) => setModal(() => audioMic = v)),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancelar', style: TextStyle(color: Sd.t2))),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(backgroundColor: Sd.red),
+              icon: const Icon(SdIcons.broadcast, size: 18),
               onPressed: () async {
                 _rtmpOut.configure(url: urlCtrl.text.trim(), streamKey: keyCtrl.text.trim(), abrEnabled: abr);
                 Navigator.pop(ctx);
@@ -358,9 +263,9 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 if (!mounted) return;
                 if (_rtmpOut.state == RtmpState.error) {
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                    backgroundColor: Colors.red.shade900,
                     duration: const Duration(seconds: 8),
-                    content: Text('No se pudo salir en vivo: ${_rtmpOut.errorMessage}'),
+                    content: Text('No se pudo salir en vivo: ${_rtmpOut.errorMessage}',
+                        style: SdText.bodyHi.copyWith(color: Sd.red)),
                   ));
                 } else if (_rtmpOut.isStreaming) {
                   // Tell the user if the program goes out without sound (mic permission denied / busy).
@@ -373,7 +278,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                   });
                 }
               },
-              child: const Text('INICIAR EN VIVO'),
+              label: const Text('Salir en vivo'),
             ),
           ],
         ),
@@ -410,24 +315,24 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     }
   }
 
-  Widget _buildLayoutChip(String label, LayoutMode mode) {
+  Widget _buildLayoutChip(String label, IconData icon, LayoutMode mode) {
     final isSelected = _mixer.mode == mode;
-    return GestureDetector(
+    return InkWell(
+      borderRadius: BorderRadius.circular(Sd.r1),
       onTap: () => _mixer.setLayoutMode(mode),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
         decoration: BoxDecoration(
-          color: isSelected ? Colors.amberAccent : Colors.transparent,
-          borderRadius: BorderRadius.circular(6),
+          color: isSelected ? Sd.wash(Sd.cyan, 0.16) : Colors.transparent,
+          borderRadius: BorderRadius.circular(Sd.r1),
         ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: isSelected ? Colors.black : Colors.white70,
-            fontSize: 10,
-            fontWeight: FontWeight.bold,
-          ),
-        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 15, color: isSelected ? Sd.cyan : Sd.t2),
+          const SizedBox(width: 5),
+          Text(label, style: SdText.label.copyWith(color: isSelected ? Sd.cyan : Sd.t2,
+              fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500)),
+        ]),
       ),
     );
   }
@@ -452,152 +357,111 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F12),
+      backgroundColor: Sd.void_,
       appBar: AppBar(
-        backgroundColor: const Color(0xFF18181F),
-        elevation: 0,
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.redAccent,
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: const Text(
-                'SAMBA',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 14,
-                  letterSpacing: 1.2,
-                ),
-              ),
-            ),
+        backgroundColor: Sd.void_,
+        titleSpacing: 4,
+        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('SWITCHER', style: SdText.overline.copyWith(color: Sd.magenta, letterSpacing: 1.6)),
+          const SizedBox(height: 2),
+          Row(children: [
+            const Flexible(child: Text('Samba Studio', overflow: TextOverflow.ellipsis)),
             const SizedBox(width: 8),
-            const Flexible(
-              child: Text(
-                'Móvil Studio',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            const SizedBox(width: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: Colors.white10,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Text(
-                ':8088',
-                style: TextStyle(color: Colors.white70, fontSize: 11),
-              ),
-            ),
-          ],
-        ),
+            Text(':8088', style: SdText.caption),
+          ]),
+        ]),
         actions: [
-          // Local Camera (cámara del propio switcher como fuente)
+          // Local camera (this phone's own camera as a source)
           ListenableBuilder(
             listenable: _localCam,
             builder: (context, _) {
               final on = _localCam.isActive;
-              return Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
+              return Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                  icon: Icon(on ? SdIcons.videoCamera : SdIcons.videoCameraSlash,
+                      color: on ? Sd.green : Sd.t2),
+                  tooltip: on ? 'Apagar cámara local' : 'Usar cámara local como fuente',
+                  onPressed: _toggleLocalCamera,
+                ),
+                if (on)
                   IconButton(
-                    icon: Icon(
-                      on ? Icons.videocam : Icons.videocam_off_outlined,
-                      color: on ? Colors.greenAccent : Colors.white70,
-                    ),
-                    tooltip: on ? 'Apagar cámara local' : 'Usar cámara local como fuente',
-                    onPressed: _toggleLocalCamera,
+                    icon: const Icon(SdIcons.cameraRotate),
+                    tooltip: 'Girar cámara local',
+                    onPressed: () => _localCam.flip(),
                   ),
-                  if (on)
-                    IconButton(
-                      icon: const Icon(Icons.flip_camera_ios, color: Colors.white70),
-                      tooltip: 'Girar cámara local',
-                      onPressed: () => _localCam.flip(),
-                    ),
-                ],
-              );
+              ]);
             },
           ),
-          // QR Pairing Button
           IconButton(
-            icon: const Icon(Icons.qr_code_2, color: Colors.white70),
+            icon: const Icon(SdIcons.qrCode),
             tooltip: 'Emparejar Cámara (QR)',
             onPressed: _showQrPairingDialog,
           ),
-          // Audio Switcher Settings Button
           IconButton(
-            icon: const Icon(Icons.tune, color: Colors.white70),
+            icon: const Icon(SdIcons.slidersHorizontal),
             tooltip: 'Ajustes Audio Switcher',
             onPressed: _showAudioSettingsDialog,
           ),
-          // Auto Switcher Toggle Button
+          // Auto / manual switching
           ListenableBuilder(
             listenable: _director,
             builder: (context, _) {
               final isAuto = _director.isAutoSwitch;
-              return FilterChip(
-                avatar: Icon(
-                  Icons.auto_mode,
-                  size: 16,
-                  color: isAuto ? Colors.black : Colors.white70,
-                ),
-                label: Text(
-                  isAuto ? 'AUTO' : 'MANUAL',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 11,
-                    color: isAuto ? Colors.black : Colors.white,
+              return InkWell(
+                borderRadius: BorderRadius.circular(Sd.r3),
+                onTap: () => _director.toggleAutoSwitch(!isAuto),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: isAuto ? Sd.wash(Sd.cyan, 0.16) : Sd.raised,
+                    borderRadius: BorderRadius.circular(Sd.r3),
+                    border: Border.all(color: isAuto ? Sd.wash(Sd.cyan, 0.6) : Sd.borderStrong),
                   ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(SdIcons.sparkle, size: 15, color: isAuto ? Sd.cyan : Sd.t2),
+                    const SizedBox(width: 6),
+                    Text(isAuto ? 'AUTO' : 'MANUAL', style: SdText.overline.copyWith(
+                        color: isAuto ? Sd.cyan : Sd.t2, letterSpacing: 0.8)),
+                  ]),
                 ),
-                selected: isAuto,
-                selectedColor: Colors.amberAccent,
-                backgroundColor: Colors.white12,
-                onSelected: (val) => _director.toggleAutoSwitch(val),
               );
             },
           ),
-          const SizedBox(width: 4),
-          // Record SD Button
+          // Record
           ListenableBuilder(
             listenable: _recorder,
             builder: (context, _) {
               final isRec = _recorder.isRecording;
               return IconButton(
-                icon: Icon(
-                  isRec ? Icons.radio_button_checked : Icons.radio_button_unchecked,
-                  color: isRec ? Colors.amberAccent : Colors.white70,
-                ),
+                icon: Icon(isRec ? SdIcons.record : SdIcons.record,
+                    color: isRec ? Sd.magenta : Sd.t2),
                 tooltip: isRec ? 'Detener Grabación SD' : 'Grabar a SD',
                 onPressed: _toggleRecording,
               );
             },
           ),
-          // RTMP Broadcast Button
+          // Go live
           ListenableBuilder(
             listenable: _rtmpOut,
             builder: (context, _) {
               final isLive = _rtmpOut.isStreaming;
               return Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: isLive ? Colors.red : Colors.green.shade700,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                  icon: Icon(isLive ? Icons.sensors : Icons.cell_tower, size: 16),
-                  label: Text(
-                    isLive ? 'LIVE' : 'EMITIR',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11),
-                  ),
-                  onPressed: isLive ? _rtmpOut.stopStream : _showRtmpConfigDialog,
-                ),
+                padding: const EdgeInsets.only(right: 10, left: 2),
+                child: isLive
+                    ? FilledButton.icon(
+                        style: FilledButton.styleFrom(backgroundColor: Sd.red, minimumSize: const Size(0, 36),
+                            padding: const EdgeInsets.symmetric(horizontal: 12)),
+                        icon: const Icon(SdIcons.broadcast, size: 16),
+                        label: const Text('En vivo'),
+                        onPressed: _rtmpOut.stopStream,
+                      )
+                    : OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(minimumSize: const Size(0, 36),
+                            padding: const EdgeInsets.symmetric(horizontal: 12)),
+                        icon: const Icon(SdIcons.broadcast, size: 16, color: Sd.red),
+                        label: const Text('Emitir'),
+                        onPressed: _showRtmpConfigDialog,
+                      ),
               );
             },
           ),
@@ -611,31 +475,23 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
 
           return Column(
             children: [
-              // 1. Program Monitor Viewport
+              // 1. Program monitor
               Expanded(
                 flex: 4,
                 child: Container(
-                  margin: const EdgeInsets.all(12),
+                  margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+                  clipBehavior: Clip.antiAlias,
                   decoration: BoxDecoration(
-                    color: Colors.black,
-                    borderRadius: BorderRadius.circular(16),
+                    color: Sd.void_,
+                    borderRadius: BorderRadius.circular(14),
                     border: Border.all(
-                      color: activePeerId != null ? Colors.redAccent : Colors.white24,
-                      width: 2.0,
+                      color: activePeerId != null ? Sd.wash(Sd.red, 0.75) : Sd.borderStrong,
+                      width: activePeerId != null ? 1.5 : 1,
                     ),
-                    boxShadow: activePeerId != null
-                        ? [
-                            BoxShadow(
-                              color: Colors.redAccent.withOpacity(0.3),
-                              blurRadius: 20,
-                              spreadRadius: 2,
-                            ),
-                          ]
-                        : [],
                   ),
                   child: Stack(
                     children: [
-                      // Program Composed Viewport (Single, Split-Screen 50/50, PiP)
+                      // Program composition (single, split 50/50, PiP)
                       Positioned.fill(
                         child: ProgramLayoutView(
                           mixer: _mixer,
@@ -645,133 +501,69 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                           localPeerId: _localCam.peerId,
                         ),
                       ),
-
-                      // Program Status Badges Row
+                      // Status pills
                       Positioned(
-                        top: 12,
-                        left: 12,
-                        right: 12,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Row(
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                  decoration: BoxDecoration(
-                                    color: Colors.red,
-                                    borderRadius: BorderRadius.circular(6),
-                                  ),
-                                  child: const Text(
-                                    'PROGRAM',
-                                    style: TextStyle(
-                                      color: Colors.white,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 12,
-                                    ),
-                                  ),
-                                ),
-                                if (_rtmpOut.isStreaming) ...[
-                                  const SizedBox(width: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      color: _rtmpOut.reconnecting ? Colors.orange.shade900 : Colors.red.shade900,
-                                      borderRadius: BorderRadius.circular(6),
-                                      border: Border.all(color: _rtmpOut.reconnecting ? Colors.orangeAccent : Colors.redAccent),
-                                    ),
-                                    child: Text(
-                                      _rtmpOut.reconnecting
-                                          ? '● RECONECTANDO…'
-                                          : '● LIVE (${_rtmpOut.currentBitrateKbps} kbps${_rtmpOut.hasAudio ? '' : ' · SIN AUDIO'})',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                                if (_recorder.isRecording) ...[
-                                  const SizedBox(width: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      color: Colors.amber.shade900,
-                                      borderRadius: BorderRadius.circular(6),
-                                      border: Border.all(color: Colors.amberAccent),
-                                    ),
-                                    child: Text(
-                                      '● REC (${_recorder.fileSizeMb.toStringAsFixed(1)} MB)',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 11,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ],
-                            ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.black54,
-                                borderRadius: BorderRadius.circular(6),
-                                border: Border.all(color: Colors.white24),
-                              ),
-                              child: Text(
-                                '${_encoder.width}x${_encoder.height}p @ ${_encoder.fps}fps',
-                                style: const TextStyle(color: Colors.white70, fontSize: 11),
-                              ),
-                            ),
+                        top: 10, left: 10, right: 10,
+                        child: Row(children: [
+                          const SdPill('PROGRAMA', color: Sd.red, solid: true),
+                          if (_rtmpOut.isStreaming) ...[
+                            const SizedBox(width: 6),
+                            _rtmpOut.reconnecting
+                                ? const SdPill('RECONECTANDO…', color: Sd.amber, icon: SdIcons.arrowsClockwise)
+                                : SdPill('EN VIVO · ${_rtmpOut.currentBitrateKbps} kbps', color: Sd.red,
+                                    icon: SdIcons.broadcast),
+                            if (!_rtmpOut.reconnecting && !_rtmpOut.hasAudio) ...[
+                              const SizedBox(width: 6),
+                              const SdPill('SIN AUDIO', color: Sd.amber, icon: SdIcons.speakerSlash),
+                            ],
                           ],
-                        ),
+                          if (_recorder.isRecording) ...[
+                            const SizedBox(width: 6),
+                            SdPill('REC · ${_recorder.fileSizeMb.toStringAsFixed(1)} MB', color: Sd.magenta,
+                                icon: SdIcons.record),
+                          ],
+                          const Spacer(),
+                          SdPill('${_encoder.width}×${_encoder.height} · ${_encoder.fps} fps', color: Sd.t2),
+                        ]),
                       ),
-                      // Layout Mode Floating Selector (Single, Split-Screen 50/50, PiP)
+                      // Layout selector + second camera
                       Positioned(
-                        bottom: 12,
-                        left: 12,
-                        right: 12,
+                        bottom: 10, left: 10, right: 10,
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
                             Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                              padding: const EdgeInsets.all(3),
                               decoration: BoxDecoration(
-                                color: Colors.black.withOpacity(0.8),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: Colors.white24),
+                                color: const Color(0xCC000000),
+                                borderRadius: BorderRadius.circular(Sd.r1 + 2),
+                                border: Border.all(color: Sd.borderStrong),
                               ),
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  _buildLayoutChip('1 CAM', LayoutMode.single),
-                                  const SizedBox(width: 4),
-                                  _buildLayoutChip('SPLIT 50/50', LayoutMode.splitScreen),
-                                  const SizedBox(width: 4),
-                                  _buildLayoutChip('PiP', LayoutMode.pip),
-                                ],
-                              ),
+                              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                _buildLayoutChip('1 cámara', SdIcons.square, LayoutMode.single),
+                                _buildLayoutChip('Dividida', SdIcons.columns, LayoutMode.splitScreen),
+                                _buildLayoutChip('PiP', SdIcons.copySimple, LayoutMode.pip),
+                              ]),
                             ),
                             if (_mixer.mode != LayoutMode.single && cameras.length > 1)
                               Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
                                 decoration: BoxDecoration(
-                                  color: Colors.black.withOpacity(0.8),
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(color: Colors.amberAccent.withOpacity(0.5)),
+                                  color: const Color(0xCC000000),
+                                  borderRadius: BorderRadius.circular(Sd.r1 + 2),
+                                  border: Border.all(color: Sd.wash(Sd.cyan, 0.45)),
                                 ),
                                 child: DropdownButtonHideUnderline(
                                   child: DropdownButton<String>(
                                     value: _mixer.secondaryPeerId ??
                                         cameras.firstWhere((c) => c.id != _mixer.primaryPeerId, orElse: () => cameras.first).id,
-                                    dropdownColor: const Color(0xFF1E1E26),
-                                    style: const TextStyle(color: Colors.amberAccent, fontSize: 11, fontWeight: FontWeight.bold),
-                                    icon: const Icon(Icons.arrow_drop_down, color: Colors.amberAccent, size: 16),
+                                    dropdownColor: Sd.raised,
+                                    borderRadius: BorderRadius.circular(Sd.r1),
+                                    style: SdText.label.copyWith(color: Sd.cyan, fontWeight: FontWeight.w600),
+                                    icon: const Icon(SdIcons.caretDown, color: Sd.cyan, size: 14),
                                     items: cameras
                                         .where((c) => c.id != _mixer.primaryPeerId)
-                                        .map((c) => DropdownMenuItem(value: c.id, child: Text('Cam 2: ${c.name}')))
+                                        .map((c) => DropdownMenuItem(value: c.id, child: Text('2ª: ${c.name}')))
                                         .toList(),
                                     onChanged: (val) => _mixer.setSecondary(val),
                                   ),
@@ -785,274 +577,151 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 ),
               ),
 
-              // 2. Multiview Grid Title
+              // 2. Multiview header
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Expanded(
-                      child: Text(
-                        'MULTIVIEW (${cameras.length} Cámaras)',
-                        style: const TextStyle(
-                          color: Colors.white70,
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.0,
-                        ),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    const Text(
-                      '1 Decode + N Low',
-                      style: TextStyle(
-                        color: Colors.white38,
-                        fontSize: 11,
-                      ),
-                    ),
-                  ],
-                ),
+                padding: const EdgeInsets.fromLTRB(18, 2, 18, 0),
+                child: Row(children: [
+                  Text('MULTIVIEW', style: SdText.overline),
+                  const SizedBox(width: 8),
+                  Text('${cameras.length} ${cameras.length == 1 ? 'cámara' : 'cámaras'}', style: SdText.caption),
+                  const Spacer(),
+                  const Text('Tocá una cámara para cortar', style: SdText.caption),
+                ]),
               ),
 
-              // 3. Multiview Camera Cards Grid
+              // 3. Multiview cards
               Expanded(
                 flex: 3,
                 child: cameras.isEmpty
                     ? Center(
                         child: SingleChildScrollView(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Container(
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: QrImageView(
-                                  data: '{"ip":"$_localIp","port":8088,"room":"samba_studio"}',
-                                  version: QrVersions.auto,
-                                  size: 160.0,
-                                  errorStateBuilder: (ctx, err) => const SizedBox(
-                                    width: 160,
-                                    height: 160,
-                                    child: Center(
-                                      child: Text('QR\nno disponible',
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(color: Colors.black54)),
-                                    ),
-                                  ),
+                          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(color: Sd.t1, borderRadius: BorderRadius.circular(Sd.r2)),
+                              child: QrImageView(
+                                data: '{"ip":"$_localIp","port":8088,"room":"samba_studio"}',
+                                version: QrVersions.auto,
+                                size: 150.0,
+                                errorStateBuilder: (ctx, err) => const SizedBox(
+                                  width: 150, height: 150,
+                                  child: Center(child: Text('QR\nno disponible', textAlign: TextAlign.center)),
                                 ),
                               ),
-                              const SizedBox(height: 12),
-                              const Text(
-                                'Escaneá este QR con SAMBA Cam',
-                                style: TextStyle(color: Colors.white70, fontSize: 13),
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                'o conectá manual a   $_localIp:8088',
-                                style: const TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 15),
-                              ),
-                              const SizedBox(height: 16),
-                              const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                    strokeWidth: 2, color: Colors.white24),
-                              ),
-                              const SizedBox(height: 8),
-                              const Text(
-                                'Esperando cámaras en la red local...',
-                                style: TextStyle(color: Colors.white38, fontSize: 12),
-                              ),
-                            ],
-                          ),
+                            ),
+                            const SizedBox(height: 14),
+                            const Text('Escaneá este QR desde Samba Air (Cámara → Switcher)', style: SdText.body),
+                            const SizedBox(height: 4),
+                            Text('o conectá a  $_localIp:8088', style: SdText.heading),
+                            const SizedBox(height: 14),
+                            const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 1.4)),
+                            const SizedBox(height: 8),
+                            const Text('Esperando cámaras en la red local…', style: SdText.caption),
+                          ]),
                         ),
                       )
                     : GridView.builder(
-                        padding: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
                         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2,
-                          crossAxisSpacing: 12,
-                          mainAxisSpacing: 12,
-                          childAspectRatio: 1.6,
+                          crossAxisCount: 2, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.6,
                         ),
                         itemCount: cameras.length,
                         itemBuilder: (context, idx) {
                           final cam = cameras[idx];
                           final isActive = cam.id == activePeerId;
-                          // La cámara local del switcher usa su renderer local
-                          // (captura local); las remotas, el del subscriber.
+                          // The switcher's own camera uses its local renderer; remote ones, the subscriber's.
                           final isLocal = cam.id == _localCam.peerId;
-                          final camRenderer = isLocal
-                              ? _localCam.renderer
-                              : _subscriber.getRenderer(cam.id);
+                          final camRenderer = isLocal ? _localCam.renderer : _subscriber.getRenderer(cam.id);
                           final hasVideo = camRenderer != null && camRenderer.srcObject != null;
+                          final level = ((cam.lastAudioDbfs + 60.0) / 60.0).clamp(0.0, 1.0);
 
                           return GestureDetector(
                             onTap: () => _director.manualCut(cam.id),
-                            child: Container(
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 160),
                               clipBehavior: Clip.antiAlias,
                               decoration: BoxDecoration(
-                                color: const Color(0xFF1E1E26),
-                                borderRadius: BorderRadius.circular(12),
+                                color: Sd.raised,
+                                borderRadius: BorderRadius.circular(Sd.r2),
                                 border: Border.all(
-                                  color: isActive ? Colors.redAccent : Colors.white24,
-                                  width: isActive ? 2.5 : 1.0,
+                                  color: isActive ? Sd.wash(Sd.red, 0.8) : Sd.border,
+                                  width: isActive ? 1.5 : 1,
                                 ),
                               ),
-                              child: Stack(
-                                children: [
-                                  // Background live video preview
-                                  if (hasVideo)
-                                    Positioned.fill(
-                                      child: RTCVideoView(
-                                        camRenderer,
-                                        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                                      ),
-                                    ),
-                                  // Dark gradient overlay for UI readability
-                                  Positioned.fill(
-                                    child: Container(
-                                      decoration: BoxDecoration(
-                                        gradient: LinearGradient(
-                                          begin: Alignment.topCenter,
-                                          end: Alignment.bottomCenter,
-                                          colors: [
-                                            Colors.black.withOpacity(hasVideo ? 0.7 : 0.0),
-                                            Colors.black.withOpacity(hasVideo ? 0.85 : 0.0),
-                                          ],
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  // Card Content
-                                  Padding(
-                                    padding: const EdgeInsets.all(10),
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        Row(
-                                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                          children: [
-                                            Text(
-                                              cam.name,
-                                              style: const TextStyle(
-                                                color: Colors.white,
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 14,
-                                              ),
-                                            ),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                        decoration: BoxDecoration(
-                                          color: isActive ? Colors.red : Colors.white12,
-                                          borderRadius: BorderRadius.circular(4),
-                                        ),
-                                        child: Text(
-                                          isActive ? 'EN EL AIRE' : 'PREVIEW',
-                                          style: TextStyle(
-                                            color: isActive ? Colors.white : Colors.white70,
-                                            fontSize: 10,
-                                            fontWeight: FontWeight.bold,
-                                          ),
-                                        ),
-                                      ),
+                              child: Stack(children: [
+                                if (hasVideo)
+                                  Positioned.fill(child: RTCVideoView(camRenderer,
+                                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover)),
+                                // Gradient top and bottom only, so the picture stays visible
+                                Positioned.fill(child: DecoratedBox(decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topCenter, end: Alignment.bottomCenter,
+                                    stops: const [0, 0.35, 0.65, 1],
+                                    colors: [
+                                      Colors.black.withValues(alpha: hasVideo ? 0.65 : 0),
+                                      Colors.transparent, Colors.transparent,
+                                      Colors.black.withValues(alpha: hasVideo ? 0.75 : 0),
                                     ],
                                   ),
-
-                                  // Audio dBFS meter
-                                  Column(
+                                ))),
+                                Padding(
+                                  padding: const EdgeInsets.all(10),
+                                  child: Column(
                                     crossAxisAlignment: CrossAxisAlignment.start,
+                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                     children: [
-                                      Row(
-                                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                        children: [
-                                          const Text(
-                                            'Audio RMS',
-                                            style: TextStyle(color: Colors.white54, fontSize: 10),
+                                      Row(children: [
+                                        Expanded(child: Text(cam.name, style: SdText.bodyHi.copyWith(fontWeight: FontWeight.w600),
+                                            overflow: TextOverflow.ellipsis)),
+                                        isActive
+                                            ? const SdPill('EN EL AIRE', color: Sd.red, solid: true)
+                                            : const SdPill('PREVIEW', color: Sd.t2),
+                                      ]),
+                                      if (!hasVideo)
+                                        const Center(child: Icon(SdIcons.videoCameraSlash, color: Sd.t3, size: 22)),
+                                      // Audio level: a thin bar (green → amber when loud)
+                                      Row(children: [
+                                        Icon(SdIcons.microphone, size: 13,
+                                            color: level > 0.66 ? Sd.amber : Sd.t2),
+                                        const SizedBox(width: 6),
+                                        Expanded(child: ClipRRect(
+                                          borderRadius: BorderRadius.circular(2),
+                                          child: LinearProgressIndicator(
+                                            value: level, minHeight: 3, backgroundColor: const Color(0x33FFFFFF),
+                                            valueColor: AlwaysStoppedAnimation<Color>(level > 0.66 ? Sd.amber : Sd.green),
                                           ),
-                                          Text(
-                                            '${cam.lastAudioDbfs.toStringAsFixed(1)} dBFS',
-                                            style: const TextStyle(color: Colors.white70, fontSize: 10),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 4),
-                                      ClipRRect(
-                                        borderRadius: BorderRadius.circular(4),
-                                        child: LinearProgressIndicator(
-                                          value: ((cam.lastAudioDbfs + 60.0) / 60.0).clamp(0.0, 1.0),
-                                          backgroundColor: Colors.white12,
-                                          valueColor: AlwaysStoppedAnimation<Color>(
-                                            cam.lastAudioDbfs > -20.0
-                                                ? Colors.amberAccent
-                                                : Colors.greenAccent,
-                                          ),
-                                          minHeight: 6,
-                                        ),
-                                      ),
+                                        )),
+                                        const SizedBox(width: 6),
+                                        Text('${cam.lastAudioDbfs.toStringAsFixed(0)} dB', style: SdText.caption),
+                                      ]),
                                     ],
                                   ),
-
-                                  // Cut Action Button
-                                  SizedBox(
-                                    width: double.infinity,
-                                    height: 28,
-                                    child: ElevatedButton(
-                                      style: ElevatedButton.styleFrom(
-                                        backgroundColor: isActive ? Colors.redAccent : Colors.white10,
-                                        foregroundColor: Colors.white,
-                                        padding: EdgeInsets.zero,
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(6),
-                                        ),
-                                      ),
-                                      onPressed: () => _director.manualCut(cam.id),
-                                      child: Text(
-                                        isActive ? 'CÁMARA ACTIVA' : 'CORTAR A ESTA CÁMARA',
-                                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
+                                ),
+                              ]),
                             ),
-                          ],
-                        ),
-                      ),
-                    );
-                  },
+                          );
+                        },
                       ),
               ),
 
-              // 4. Log History Footer
+              // 4. Last switch
               Container(
-                height: 48,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                color: const Color(0xFF14141A),
+                height: 40,
+                padding: const EdgeInsets.symmetric(horizontal: 18),
+                decoration: const BoxDecoration(
+                  color: Sd.surface,
+                  border: Border(top: BorderSide(color: Sd.border)),
+                ),
                 child: ListenableBuilder(
                   listenable: _director,
                   builder: (context, _) {
                     final lastLog = _director.switchHistory.firstOrNull ?? 'Listo para conmutar';
-                    return Row(
-                      children: [
-                        const Icon(Icons.history, size: 16, color: Colors.white54),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            lastLog,
-                            style: const TextStyle(color: Colors.white70, fontSize: 12),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                      ],
-                    );
+                    return Row(children: [
+                      const Icon(SdIcons.clockCounterClockwise, size: 15, color: Sd.t3),
+                      const SizedBox(width: 8),
+                      Expanded(child: Text(lastLog, style: SdText.caption.copyWith(color: Sd.t2),
+                          overflow: TextOverflow.ellipsis)),
+                    ]);
                   },
                 ),
               ),
