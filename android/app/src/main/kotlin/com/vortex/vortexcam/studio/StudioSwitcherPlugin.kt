@@ -15,15 +15,17 @@ import org.webrtc.VideoTrack
 // Native side of the Switcher mode (ex SAMBA Móvil Studio MainActivity): program compositor + hardware encoder +
 // RTMP out, fed by the WebRTC tracks the switcher receives. Registered by Samba Air's MainActivity; the screen is kept
 // on by the Studio mode itself (keepalive channel) instead of a global FLAG_KEEP_SCREEN_ON.
-class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine) {
+class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine, private val appContext: android.content.Context) {
     companion object {
         private const val TAG = "StudioSwitcher"
-        @JvmStatic fun registerWith(engine: FlutterEngine): StudioSwitcherPlugin =
-            StudioSwitcherPlugin(engine).also { it.register() }
+        @JvmStatic fun registerWith(engine: FlutterEngine, appContext: android.content.Context): StudioSwitcherPlugin =
+            StudioSwitcherPlugin(engine, appContext).also { it.register() }
         private const val CHANNEL = "com.samba.studio/program_encoder"
     }
 
     private var programEncoder: HardwareProgramEncoder? = null
+    // The switcher's own Wi-Fi network for its cameras (LocalHotspot.kt).
+    private val hotspot by lazy { LocalHotspot(appContext) }
     private var rtmpStreamer: RtmpStreamer? = null
 
     private var primarySink: WebRtcSourceSink? = null
@@ -165,6 +167,10 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                     )
                     result.success(stats)
                 }
+                // Own network: start returns {ok, ssid, password, band, ip} (or {ok:false, error}); info re-reads it.
+                "startHotspot" -> hotspot.start { result.success(it) }
+                "hotspotInfo" -> result.success(if (hotspot.isOn) hotspot.info() else mapOf("ok" to false))
+                "stopHotspot" -> { hotspot.stop(); result.success(true) }
                 "stopEncoder" -> {
                     try {
                         stopHardwareEncoder()
@@ -271,5 +277,6 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
         stopHardwareEncoder()
         rtmpStreamer?.disconnect()
         rtmpStreamer = null
+        hotspot.stop()
     }
 }

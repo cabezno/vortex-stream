@@ -144,14 +144,16 @@ class _CameraScreenState extends State<CameraScreen> {
         child: Stack(
           children: [
             // 1. Camera viewport
-            Positioned.fill(
+            // Center, NOT Positioned.fill: with the preview stretched to the whole Stack the engine stops producing
+            // frames on the Galaxy A10 and the Mi A3 (screen fully black, everything NEEDS-PAINT, no error) — 2026-10-05.
+            Center(
               child: _isRendererReady
                   ? RTCVideoView(
                       _localRenderer,
                       mirror: _facing == CameraFacing.front,
                       objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                     )
-                  : const Center(child: CircularProgressIndicator(strokeWidth: 1.6)),
+                  : const CircularProgressIndicator(strokeWidth: 1.6),
             ),
 
             // 2. Tally: a soft red frame while on air
@@ -249,9 +251,24 @@ class _CameraScreenState extends State<CameraScreen> {
                   icon: const Icon(SdIcons.qrCode, color: Sd.magenta, size: 22),
                   tooltip: 'Escanear el QR del switcher',
                   onPressed: () {
-                    QrScannerSheet.show(context, onScanned: (payload) {
+                    QrScannerSheet.show(context, onScanned: (payload) async {
                       // Keep ip:port from the QR (not just the ip) so the port is not lost.
                       setState(() => _ipController.text = '${payload.ip}:${payload.port}');
+                      if (payload.hasWifi) {
+                        // The switcher made its own network: join it first (Android shows its confirmation once).
+                        final messenger = ScaffoldMessenger.of(context);
+                        messenger.showSnackBar(SnackBar(content: Text('Uniéndose a la red del switcher «${payload.wifiSsid}»…')));
+                        bool ok = false;
+                        try {
+                          ok = await const MethodChannel('com.vortex.vortexcam/native').invokeMethod<bool>('connectWifi',
+                              {'ssid': payload.wifiSsid, 'password': payload.wifiPassword ?? ''}) ?? false;
+                        } catch (_) {}
+                        if (!ok) {
+                          messenger.showSnackBar(const SnackBar(content: Text(
+                              'No se pudo unir a la red del switcher. Conectate a mano desde Ajustes → Wi-Fi y volvé a intentar.')));
+                          return;
+                        }
+                      }
                       _connect();
                     });
                   },

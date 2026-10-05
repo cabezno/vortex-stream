@@ -32,6 +32,22 @@ el usuario. Estado: **planificado, sin empezar**. Nada de esto está implementad
   detectarlo y avisar), cantidad de cámaras que aguanta, temperatura/batería del switcher, la subida real de la SIM
   (4G: 5–20 Mbps variables → la salida sigue necesitando bitrate adaptativo).
 
+**Estado 2026-10-05: implementado y probado** (Xiaomi 24115RA8EG switcher, Mi A3 cámara):
+- Interruptor «Red propia del switcher» en el diálogo de emparejar (`LocalHotspot.kt`): el QR lleva `wifi: {ssid, pass}`
+  y la cámara se une sola antes de entrar a la sala (`connectWifi`); red y clave también a la vista. **El nombre y la
+  clave cambian cada vez que se crea la red** (por eso van en el QR). La banda no es legible por apps.
+- El Xiaomi mantiene Wi-Fi de casa + red propia a la vez (STA + AP); la red propia es `wlan2` (10.116.54.0/24).
+- **WebRTC no funcionaba por la red propia**: libwebrtc solo usa interfaces que Android informa como red y ata cada
+  socket a una; el hotspot no lo es → ICE fallaba. Arreglo (`WebRtcOwnNetwork.kt`, solo mientras la red propia está
+  encendida): field trial `WebRTC-AndroidNetworkMonitor-IsAdapterAvailable/Disabled/` + detector de redes sin
+  callbacks (sockets sin atar; el kernel enruta por la tabla local). `WebRTC.initialize()` antes de encender la red,
+  si no flutter_webrtc pisa el field trial. Verificado: todo el video entra por `wlan2`, 0 por la SIM.
+- Medido, 3 min, misma cámara y lugar, una sola cámara: router de casa 29,9 fps (mín 25), 4,1 Mbps, 0,02 % de
+  paquetes perdidos, 0 congelamientos · red propia 29,9 fps (mín 22), 4,3 Mbps, 0,01 % perdidos, 2 congelamientos
+  cortos. **Con una cámara y un buen router no hay diferencia**; la ventaja esperada es con varias cámaras, routers
+  cargados o sin router (exteriores). Falta: prueba con 2–3 cámaras, sin Wi-Fi de casa (solo SIM), emparejar con el
+  QR real (cámara física), Android ≤ 9 (`connectWifi` no soportado: unirse a mano).
+
 ### 2. Modelo PGM / PVW — cortes sin caída de imagen
 - Cada cámara manda **dos versiones a la vez**: baja (≈360p, para el multiview) y alta.
 - El switcher decodifica en alta solo **PGM** (al aire) y **PVW** (la próxima); el resto en baja.

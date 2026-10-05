@@ -213,12 +213,19 @@ class PairingPayload {
   final String ip;
   final int port;
   final String room;
+  /// The switcher's OWN network (local hotspot), when it created one: the camera joins it before the room.
+  final String? wifiSsid;
+  final String? wifiPassword;
 
   const PairingPayload({
     required this.ip,
     this.port = 8088,
     this.room = 'samba_studio',
+    this.wifiSsid,
+    this.wifiPassword,
   });
+
+  bool get hasWifi => wifiSsid != null && wifiSsid!.isNotEmpty;
 
   String get wsUrl => 'ws://$ip:$port/ws';
 
@@ -226,12 +233,15 @@ class PairingPayload {
     'ip': ip,
     'port': port,
     'room': room,
+    if (hasWifi) 'wifi': {'ssid': wifiSsid, 'pass': wifiPassword ?? ''},
   };
 
   factory PairingPayload.fromJson(Map<String, dynamic> json) => PairingPayload(
     ip: json['ip'] as String? ?? '127.0.0.1',
     port: json['port'] as int? ?? 8088,
     room: json['room'] as String? ?? 'samba_studio',
+    wifiSsid: (json['wifi'] is Map) ? (json['wifi']['ssid'] as String?) : null,
+    wifiPassword: (json['wifi'] is Map) ? (json['wifi']['pass'] as String?) : null,
   );
 
   /// Robust parser for QR code strings, JSON payloads, ws:// or http:// URLs,

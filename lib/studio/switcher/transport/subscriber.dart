@@ -150,7 +150,10 @@ class WebRtcSubscriber extends ChangeNotifier {
           if (r.type == 'inbound-rtp' &&
               (v['mediaType'] == 'video' || v['kind'] == 'video')) {
             debugPrint(
-                '[Subscriber STATS] $peerId framesReceived=${v['framesReceived']} framesDecoded=${v['framesDecoded']} bytesReceived=${v['bytesReceived']}');
+                '[Subscriber STATS] $peerId framesReceived=${v['framesReceived']} framesDecoded=${v['framesDecoded']} '
+                'framesDropped=${v['framesDropped']} bytesReceived=${v['bytesReceived']} packetsReceived=${v['packetsReceived']} '
+                'packetsLost=${v['packetsLost']} nack=${v['nackCount']} pli=${v['pliCount']} freezes=${v['freezeCount']} '
+                'jitter=${v['jitter']} fps=${v['framesPerSecond']} ${v['frameWidth']}x${v['frameHeight']}');
           }
         }
       } catch (_) {}

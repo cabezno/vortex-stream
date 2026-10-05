@@ -1,5 +1,9 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:samba_protocol/samba_protocol.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../../theme/sd_icons.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -31,6 +35,55 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   late final ProgramMixer _mixer;
   late final LocalCameraSource _localCam;
   String _localIp = '127.0.0.1';
+
+  // The switcher's own Wi-Fi network for its cameras (plan §1): one hop instead of two through a router, no foreign
+  // traffic, the SIM free for the outgoing stream. Credentials travel in the QR. null = off.
+  static const _native = MethodChannel('com.samba.studio/program_encoder');
+  Map<String, dynamic>? _hotspot;
+  bool _hotspotBusy = false;
+  String get _roomIp => (_hotspot?['ip'] as String?) ?? _localIp;
+  String get _pairingJson => jsonEncode(PairingPayload(
+        ip: _roomIp, port: 8088,
+        wifiSsid: _hotspot?['ssid'] as String?, wifiPassword: _hotspot?['password'] as String?,
+      ).toJson());
+
+  Future<void> _setHotspot(bool on) async {
+    if (_hotspotBusy) return;
+    setState(() => _hotspotBusy = true);
+    try {
+      if (!on) {
+        await _native.invokeMethod('stopHotspot');
+        setState(() => _hotspot = null);
+        return;
+      }
+      // Android asks for location (up to 12) or nearby-devices (13+) permission to create a network.
+      await [Permission.locationWhenInUse, Permission.nearbyWifiDevices].request();
+      // flutter_webrtc initializes lazily and would overwrite the field trial the hotspot sets for WebRTC
+      // (WebRtcOwnNetwork.kt): make it initialize now, before the network starts.
+      await WebRTC.initialize();
+      final r = Map<String, dynamic>.from(await _native.invokeMethod<Map>('startHotspot') ?? const {});
+      if (r['ok'] == true && (r['ssid'] as String?)?.isNotEmpty == true) {
+        setState(() => _hotspot = r);
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('No se pudo crear la red propia: ${r['error'] ?? 'sin detalle'}')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo crear la red propia: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _hotspotBusy = false);
+    }
+  }
+
+  /// One line about the switcher's own network (name + band), or null when off.
+  String? get _hotspotLine {
+    final h = _hotspot;
+    if (h == null) return null;
+    final band = (h['band'] as String?)?.isNotEmpty == true ? ' · ${h['band']}' : '';
+    return 'Red propia: ${h['ssid']}$band';
+  }
 
   @override
   void initState() {
@@ -118,30 +171,65 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   void _showQrPairingDialog() {
     // Refresh the IP in case the Wi-Fi was not ready at start.
     _detectLocalIp();
-    final connectionPayload = '{"ip":"$_localIp","port":8088,"room":"samba_studio"}';
-    debugPrint('[QR] payload=$connectionPayload');
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Row(children: [
-          Icon(SdIcons.qrCode, color: Sd.magenta, size: 22),
-          SizedBox(width: 10),
-          Text('Emparejar una cámara'),
-        ]),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(color: Sd.t1, borderRadius: BorderRadius.circular(Sd.r2)),
-            child: QrImageView(data: connectionPayload, version: QrVersions.auto, size: 200.0),
-          ),
-          const SizedBox(height: 16),
-          Text('$_localIp : 8088', style: SdText.heading),
-          const SizedBox(height: 4),
-          const Text('En otro celular: Samba Air → Cámara → Switcher (celular)', style: SdText.caption,
-              textAlign: TextAlign.center),
-        ]),
-        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cerrar'))],
-      ),
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setDlg) {
+        final payload = _pairingJson;
+        debugPrint('[QR] payload=$payload');
+        return AlertDialog(
+          scrollable: true,
+          title: const Row(children: [
+            Icon(SdIcons.qrCode, color: Sd.magenta, size: 22),
+            SizedBox(width: 10),
+            Text('Emparejar una cámara'),
+          ]),
+          // Landscape (the usual switcher position): QR on the left, address + own-network switch on the right, so the
+          // switch is never hidden below the QR.
+          content: Builder(builder: (ctx) {
+            final landscape = MediaQuery.of(ctx).orientation == Orientation.landscape;
+            final qr = Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: Sd.t1, borderRadius: BorderRadius.circular(Sd.r2)),
+              child: QrImageView(data: payload, version: QrVersions.auto, size: landscape ? 150.0 : 200.0),
+            );
+            final info = Column(mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: landscape ? CrossAxisAlignment.start : CrossAxisAlignment.center, children: [
+              Text('$_roomIp : 8088', style: SdText.heading),
+              const SizedBox(height: 4),
+              Text('En otro celular: Samba Air → Cámara → Switcher (celular)', style: SdText.caption,
+                  textAlign: landscape ? TextAlign.start : TextAlign.center),
+              const SizedBox(height: 12),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero, dense: true,
+                title: const Text('Red propia del switcher', style: SdText.bodyHi),
+                subtitle: Text(_hotspotLine ?? 'Las cámaras se conectan directo a este celular (sin router); '
+                    'la SIM queda libre para emitir.', style: SdText.caption),
+                value: _hotspot != null,
+                onChanged: _hotspotBusy ? null : (v) async { await _setHotspot(v); setDlg(() {}); },
+              ),
+              // Name + password in plain sight: if the QR join fails, a camera can join from Android's Wi-Fi settings.
+              if (_hotspot != null)
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(top: 4),
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: Sd.surface, borderRadius: BorderRadius.circular(Sd.r1),
+                      border: Border.all(color: Sd.border)),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    SelectableText('Red: ${_hotspot!['ssid']}', style: SdText.label.copyWith(color: Sd.t1)),
+                    const SizedBox(height: 2),
+                    SelectableText('Clave: ${_hotspot!['password']}', style: SdText.label.copyWith(color: Sd.t1)),
+                  ]),
+                ),
+            ]);
+            return landscape
+                ? SizedBox(width: 560, child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    qr, const SizedBox(width: 20), Expanded(child: info)]))
+                : Column(mainAxisSize: MainAxisSize.min, children: [qr, const SizedBox(height: 16), info]);
+          }),
+          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cerrar'))],
+        );
+      }),
     );
   }
 
@@ -339,6 +427,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
 
   @override
   void dispose() {
+    if (_hotspot != null) _native.invokeMethod('stopHotspot').catchError((_) => null);
     _mixer.removeListener(_syncNativeCameraSources);
     _director.removeListener(_syncNativeCameraSources);
     _subscriber.removeListener(_syncNativeCameraSources);
@@ -601,7 +690,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                               padding: const EdgeInsets.all(8),
                               decoration: BoxDecoration(color: Sd.t1, borderRadius: BorderRadius.circular(Sd.r2)),
                               child: QrImageView(
-                                data: '{"ip":"$_localIp","port":8088,"room":"samba_studio"}',
+                                data: _pairingJson,
                                 version: QrVersions.auto,
                                 size: 92.0,
                                 errorStateBuilder: (ctx, err) => const SizedBox(
@@ -616,7 +705,15 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                               const SizedBox(height: 4),
                               const Text('Escaneá este QR desde Samba Air (Cámara → Switcher)', style: SdText.body),
                               const SizedBox(height: 2),
-                              Text('o conectá a  $_localIp:8088', style: SdText.bodyHi),
+                              Text('o conectá a  $_roomIp:8088', style: SdText.bodyHi),
+                              if (_hotspotLine != null) ...[
+                                const SizedBox(height: 4),
+                                Row(mainAxisSize: MainAxisSize.min, children: [
+                                  const Icon(SdIcons.wifiHigh, size: 14, color: Sd.green),
+                                  const SizedBox(width: 6),
+                                  Text(_hotspotLine!, style: SdText.caption.copyWith(color: Sd.green)),
+                                ]),
+                              ],
                               const SizedBox(height: 12),
                               const Row(mainAxisSize: MainAxisSize.min, children: [
                                 SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.4)),

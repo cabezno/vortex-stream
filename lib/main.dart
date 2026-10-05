@@ -46,6 +46,8 @@ void main() {
     FlutterError.onError = (details) {
       prev?.call(details);
       LogService.instance.add('[FlutterError] ${details.exceptionAsString()}');
+      // Also to logcat: release builds print nothing for framework errors otherwise (a broken layout = black screen).
+      debugPrint('[FlutterError] ${details.toString()}');
       LogService.instance.shipToPc(reason: 'flutter_error');
     };
 
@@ -64,6 +66,7 @@ void main() {
     );
   }, (error, stack) {
     LogService.instance.add('[UNCAUGHT] $error');
+    debugPrint('[UNCAUGHT] $error $stack');
     LogService.instance.add(stack.toString());
     LogService.instance.shipToPc(reason: 'crash');
   });

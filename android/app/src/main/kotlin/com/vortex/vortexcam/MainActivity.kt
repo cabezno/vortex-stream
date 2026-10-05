@@ -16,7 +16,7 @@ class MainActivity : FlutterActivity() {
         VortexCamPlugin.registerWith(this, flutterEngine)
         OmtStreamPlugin.registerWith(this, flutterEngine)
         // Switcher mode (ex SAMBA Móvil Studio): program compositor + encoder + RTMP
-        studioSwitcher = StudioSwitcherPlugin.registerWith(flutterEngine)
+        studioSwitcher = StudioSwitcherPlugin.registerWith(flutterEngine, applicationContext)
 
         // Keep-alive while live (any transport, WHIP included): foreground service + Wi-Fi/CPU locks
         // (StreamKeepAliveService) and the screen kept on while the app is in front.
