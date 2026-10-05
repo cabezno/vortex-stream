@@ -370,9 +370,11 @@ class ConnectionService extends ChangeNotifier {
         if (report.type == 'outbound-rtp' && (v['mediaType'] == 'video' || v['kind'] == 'video')) {
           // What the encoder actually sends and why it would send less (cpu / bandwidth / none).
           _statsTick++;
-          // Live safety net for the capability probe: connected for 8 s and not one frame encoded = this phone's
-          // H.264 can't run inside WebRTC (Exynos case). Say so, remember it (WHIP greyed from now on).
-          if (_statsTick == 4 && ((v['framesEncoded'] as num?)?.toInt() ?? 0) == 0) {
+          // Live safety net for the capability probe: connected for 12 s and (almost) no video BYTES sent = this
+          // phone's encoder can't run inside WebRTC. Bytes, not framesEncoded: early stats can come without that
+          // field (null), which read as 0 wrongly greyed WHIP on a Mi A3 that can do it (2026-10-04).
+          final sentBytes = (v['bytesSent'] as num?)?.toInt();
+          if (_statsTick == 6 && sentBytes != null && sentBytes < 20000) {
             const why = 'el encoder H.264 no arrancó al transmitir';
             DeviceCapabilities.instance.markWhipUnsupported(why);
             _state        = ConnectionState.error;
