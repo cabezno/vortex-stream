@@ -82,6 +82,23 @@ el usuario. Estado: **planificado, sin empezar**. Nada de esto está implementad
 - Costo: el programa sale con la latencia de la cámara más lenta (~0,2–0,3 s): no se nota en una emisión; el desfase
   entre cámaras sí, y desaparece. Mismo criterio para el retraso del micrófono Bluetooth (punto 4).
 
+#### 5b. Cómo medir el retraso de cada cámara (idea del usuario: «pip» con parpadeo + sonido, 2026-10-05)
+Una claqueta (destello + pitido que todas captan) da el retraso exacto de punta a punta. El destello tiene un
+problema práctico: la cámara tiene que estar mirando adonde ocurre (la pantalla del celular cámara mira al operador,
+no a la lente). Combinación más eficiente:
+1. **Continua e invisible — marcas de tiempo**: cada cuadro WebRTC lleva su hora de captura; con los relojes
+   sincronizados, el switcher mide red + buffer de cada cámara todo el tiempo y se adapta si la red cambia.
+2. **Retraso del sensor medido en la propia cámara, sin destello**: Camera2 da el instante de exposición de cada
+   cuadro (`SENSOR_TIMESTAMP`); la cámara lo compara con cuándo lo entrega al encoder (30–120 ms según el modelo) y
+   lo informa por el canal de control. Mide lo mismo que el destello, sola y siempre.
+3. **«Pip» sonoro para el audio** (la idea del usuario, donde sí es la mejor): el switcher emite un pitido corto al
+   conectar o con un botón «Sincronizar»; cada cámara lo detecta **en su micrófono antes de comprimir** y avisa a qué
+   hora lo escuchó → retraso de audio de cada cámara, auricular Bluetooth incluido. El sonido llega aunque las cámaras
+   no miren al switcher.
+4. **Verificación de fondo sin pitido**: correlación de las voces que captan los distintos micrófonos (como los
+   editores de video para sincronizar cámaras) → detecta si algo se desacomoda durante la emisión.
+Relación: SAMBA (PC) tiene pendiente la prueba de «palmada» de sincronía (T1–T10): mismo sistema en los dos lados.
+
 ### 6. Cámara USB (en el switcher o en un celular cámara)
 - Android trae soporte de cámaras USB (UVC, «external camera») en Camera2 desde Android 9, pero muchos fabricantes lo
   desactivan → **detectarlo** (`CameraCharacteristics.LENS_FACING_EXTERNAL`) y, si no está, leer la cámara como
