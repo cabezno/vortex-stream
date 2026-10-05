@@ -50,6 +50,46 @@ el usuario. Estado: **planificado, sin empezar**. Nada de esto está implementad
 - A verificar antes de prometer: el nivel H.264 que hoy anuncian las cámaras en el SDP es **4.1 (tope 1080p)**;
   4K pide 5.1 y no todos los encoders lo aceptan dentro de WebRTC.
 
+### 4. Micrófono por presentador: auricular Bluetooth vinculado a cada cámara (idea del usuario, 2026-10-05)
+- Cada presentador usa un auricular Bluetooth **vinculado a SU celular cámara**, no al switcher: los canales quedan
+  separados solos (el audio de cada cámara = su presentador) y el corte automático por audio del switcher ya funciona
+  con el nivel de cada cámara.
+- Ventajas: el filtrado de ruido de los auriculares (beamforming) reduce que la voz de uno entre en el micrófono del
+  otro → el corte automático acierta más; menos eco (micrófono a centímetros de la boca); **retorno al oído** del
+  presentador por el mismo auricular (indicaciones del operador; ya existe en WHIP, falta en el modo switcher).
+- Por qué no «izquierdo = cámara 1, derecho = cámara 2» con unos auriculares en el switcher: el Bluetooth de voz es
+  **un solo canal mono** (los TWS usan un micrófono o los mezclan) y Android admite **un** micrófono Bluetooth a la vez.
+- A resolver: calidad de llamada (16 kHz; 32 kHz con LE Audio) — perfecta para disparar el corte, justa para el aire;
+  **retraso del Bluetooth (~100–200 ms)** a medir y compensar; selector «Micrófono: celular / auricular Bluetooth»
+  en la app de cámara con el nombre del equipo y un medidor de nivel; batería en sesiones largas.
+- Alternativa de calidad broadcast: kit inalámbrico de dos transmisores (DJI Mic, Rode Wireless GO, Hollyland Lark)
+  en modo estéreo separado (TX1 izquierda / TX2 derecha) o interfaz USB de 2–4 canales enchufada al switcher:
+  canal → cámara asignable en pantalla. Sirve igual en el modo Cámara → SAMBA.
+
+### 5. Latencia entre fuentes: alinear todo a la más lenta
+- Hoy la cámara local del switcher llega casi sin retraso y las remotas con ~100–300 ms (codificación + red + buffer
+  de WebRTC + decodificación): al cortar entre local y remota el tiempo salta, en dividida/PiP las imágenes quedan
+  desfasadas, y el micrófono del switcher (instantáneo) no coincide con los labios de una cámara remota. (El audio de
+  cada cámara viaja sincronizado con SU video.)
+- Solución automática:
+  1. **Medir en vivo la latencia de cada fuente**: hora de captura de cada cuadro (RTCP Sender Reports) con los
+     relojes de los celulares sincronizados por un intercambio tipo NTP en el canal de la sala.
+  2. **Retrasar las fuentes rápidas** (cámara local, micrófono del switcher, cámaras más cercanas) hasta la más lenta
+     + un margen; para la cámara local, unos cuadros guardados en la GPU.
+  3. Igualar las remotas entre sí con el mismo objetivo de buffer de WebRTC (jitterBufferTarget).
+  4. **Tope** (~500 ms): si una cámara viene más lenta, avisar en vez de retrasar todo el programa.
+  5. El **retorno** al presentador va sin retraso (conversación natural con el operador).
+- Costo: el programa sale con la latencia de la cámara más lenta (~0,2–0,3 s): no se nota en una emisión; el desfase
+  entre cámaras sí, y desaparece. Mismo criterio para el retraso del micrófono Bluetooth (punto 4).
+
+### 6. Cámara USB (en el switcher o en un celular cámara)
+- Android trae soporte de cámaras USB (UVC, «external camera») en Camera2 desde Android 9, pero muchos fabricantes lo
+  desactivan → **detectarlo** (`CameraCharacteristics.LENS_FACING_EXTERNAL`) y, si no está, leer la cámara como
+  dispositivo USB con una librería UVC (modo host).
+- Usos: una cámara de mejor calidad o una **capturadora HDMI USB** (cámara de video, consola, PC) como fuente.
+- A medir: formatos (MJPEG / YUY2 / H.264 por USB), resolución y fps reales, consumo de batería del USB, latencia
+  (entra como fuente local: casi cero → mismo alineado del punto 5).
+
 ## Evaluación de otros métodos de conexión entre celulares
 
 | Método | Velocidad real aprox. | Alcance | ¿Video? | Para qué sirve | Comentarios |
