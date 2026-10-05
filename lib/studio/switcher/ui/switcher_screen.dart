@@ -467,7 +467,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
           ),
         ],
       ),
-      body: ListenableBuilder(
+      body: SafeArea(top: false, child: ListenableBuilder(
         listenable: Listenable.merge([_roomHost, _subscriber, _rtmpOut, _recorder, _encoder, _mixer, _localCam]),
         builder: (context, _) {
           final cameras = _roomHost.cameras;
@@ -595,28 +595,35 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 child: cameras.isEmpty
                     ? Center(
                         child: SingleChildScrollView(
-                          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
                             Container(
-                              padding: const EdgeInsets.all(10),
+                              padding: const EdgeInsets.all(8),
                               decoration: BoxDecoration(color: Sd.t1, borderRadius: BorderRadius.circular(Sd.r2)),
                               child: QrImageView(
                                 data: '{"ip":"$_localIp","port":8088,"room":"samba_studio"}',
                                 version: QrVersions.auto,
-                                size: 150.0,
+                                size: 92.0,
                                 errorStateBuilder: (ctx, err) => const SizedBox(
-                                  width: 150, height: 150,
+                                  width: 92, height: 92,
                                   child: Center(child: Text('QR\nno disponible', textAlign: TextAlign.center)),
                                 ),
                               ),
                             ),
-                            const SizedBox(height: 14),
-                            const Text('Escaneá este QR desde Samba Air (Cámara → Switcher)', style: SdText.body),
-                            const SizedBox(height: 4),
-                            Text('o conectá a  $_localIp:8088', style: SdText.heading),
-                            const SizedBox(height: 14),
-                            const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 1.4)),
-                            const SizedBox(height: 8),
-                            const Text('Esperando cámaras en la red local…', style: SdText.caption),
+                            const SizedBox(width: 20),
+                            Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                              const Text('Sumá cámaras', style: SdText.heading),
+                              const SizedBox(height: 4),
+                              const Text('Escaneá este QR desde Samba Air (Cámara → Switcher)', style: SdText.body),
+                              const SizedBox(height: 2),
+                              Text('o conectá a  $_localIp:8088', style: SdText.bodyHi),
+                              const SizedBox(height: 12),
+                              const Row(mainAxisSize: MainAxisSize.min, children: [
+                                SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.4)),
+                                SizedBox(width: 8),
+                                Text('Esperando cámaras en la red local…', style: SdText.caption),
+                              ]),
+                            ])),
                           ]),
                         ),
                       )
@@ -728,7 +735,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             ],
           );
         },
-      ),
+      )),
     );
   }
 }

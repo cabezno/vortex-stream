@@ -86,7 +86,7 @@ class ProgramLayoutView extends StatelessWidget {
         objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
       );
     }
-    return _buildPlaceholder(cam?.name ?? 'Sin cámara', 'SINGLE (1 FULL)');
+    return _buildPlaceholder(cam?.name ?? 'Sin cámara', 'Tocá una cámara del multiview para ponerla al aire');
   }
 
   Widget _buildSplitView(
@@ -109,7 +109,7 @@ class ProgramLayoutView extends StatelessWidget {
                     pRenderer,
                     objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                   )
-                : _buildPlaceholder(pCam?.name ?? 'Primaria', '50% IZQUIERDA'),
+                : _buildPlaceholder(pCam?.name ?? 'Principal', 'Mitad izquierda'),
           ),
         ),
 
@@ -126,7 +126,7 @@ class ProgramLayoutView extends StatelessWidget {
                     sRenderer,
                     objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                   )
-                : _buildPlaceholder(sCam?.name ?? 'Seleccionar Cámara 2', '50% DERECHA'),
+                : _buildPlaceholder(sCam?.name ?? 'Segunda cámara', 'Mitad derecha'),
           ),
         ),
       ],
@@ -150,7 +150,7 @@ class ProgramLayoutView extends StatelessWidget {
                   pRenderer,
                   objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                 )
-              : _buildPlaceholder(pCam?.name ?? 'Primaria', 'FONDO COMPLETO'),
+              : _buildPlaceholder(pCam?.name ?? 'Principal', 'Pantalla completa'),
         ),
 
         // PiP Inset Window
@@ -219,7 +219,8 @@ class ProgramLayoutView extends StatelessWidget {
   }
 
   Widget _buildPlaceholder(String label, String sublabel) {
-    return Center(
+    // Lifted above the layout selector that sits at the bottom of the program monitor.
+    return Padding(padding: const EdgeInsets.only(bottom: 56), child: Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
@@ -230,6 +231,6 @@ class ProgramLayoutView extends StatelessWidget {
           Text(sublabel, style: SdText.caption),
         ],
       ),
-    );
+    ));
   }
 }
