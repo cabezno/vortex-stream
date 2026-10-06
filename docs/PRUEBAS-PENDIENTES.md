@@ -144,3 +144,16 @@ el programa: `ProgramAudio: Mic-only phones in the mix: N` en el registro del sw
 
 **Si falla:** `RotatingRelay` / `Stream turned in pixels: 180°` en el registro del celular. «RotatingRelay unavailable»
 = el celular no pudo armar el paso por GPU y va directo al codificador como antes.
+
+## P8. Unirse a mano a la red propia (Android 9 o anterior, o conexión rechazada)
+
+**Cómo:** switcher con «Red propia del switcher» activada. En una cámara con Android 9 o menos (o en cualquiera,
+tocando «Cancelar» cuando Android pregunta si conectarse), escaneá el QR del switcher.
+
+**Qué tenés que ver:**
+- Un diálogo «Conectate a la red del switcher» con la red, la clave (botón para copiarla), «Abrir Ajustes de Wi-Fi»
+  y, en Android ≤ 9, la explicación de por qué es a mano.
+- Conectarse desde Ajustes, volver, «Ya me conecté» → entra a la sala sola.
+
+**Si falla:** si entra a Ajustes pero al volver no se une: el celular se pasó de nuevo al Wi-Fi de la casa
+(«sin internet»); elegir «mantener conectado» en el aviso de Android.

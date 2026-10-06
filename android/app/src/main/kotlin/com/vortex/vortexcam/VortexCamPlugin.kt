@@ -222,6 +222,15 @@ class VortexCamPlugin(
             "capsStamp" -> result.success(DeviceCaps.stamp(context))
             // What this phone can do (encoders, cameras, OMT speed) — the app offers only what works.
             "listCameras" -> result.success(DeviceCaps.listCameras(context))
+            // Android 9 and older cannot join a Wi-Fi from an app: open the system's Wi-Fi list for the user.
+            "openWifiSettings" -> {
+                try {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_WIFI_SETTINGS)
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    result.success(true)
+                } catch (e: Exception) { result.success(false) }
+            }
+            "sdkInt" -> result.success(android.os.Build.VERSION.SDK_INT)
             "probeCapabilities" -> thread(name = "DeviceCaps") {
                 val caps = try { DeviceCaps.probe(context) } catch (e: Exception) { mapOf("error" to (e.message ?: "")) }
                 android.os.Handler(android.os.Looper.getMainLooper()).post { result.success(caps) }

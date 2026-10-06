@@ -90,6 +90,59 @@ class _CameraScreenState extends State<CameraScreen> {
     });
   }
 
+  /// Join the switcher's own network by hand (Android ≤ 9 / join refused): its name and password, copy, open the
+  /// Wi-Fi settings, then «Ya me conecté». True when the user says they joined.
+  Future<bool> _manualWifiJoin(String ssid, String pass) async {
+    const native = MethodChannel('com.vortex.vortexcam/native');
+    int sdk = 0;
+    try { sdk = await native.invokeMethod<int>('sdkInt') ?? 0; } catch (_) {}
+    if (!mounted) return false;
+    final r = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        scrollable: true,
+        title: const Row(children: [
+          Icon(SdIcons.wifiHigh, color: Sd.cyan, size: 22),
+          SizedBox(width: 10),
+          Expanded(child: Text('Conectate a la red del switcher')),
+        ]),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text(sdk > 0 && sdk < 29
+              ? 'En este celular (Android ${sdk < 28 ? '8' : '9'}) la app no puede elegir la red sola: hacelo desde Ajustes.'
+              : 'No se pudo conectar sola. Elegí esta red en Ajustes → Wi-Fi:', style: SdText.caption),
+          const SizedBox(height: 12),
+          SelectableText('Red: $ssid', style: SdText.bodyHi),
+          const SizedBox(height: 4),
+          Row(children: [
+            Expanded(child: SelectableText('Clave: $pass', style: SdText.bodyHi)),
+            IconButton(
+              tooltip: 'Copiar la clave',
+              icon: const Icon(SdIcons.copy, size: 18),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: pass));
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Clave copiada')));
+              },
+            ),
+          ]),
+          const SizedBox(height: 8),
+          SizedBox(width: double.infinity, child: OutlinedButton.icon(
+            icon: const Icon(SdIcons.wifiHigh, size: 18),
+            label: const Text('Abrir Ajustes de Wi-Fi'),
+            onPressed: () => native.invokeMethod('openWifiSettings'),
+          )),
+          const SizedBox(height: 6),
+          const Text('Cuando el celular diga «Conectado» (aunque avise «sin internet»), volvé y tocá «Ya me conecté».',
+              style: SdText.caption),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancelar', style: TextStyle(color: Sd.t2))),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Ya me conecté')),
+        ],
+      ),
+    );
+    return r == true;
+  }
+
   /// Tells the switcher what this camera is (see CamInfoMessage).
   void _sendCamInfo() {
     _control.sendMessage(CamInfoMessage(peerId: _control.peerId, maxHeight: _publisher.maxHeight, mic: _mic.infoName));
@@ -410,9 +463,10 @@ class _CameraScreenState extends State<CameraScreen> {
                               {'ssid': payload.wifiSsid, 'password': payload.wifiPassword ?? ''}) ?? false;
                         } catch (_) {}
                         if (!ok) {
-                          messenger.showSnackBar(const SnackBar(content: Text(
-                              'No se pudo unir a la red del switcher. Conectate a mano desde Ajustes → Wi-Fi y volvé a intentar.')));
-                          return;
+                          // Android 9 and older cannot join from an app, or the user said no: guide the manual join.
+                          if (!mounted) return;
+                          final joined = await _manualWifiJoin(payload.wifiSsid!, payload.wifiPassword ?? '');
+                          if (!joined) return;
                         }
                       }
                       _connect();
