@@ -31,6 +31,20 @@ class RoomHost extends ChangeNotifier {
   bool get isRunning => _server != null;
   List<Peer> get cameras => room.peers.values.where((p) => p.role == PeerRole.camera).toList();
   String? get activePeerId => room.activePeerId;
+  String? get previewPeerId => room.previewPeerId;
+
+  /// What each camera reported about itself (capture delay, microphone, max resolution): see CamInfoMessage.
+  final Map<String, CamInfoMessage> camInfo = {};
+  void Function(CamInfoMessage info)? onCamInfo;
+
+  /// Cameras the program composition needs at full quality besides PGM and PVW (the second camera of a split / PiP),
+  /// set by the ProgramMixer.
+  Set<String> _extraHigh = {};
+  set extraHigh(Set<String> ids) {
+    if (setEquals(ids, _extraHigh)) return;
+    _extraHigh = Set.of(ids);
+    _applyLayers();
+  }
 
   /// Start the local WebSocket & HTTP server
   Future<void> start() async {
@@ -82,7 +96,16 @@ class RoomHost extends ChangeNotifier {
               );
               room.peers[m.peerId] = peer;
               onPeerJoined?.call(peer);
+              // A camera that (re)joins must hear its layer even if it is the same as the default: it may have
+              // been at high quality in a previous session.
+              _applyLayers(force: {m.peerId});
               broadcastRoster();
+              notifyListeners();
+              break;
+
+            case CamInfoMessage m:
+              camInfo[m.peerId] = m;
+              onCamInfo?.call(m);
               notifyListeners();
               break;
 
@@ -166,6 +189,7 @@ class RoomHost extends ChangeNotifier {
     final rosterMsg = RosterMessage(
       peers: room.peers.values.toList(),
       activePeerId: room.activePeerId,
+      previewPeerId: room.previewPeerId,
     );
     final encoded = rosterMsg.encode();
     for (final ch in _clientChannels.values) {
@@ -173,32 +197,40 @@ class RoomHost extends ChangeNotifier {
     }
   }
 
-  /// Sets the transmission layer for a camera (high or low)
-  void setCameraLayer(String peerId, Layer layer) {
-    final peer = room.peers[peerId];
-    if (peer != null) {
-      peer.activeLayer = layer;
-      sendToPeer(peerId, SetLayerMessage(peerId: peerId, layer: layer));
-      notifyListeners();
+  /// PGM / PVW quality policy (2026-10-06): the on-air camera, the one in preview and the second camera of a
+  /// split / PiP send at high quality; every other camera at the low layer. The cut PVW → PGM is then instant (both
+  /// already decoded in high), and a phone switcher only decodes two full streams whatever the number of cameras.
+  /// Only changes are sent, except to the cameras in [force] (just joined).
+  void _applyLayers({Set<String> force = const {}}) {
+    final high = {..._extraHigh, if (room.activePeerId != null) room.activePeerId!, if (room.previewPeerId != null) room.previewPeerId!};
+    var changed = false;
+    for (final p in room.peers.values) {
+      if (p.role != PeerRole.camera) continue;
+      final want = high.contains(p.id) ? Layer.high : Layer.low;
+      if (want == p.activeLayer && !force.contains(p.id)) continue;
+      p.activeLayer = want;
+      sendToPeer(p.id, SetLayerMessage(peerId: p.id, layer: want));
+      changed = true;
     }
+    if (changed) notifyListeners();
   }
 
   /// Update the active on-air camera ID and coordinate layer switches
   void setActiveCamera(String? newActivePeerId) {
-    final oldActivePeerId = room.activePeerId;
-    if (oldActivePeerId == newActivePeerId) return;
-
-    // Downgrade old active camera to low layer (free up bandwidth & decode load)
-    if (oldActivePeerId != null && room.peers.containsKey(oldActivePeerId)) {
-      setCameraLayer(oldActivePeerId, Layer.low);
-    }
-
-    // Upgrade new active camera to high layer (full 720p HD)
+    if (room.activePeerId == newActivePeerId) return;
     room.activePeerId = newActivePeerId;
-    if (newActivePeerId != null && room.peers.containsKey(newActivePeerId)) {
-      setCameraLayer(newActivePeerId, Layer.high);
-    }
+    if (room.previewPeerId == newActivePeerId) room.previewPeerId = null;
+    _applyLayers();
+    broadcastRoster();
+    notifyListeners();
+  }
 
+  /// Prepare a camera to go on air next (PVW). null clears it. The on-air camera cannot be in preview.
+  void setPreviewCamera(String? peerId) {
+    if (peerId != null && (peerId == room.activePeerId || !room.peers.containsKey(peerId))) peerId = null;
+    if (room.previewPeerId == peerId) return;
+    room.previewPeerId = peerId;
+    _applyLayers();
     broadcastRoster();
     notifyListeners();
   }
@@ -208,9 +240,11 @@ class RoomHost extends ChangeNotifier {
     final removed = room.peers.remove(peerId);
     if (removed != null) {
       onPeerLeft?.call(peerId);
+      camInfo.remove(peerId);
       if (room.activePeerId == peerId) {
         room.activePeerId = null;
       }
+      if (room.previewPeerId == peerId) room.previewPeerId = null;
       broadcastRoster();
       notifyListeners();
     }

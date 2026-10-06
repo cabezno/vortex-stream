@@ -5,15 +5,16 @@ import 'package:samba_protocol/samba_protocol.dart';
 
 enum CameraFacing { front, back }
 
-/// WebRTC Publisher that captures camera/mic and advertises Simulcast:
-/// - rid 'low': ~320x180, 15fps, 150kbps (Always on, for switcher multiview)
-/// - rid 'high': ~1280x720, 30fps, 3Mbps (Activated when this camera is ON-AIR)
+/// WebRTC publisher of a Studio camera: ONE video stream whose quality the switcher sets (set_layer, PGM/PVW
+/// 2026-10-06): high (capture size, up to 6 Mbps, 30 fps) while on air / in preview / second camera of a split,
+/// low (360p, 600 kbps, 15 fps) otherwise. Changing it only re-configures the encoder (a key frame, no renegotiation).
 class WebRtcPublisher {
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
   RTCRtpTransceiver? _videoTransceiver;
   Timer? _statsTimer;
   Layer _currentLayer = Layer.low;
+  int _captureHeight = SimulcastLayers.highHeight;
   CameraFacing _facing = CameraFacing.back;
   bool _encoderKickChecked = false;
 
@@ -69,6 +70,12 @@ class WebRtcPublisher {
     };
 
     _localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    // The size the camera really gave (the low layer is a fraction of it).
+    try {
+      final st = _localStream!.getVideoTracks().first.getSettings();
+      final w = (st['width'] as num?)?.toInt(), h = (st['height'] as num?)?.toInt();
+      if (w != null && h != null && w > 0 && h > 0) _captureHeight = w < h ? w : h;
+    } catch (_) {}
     return _localStream!;
   }
 
@@ -176,25 +183,8 @@ class WebRtcPublisher {
       } catch (e) {
         debugPrint('[WebRtcPublisher] setCodecPreferences falló: $e');
       }
-      // Bitrate ceiling: without it WebRTC caps 720p VP8 at ~2.5 Mbps (default) and the program looks soft.
-      try {
-        final params = transceiver.sender.parameters;
-        final encs = params.encodings;
-        if (encs != null && encs.isNotEmpty) {
-          for (final e in encs) {
-            e.maxBitrate = SimulcastLayers.highMaxBitrate;
-            // Floor: on Wi-Fi ~1 % packet loss made WebRTC's loss-based estimate fall to 300–700 kbps and the
-            // on-air camera reached the switcher at 640x360 (measured 2026-10-04, Xiaomi → A10). On a LAN that
-            // loss does not justify it; the floor keeps the picture (same as the WHIP path's 1.5 Mbps floor).
-            e.minBitrate = SimulcastLayers.highMinBitrate;
-            e.maxFramerate = SimulcastLayers.highMaxFramerate;
-          }
-          await transceiver.sender.setParameters(params);
-          debugPrint('[WebRtcPublisher] maxBitrate ${SimulcastLayers.highMaxBitrate ~/ 1000} kbps');
-        }
-      } catch (e) {
-        debugPrint('[WebRtcPublisher] setParameters (bitrate) falló: $e');
-      }
+      // Quality of the layer the switcher asked for (low until it says otherwise).
+      await _applyLayerParams();
     }
 
     // DIAGNÓSTICO: log de stats de envío de video cada 3s
@@ -296,27 +286,40 @@ class WebRtcPublisher {
     await _peerConnection!.addCandidate(candidate);
   }
 
-  /// Dynamically toggle high-definition layer on command from Switcher
+  /// Switcher's order: high or low quality (see the class comment).
   Future<void> setLayer(Layer layer) async {
     _currentLayer = layer;
-    if (_videoTransceiver == null) return;
+    await _applyLayerParams();
+  }
 
+  /// Applies [_currentLayer] to the single video encoding.
+  /// - high: full capture size; ceiling 6 Mbps (WebRTC's default caps 1080p at ~2.5 Mbps and the program looked soft);
+  ///   floor 3.5 Mbps (on Wi-Fi ~1 % loss made the estimate fall to 300–700 kbps and the on-air camera arrived at
+  ///   640x360, measured 2026-10-04 — on a LAN that loss does not justify it).
+  /// - low: scaled to ~360p (the factor is measured from what the camera captures), 600 kbps, 15 fps.
+  /// Keys are always set: flutter_webrtc leaves a parameter unchanged when it is missing from the map.
+  Future<void> _applyLayerParams() async {
+    final t = _videoTransceiver;
+    if (t == null) return;
     try {
-      final sender = _videoTransceiver!.sender;
-      final parameters = sender.parameters;
-      final encodings = parameters.encodings;
-
-      if (encodings != null && encodings.length >= 2) {
-        // Encoding 0 = low (always active)
-        encodings[0].active = true;
-        // Encoding 1 = high (active only if Layer.high)
-        encodings[1].active = (layer == Layer.high);
-
-        await sender.setParameters(parameters);
-        debugPrint('[WebRtcPublisher] Switched layer to ${layer.name} (high active: ${encodings[1].active})');
+      final params = t.sender.parameters;
+      final encs = params.encodings;
+      if (encs == null || encs.isEmpty) return;
+      final high = _currentLayer == Layer.high;
+      final scale = high || _captureHeight <= SimulcastLayers.lowHeight
+          ? 1.0 : _captureHeight / SimulcastLayers.lowHeight;
+      for (final e in encs) {
+        e.active = true;
+        e.scaleResolutionDownBy = scale;
+        e.maxBitrate = high ? SimulcastLayers.highMaxBitrate : SimulcastLayers.lowMaxBitrate;
+        e.minBitrate = high ? SimulcastLayers.highMinBitrate : 100000;
+        e.maxFramerate = high ? SimulcastLayers.highMaxFramerate : SimulcastLayers.lowMaxFramerate;
       }
+      await t.sender.setParameters(params);
+      debugPrint('[WebRtcPublisher] capa ${high ? 'ALTA' : 'BAJA'}: ${(_captureHeight / scale).round()}p, '
+          'hasta ${(high ? SimulcastLayers.highMaxBitrate : SimulcastLayers.lowMaxBitrate) ~/ 1000} kbps');
     } catch (e) {
-      debugPrint('[WebRtcPublisher] Error setting layer parameters: $e');
+      debugPrint('[WebRtcPublisher] no se pudo aplicar la capa ${_currentLayer.name}: $e');
     }
   }
 

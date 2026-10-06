@@ -20,6 +20,10 @@ class WebRtcSubscriber extends ChangeNotifier {
     _setupRoomListeners();
   }
 
+  /// What actually arrives from each camera, measured every 3 s: the multiview shows it so PGM/PVW (and 4K on air)
+  /// can be checked at a glance — e.g. "1080p · 30" for the on-air one, "360p · 15" for the others.
+  final Map<String, ({int height, int fps})> received = {};
+
   Map<String, RTCVideoRenderer> get renderers => _renderers;
   Map<String, MediaStream> get remoteStreams => _remoteStreams;
   String? get activeAudioPeerId => _activeAudioPeerId;
@@ -154,6 +158,12 @@ class WebRtcSubscriber extends ChangeNotifier {
                 'framesDropped=${v['framesDropped']} bytesReceived=${v['bytesReceived']} packetsReceived=${v['packetsReceived']} '
                 'packetsLost=${v['packetsLost']} nack=${v['nackCount']} pli=${v['pliCount']} freezes=${v['freezeCount']} '
                 'jitter=${v['jitter']} fps=${v['framesPerSecond']} ${v['frameWidth']}x${v['frameHeight']}');
+            final w = (v['frameWidth'] as num?)?.toInt() ?? 0, h = (v['frameHeight'] as num?)?.toInt() ?? 0;
+            final now = (height: w < h ? w : h, fps: ((v['framesPerSecond'] as num?) ?? 0).round());
+            if (received[peerId] != now) {
+              received[peerId] = now;
+              notifyListeners();
+            }
           }
         }
       } catch (_) {}
@@ -190,6 +200,7 @@ class WebRtcSubscriber extends ChangeNotifier {
     await renderer?.dispose();
 
     _remoteStreams.remove(peerId);
+    received.remove(peerId);
     notifyListeners();
   }
 

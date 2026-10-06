@@ -63,11 +63,39 @@ class Director extends ChangeNotifier {
 
   void _handleEngineSwitch(SwitchEvent event) {
     _recordSwitchLog(event.reason);
-    _crossfader.crossfadeTo(event.targetPeerId);
-    subscriber?.updateActiveAudioTrack(event.targetPeerId);
-    roomHost.setActiveCamera(event.targetPeerId);
+    _goOnAir(event.targetPeerId);
+  }
+
+  /// Puts [peerId] on air. The camera that was on air goes to PREVIEW: it stays at high quality, so cutting back is
+  /// instant — the usual back-and-forth of two people talking never waits for a camera to go up (PGM/PVW, 2026-10-06).
+  void _goOnAir(String peerId) {
+    final previous = roomHost.activePeerId;
+    _crossfader.crossfadeTo(peerId);
+    subscriber?.updateActiveAudioTrack(peerId);
+    roomHost.setActiveCamera(peerId);
+    if (previous != null && previous != peerId && roomHost.room.peers.containsKey(previous)) {
+      roomHost.setPreviewCamera(previous);
+    }
     notifyListeners();
   }
+
+  String? get previewPeerId => roomHost.previewPeerId;
+
+  /// Prepare a camera in PREVIEW (green): it goes up to high quality while the program keeps showing the on-air one.
+  void setPreview(String peerId) {
+    if (peerId == roomHost.activePeerId) return;
+    roomHost.setPreviewCamera(peerId);
+    _recordSwitchLog('Preparada en vista previa: ${_nameOf(peerId)}');
+    notifyListeners();
+  }
+
+  /// CUT: the preview camera goes on air (and the on-air one to preview).
+  void cutToPreview() {
+    final pvw = roomHost.previewPeerId;
+    if (pvw != null) manualCut(pvw);
+  }
+
+  String _nameOf(String peerId) => roomHost.room.peers[peerId]?.name ?? peerId;
 
   void _recordSwitchLog(String log) {
     final timeStr = DateTime.now().toIso8601String().substring(11, 19);
@@ -79,12 +107,10 @@ class Director extends ChangeNotifier {
 
   /// Manually cut to a specific camera with audio crossfade
   void manualCut(String peerId) {
-    _recordSwitchLog('Corte manual a $peerId');
+    final fromPreview = peerId == roomHost.previewPeerId;
+    _recordSwitchLog('Corte ${fromPreview ? 'desde vista previa' : 'directo'} a ${_nameOf(peerId)}');
     _engine.setActivePeer(peerId, resetHoldTimer: true);
-    _crossfader.crossfadeTo(peerId);
-    subscriber?.updateActiveAudioTrack(peerId);
-    roomHost.setActiveCamera(peerId);
-    notifyListeners();
+    _goOnAir(peerId);
   }
 
   /// Toggle automatic audio switching

@@ -21,6 +21,7 @@ class SdIcons {
   static const copySimple = IconData(0xe1cc, fontFamily: _f);
   static const desktop = IconData(0xe560, fontFamily: _f);
   static const deviceMobile = IconData(0xe1e0, fontFamily: _f);
+  static const eye = IconData(0xe220, fontFamily: _f);
   static const flashlight = IconData(0xe246, fontFamily: _f);
   static const headphones = IconData(0xe2a6, fontFamily: _f);
   static const keyboard = IconData(0xe2d8, fontFamily: _f);
@@ -31,6 +32,7 @@ class SdIcons {
   static const plugsConnected = IconData(0xeb5a, fontFamily: _f);
   static const qrCode = IconData(0xe3e6, fontFamily: _f);
   static const record = IconData(0xe3ee, fontFamily: _f);
+  static const scissors = IconData(0xeae0, fontFamily: _f);
   static const slidersHorizontal = IconData(0xe434, fontFamily: _f);
   static const sparkle = IconData(0xe6a2, fontFamily: _f);
   static const speakerSlash = IconData(0xe45a, fontFamily: _f);

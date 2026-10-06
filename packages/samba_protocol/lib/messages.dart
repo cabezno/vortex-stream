@@ -22,6 +22,7 @@ sealed class SambaMessage {
       'roster' => RosterMessage.fromJson(map),
       'set_layer' => SetLayerMessage.fromJson(map),
       'bye' => ByeMessage.fromJson(map),
+      'cam_info' => CamInfoMessage.fromJson(map),
       'offer' => OfferMessage.fromJson(map),
       'answer' => AnswerMessage.fromJson(map),
       'candidate' => IceCandidateMessage.fromJson(map),
@@ -108,10 +109,13 @@ class HeartbeatMessage extends SambaMessage {
 class RosterMessage extends SambaMessage {
   final List<Peer> peers;
   final String? activePeerId;
+  /// The camera prepared to go on air next (green tally on that phone).
+  final String? previewPeerId;
 
   const RosterMessage({
     required this.peers,
     this.activePeerId,
+    this.previewPeerId,
   }) : super('roster');
 
   @override
@@ -119,6 +123,7 @@ class RosterMessage extends SambaMessage {
     't': t,
     'peers': peers.map((p) => p.toJson()).toList(),
     if (activePeerId != null) 'activePeerId': activePeerId,
+    if (previewPeerId != null) 'previewPeerId': previewPeerId,
   };
 
   factory RosterMessage.fromJson(Map<String, dynamic> json) {
@@ -126,8 +131,52 @@ class RosterMessage extends SambaMessage {
     return RosterMessage(
       peers: rawPeers.map((p) => Peer.fromJson(p as Map<String, dynamic>)).toList(),
       activePeerId: json['activePeerId'] as String?,
+      previewPeerId: json['previewPeerId'] as String?,
     );
   }
+}
+
+/// Camera -> Switcher: what the camera is and how it captures, sent after joining and whenever it changes.
+/// - [captureDelayMs]: sensor exposure → handed to the encoder, measured on the phone (Camera2 SENSOR_TIMESTAMP vs
+///   now); the part of the delay the network timestamps cannot see.
+/// - [mic]: the microphone in use ('phone' or a Bluetooth headset name) and [micDelayMs], its extra delay.
+/// - [maxHeight]: the highest height this phone's encoder can send (its own measurement), for 4K on air.
+class CamInfoMessage extends SambaMessage {
+  final String peerId;
+  final int captureDelayMs;
+  final String mic;
+  final int micDelayMs;
+  final int maxHeight;
+  final int clockOffsetMs;
+
+  const CamInfoMessage({
+    required this.peerId,
+    this.captureDelayMs = 0,
+    this.mic = 'phone',
+    this.micDelayMs = 0,
+    this.maxHeight = 1080,
+    this.clockOffsetMs = 0,
+  }) : super('cam_info');
+
+  @override
+  Map<String, dynamic> toJson() => {
+    't': t,
+    'peerId': peerId,
+    'captureDelayMs': captureDelayMs,
+    'mic': mic,
+    'micDelayMs': micDelayMs,
+    'maxHeight': maxHeight,
+    'clockOffsetMs': clockOffsetMs,
+  };
+
+  factory CamInfoMessage.fromJson(Map<String, dynamic> json) => CamInfoMessage(
+    peerId: json['peerId'] as String,
+    captureDelayMs: (json['captureDelayMs'] as num?)?.toInt() ?? 0,
+    mic: json['mic'] as String? ?? 'phone',
+    micDelayMs: (json['micDelayMs'] as num?)?.toInt() ?? 0,
+    maxHeight: (json['maxHeight'] as num?)?.toInt() ?? 1080,
+    clockOffsetMs: (json['clockOffsetMs'] as num?)?.toInt() ?? 0,
+  );
 }
 
 /// Switcher -> Camera: Orders a camera to switch its transmission layer ('high' or 'low').

@@ -557,10 +557,13 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
         ],
       ),
       body: SafeArea(top: false, child: ListenableBuilder(
-        listenable: Listenable.merge([_roomHost, _subscriber, _rtmpOut, _recorder, _encoder, _mixer, _localCam]),
+        listenable: Listenable.merge([_roomHost, _subscriber, _rtmpOut, _recorder, _encoder, _mixer, _localCam, _director]),
         builder: (context, _) {
           final cameras = _roomHost.cameras;
           final activePeerId = _roomHost.activePeerId;
+          final previewPeerId = _roomHost.previewPeerId;
+          final previewName = previewPeerId == null ? null
+              : cameras.where((c) => c.id == previewPeerId).map((c) => c.name).firstOrNull;
 
           return Column(
             children: [
@@ -634,6 +637,15 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                 _buildLayoutChip('PiP', SdIcons.copySimple, LayoutMode.pip),
                               ]),
                             ),
+                            if (_mixer.mode == LayoutMode.single && previewName != null)
+                              // CUT: the preview camera goes on air — instant, it is already at high quality.
+                              FilledButton.icon(
+                                style: FilledButton.styleFrom(backgroundColor: Sd.red, minimumSize: const Size(0, 34),
+                                    padding: const EdgeInsets.symmetric(horizontal: 12)),
+                                icon: const Icon(SdIcons.scissors, size: 16),
+                                label: Text('CORTE → $previewName', overflow: TextOverflow.ellipsis),
+                                onPressed: _director.cutToPreview,
+                              ),
                             if (_mixer.mode != LayoutMode.single && cameras.length > 1)
                               Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
@@ -674,7 +686,10 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                   const SizedBox(width: 8),
                   Text('${cameras.length} ${cameras.length == 1 ? 'cámara' : 'cámaras'}', style: SdText.caption),
                   const Spacer(),
-                  const Text('Tocá una cámara para cortar', style: SdText.caption),
+                  Flexible(child: Text(previewPeerId == null
+                      ? 'Tocá una cámara para prepararla en vista previa'
+                      : 'Tocá la verde otra vez (o CORTE) para ponerla al aire',
+                      style: SdText.caption, overflow: TextOverflow.ellipsis)),
                 ]),
               ),
 
@@ -733,6 +748,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                         itemBuilder: (context, idx) {
                           final cam = cameras[idx];
                           final isActive = cam.id == activePeerId;
+                          final isPreview = cam.id == previewPeerId;
+                          final rx = _subscriber.received[cam.id];
                           // The switcher's own camera uses its local renderer; remote ones, the subscriber's.
                           final isLocal = cam.id == _localCam.peerId;
                           final camRenderer = isLocal ? _localCam.renderer : _subscriber.getRenderer(cam.id);
@@ -740,7 +757,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                           final level = ((cam.lastAudioDbfs + 60.0) / 60.0).clamp(0.0, 1.0);
 
                           return GestureDetector(
-                            onTap: () => _director.manualCut(cam.id),
+                            // 1st tap: preview (it goes up to high quality); tap on the green one: on air. Long press:
+                            // direct cut, for when there is no time to prepare.
+                            onTap: isActive ? null
+                                : () => isPreview ? _director.manualCut(cam.id) : _director.setPreview(cam.id),
+                            onLongPress: isActive ? null : () => _director.manualCut(cam.id),
                             child: AnimatedContainer(
                               duration: const Duration(milliseconds: 160),
                               clipBehavior: Clip.antiAlias,
@@ -748,8 +769,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                 color: Sd.raised,
                                 borderRadius: BorderRadius.circular(Sd.r2),
                                 border: Border.all(
-                                  color: isActive ? Sd.wash(Sd.red, 0.8) : Sd.border,
-                                  width: isActive ? 1.5 : 1,
+                                  color: isActive ? Sd.wash(Sd.red, 0.8) : isPreview ? Sd.wash(Sd.green, 0.8) : Sd.border,
+                                  width: isActive || isPreview ? 1.5 : 1,
                                 ),
                               ),
                               child: Stack(children: [
@@ -779,7 +800,9 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                             overflow: TextOverflow.ellipsis)),
                                         isActive
                                             ? const SdPill('EN EL AIRE', color: Sd.red, solid: true)
-                                            : const SdPill('PREVIEW', color: Sd.t2),
+                                            : isPreview
+                                                ? const SdPill('VISTA PREVIA', color: Sd.green)
+                                                : const SdPill('LISTA', color: Sd.t2),
                                       ]),
                                       if (!hasVideo)
                                         const Center(child: Icon(SdIcons.videoCameraSlash, color: Sd.t3, size: 22)),
@@ -797,6 +820,12 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                         )),
                                         const SizedBox(width: 6),
                                         Text('${cam.lastAudioDbfs.toStringAsFixed(0)} dB', style: SdText.caption),
+                                        // What really arrives (check for PGM/PVW: high only for on air / preview).
+                                        if (rx != null && rx.height > 0) ...[
+                                          const SizedBox(width: 8),
+                                          Text('${rx.height}p · ${rx.fps}', style: SdText.caption.copyWith(
+                                              color: rx.height >= 720 ? Sd.cyan : Sd.t3)),
+                                        ],
                                       ]),
                                     ],
                                   ),

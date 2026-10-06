@@ -156,12 +156,12 @@ class _CameraScreenState extends State<CameraScreen> {
                   : const CircularProgressIndicator(strokeWidth: 1.6),
             ),
 
-            // 2. Tally: a soft red frame while on air
+            // 2. Tally: red frame while on air, green while in preview (next to go on air)
             ListenableBuilder(
               listenable: _control,
-              builder: (context, _) => _control.isOnAir
+              builder: (context, _) => (_control.isOnAir || _control.isPreview)
                   ? IgnorePointer(child: Container(decoration: BoxDecoration(
-                      border: Border.all(color: Sd.wash(Sd.red, 0.85), width: 4))))
+                      border: Border.all(color: Sd.wash(_control.isOnAir ? Sd.red : Sd.green, 0.85), width: 4))))
                   : const SizedBox.shrink(),
             ),
 
@@ -173,10 +173,18 @@ class _CameraScreenState extends State<CameraScreen> {
                 builder: (context, _) {
                   final onAir = _control.isOnAir;
                   final connected = _control.isConnected;
+                  final high = _control.layer == Layer.high;
                   return Row(children: [
                     onAir
                         ? const SdPill('EN EL AIRE', color: Sd.red, icon: SdIcons.record, solid: true)
-                        : const SdPill('EN ESPERA', color: Sd.t2, icon: SdIcons.circle),
+                        : _control.isPreview
+                            ? const SdPill('VISTA PREVIA', color: Sd.green, icon: SdIcons.eye)
+                            : const SdPill('EN ESPERA', color: Sd.t2, icon: SdIcons.circle),
+                    // What this phone is sending: high only while on air / in preview / second camera of a split.
+                    if (connected) ...[
+                      const SizedBox(width: 6),
+                      SdPill(high ? 'CALIDAD ALTA' : 'CALIDAD BAJA', color: high ? Sd.cyan : Sd.t3),
+                    ],
                     const Spacer(),
                     connected
                         ? const SdPill('CONECTADO', color: Sd.green, icon: SdIcons.plugsConnected)

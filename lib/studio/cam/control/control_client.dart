@@ -19,6 +19,8 @@ class CameraControlClient extends ChangeNotifier {
   String _errorMessage = '';
 
   bool _isOnAir = false;
+  bool _isPreview = false;
+  Layer _layer = Layer.low;
   double _currentDbfs = -50.0;
   List<Peer> _roster = [];
 
@@ -36,6 +38,10 @@ class CameraControlClient extends ChangeNotifier {
   CameraConnectionState get state => _state;
   bool get isConnected => _state == CameraConnectionState.connected;
   bool get isOnAir => _isOnAir;
+  /// Prepared to go on air next (PVW): green tally.
+  bool get isPreview => _isPreview;
+  /// The quality the switcher asked this camera to send.
+  Layer get layer => _layer;
   double get currentDbfs => _currentDbfs;
   List<Peer> get roster => _roster;
   String get errorMessage => _errorMessage;
@@ -92,8 +98,10 @@ class CameraControlClient extends ChangeNotifier {
       final msg = SambaMessage.decode(raw.toString());
       switch (msg) {
         case SetLayerMessage m:
+          // Quality only. On air / preview come from the roster: since PGM/PVW (2026-10-06) the preview camera is at
+          // high quality too, so "high" no longer means "on air".
           if (m.peerId == peerId) {
-            _isOnAir = (m.layer == Layer.high);
+            _layer = m.layer;
             notifyListeners();
             onSetLayer?.call(m);
           }
@@ -101,6 +109,7 @@ class CameraControlClient extends ChangeNotifier {
         case RosterMessage m:
           _roster = m.peers;
           _isOnAir = (m.activePeerId == peerId);
+          _isPreview = (m.previewPeerId == peerId);
           notifyListeners();
           break;
         case OfferMessage m:
@@ -175,6 +184,8 @@ class CameraControlClient extends ChangeNotifier {
     _channel = null;
     _state = CameraConnectionState.disconnected;
     _isOnAir = false;
+    _isPreview = false;
+    _layer = Layer.low;
     notifyListeners();
   }
 

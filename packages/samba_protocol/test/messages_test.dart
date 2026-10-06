@@ -52,6 +52,33 @@ void main() {
       expect(roster.activePeerId, 'cam1');
       expect(roster.peers[0].id, 'cam1');
       expect(roster.peers[0].activeLayer, Layer.high);
+      expect(roster.previewPeerId, isNull);
+    });
+
+    test('RosterMessage carries the preview camera (PGM/PVW)', () {
+      final msg = RosterMessage(peers: [Peer(id: 'cam1', name: 'A'), Peer(id: 'cam2', name: 'B')],
+          activePeerId: 'cam1', previewPeerId: 'cam2');
+      final roster = SambaMessage.decode(msg.encode()) as RosterMessage;
+      expect(roster.activePeerId, 'cam1');
+      expect(roster.previewPeerId, 'cam2');
+    });
+
+    test('CamInfoMessage encode and decode', () {
+      const msg = CamInfoMessage(peerId: 'cam1', captureDelayMs: 42, mic: 'Galaxy Buds', micDelayMs: 160,
+          maxHeight: 2160, clockOffsetMs: -7);
+      final info = SambaMessage.decode(msg.encode()) as CamInfoMessage;
+      expect(info.peerId, 'cam1');
+      expect(info.captureDelayMs, 42);
+      expect(info.mic, 'Galaxy Buds');
+      expect(info.micDelayMs, 160);
+      expect(info.maxHeight, 2160);
+      expect(info.clockOffsetMs, -7);
+    });
+
+    test('CamInfoMessage defaults for an older camera', () {
+      final info = SambaMessage.decode('{"t":"cam_info","peerId":"c"}') as CamInfoMessage;
+      expect(info.mic, 'phone');
+      expect(info.maxHeight, 1080);
     });
   });
 }

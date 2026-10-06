@@ -2,13 +2,14 @@
 class SimulcastLayers {
   SimulcastLayers._();
 
-  /// Low-resolution preview layer (always active, lightweight for multiview).
+  /// Low layer: cameras that are neither on air, in preview nor the second camera of a split/PiP (2026-10-06, PGM/PVW).
+  /// Each camera sends ONE stream and the switcher changes its quality (set_layer): only the on-air and the next
+  /// cameras cost full decode/Wi-Fi. 360p, not 180p: a direct cut (auto-switch) shows this layer for the half second
+  /// the camera takes to go up, so it must look acceptable on air.
   static const String ridLow = 'low';
-  static const int lowWidth = 320;
-  static const int lowHeight = 180;
-  static const int lowMaxBitrate = 150000; // 150 kbps
+  static const int lowHeight = 360;
+  static const int lowMaxBitrate = 600000; // 600 kbps
   static const int lowMaxFramerate = 15;
-  static const double lowScaleResolutionDownBy = 4.0;
 
   /// High-definition program layer (activated on-demand for the on-air camera).
   /// 1080p since 2026-10-04 (was 720p at WebRTC's default ~2.5 Mbps: the switcher's program looked soft). It is an

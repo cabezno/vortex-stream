@@ -168,6 +168,8 @@ class Room {
   final String id;
   final Map<String, Peer> peers;
   String? activePeerId;
+  /// PVW: the camera prepared to go on air next (kept at high quality so the cut is instant).
+  String? previewPeerId;
   SwitcherConfig config;
   ProgramState programState;
 

@@ -1,5 +1,4 @@
 import 'package:flutter/foundation.dart';
-import 'package:samba_protocol/samba_protocol.dart';
 import '../encode/program_encoder.dart';
 import '../room/room_host.dart';
 
@@ -85,13 +84,7 @@ class ProgramMixer extends ChangeNotifier {
 
   /// Sets the secondary camera for split-screen or PiP
   void setSecondary(String? peerId) {
-    final oldSecondary = _secondaryPeerId;
     _secondaryPeerId = peerId;
-
-    if (oldSecondary != null && oldSecondary != _primaryPeerId) {
-      roomHost.setCameraLayer(oldSecondary, Layer.low);
-    }
-
     _applyLayerPromotions();
     notifyListeners();
   }
@@ -108,21 +101,10 @@ class ProgramMixer extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Coordinates layer promotion in RoomHost:
-  /// - In single mode: only primary is Layer.high
-  /// - In splitScreen or PiP: BOTH primary and secondary are promoted to Layer.high
+  /// The on-air and preview cameras are always at high quality (RoomHost); the composition adds the second camera
+  /// of a split / PiP. Everything else goes to the low layer.
   void _applyLayerPromotions() {
-    final primary = _primaryPeerId ?? roomHost.activePeerId;
-    if (primary != null) {
-      roomHost.setCameraLayer(primary, Layer.high);
-    }
-
-    if (_mode != LayoutMode.single && _secondaryPeerId != null) {
-      roomHost.setCameraLayer(_secondaryPeerId!, Layer.high);
-    } else if (_secondaryPeerId != null && _secondaryPeerId != primary) {
-      // Demote secondary back to low preview when returning to single
-      roomHost.setCameraLayer(_secondaryPeerId!, Layer.low);
-    }
+    roomHost.extraHigh = (_mode != LayoutMode.single && _secondaryPeerId != null) ? {_secondaryPeerId!} : {};
   }
 
   @override
