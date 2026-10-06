@@ -50,3 +50,22 @@ la cámara que hace 4K y después a otra.
 ocupado decodificando las cámaras; probar con menos cámaras). Cámara: `[WebRtcPublisher] cámara reabierta en 2160p` y
 `capa ALTA: 2160p`. Si la cámara manda 2160p pero el switcher muestra 1080p: posible tope de nivel H.264 en WebRTC
 (anotarlo, se arregla en el SDP).
+
+## P3. Micrófono por presentador (auricular Bluetooth en la cámara)
+
+**Necesita:** un auricular Bluetooth (de llamadas) vinculado al celular CÁMARA (no al switcher).
+
+**Cómo:** cámara unida al switcher. Con el auricular apagado, prendelo: debe aparecer un aviso. Si no, tocá el
+micrófono en la barra de abajo de la cámara → elegí el auricular. Hablá. Volvé a «Micrófono del celular».
+
+**Qué tenés que ver:**
+- Al prender el auricular: «Auricular conectado: <nombre>» con el botón «Usarlo como micrófono».
+- En la barra de la cámara: el ícono de Bluetooth y el nombre del auricular, y la **barrita verde se mueve al hablar
+  por el auricular** (y casi no se mueve si hablás lejos del celular).
+- En el switcher, la miniatura de esa cámara: ícono de Bluetooth celeste + el nombre del auricular.
+- Con dos cámaras, cada una con su auricular y el switcher en AUTO: corta a quien habla, y la voz del otro
+  presentador casi no dispara su cámara.
+- Al apagar el auricular, la cámara vuelve sola al micrófono del celular.
+
+**Si falla:** `[Mic] usando: …` / `[Mic] no se pudo cambiar…` en la cámara. Si el auricular no aparece en la lista:
+falta el permiso «Dispositivos cercanos» (Ajustes → Apps → Samba Air → Permisos).

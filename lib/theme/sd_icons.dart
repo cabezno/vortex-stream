@@ -9,10 +9,12 @@ class SdIcons {
   static const arrowLeft = IconData(0xe058, fontFamily: _f);
   static const arrowsClockwise = IconData(0xe094, fontFamily: _f);
   static const article = IconData(0xe0a8, fontFamily: _f);
+  static const bluetooth = IconData(0xe0da, fontFamily: _f);
   static const broadcast = IconData(0xe0f2, fontFamily: _f);
   static const cameraRotate = IconData(0xe7a4, fontFamily: _f);
   static const caretDown = IconData(0xe136, fontFamily: _f);
   static const caretRight = IconData(0xe13a, fontFamily: _f);
+  static const check = IconData(0xe182, fontFamily: _f);
   static const circle = IconData(0xe18a, fontFamily: _f);
   static const clipboardText = IconData(0xe198, fontFamily: _f);
   static const clockCounterClockwise = IconData(0xe1a0, fontFamily: _f);

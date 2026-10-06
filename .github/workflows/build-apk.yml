@@ -87,6 +87,8 @@ jobs:
               "android.permission.CHANGE_WIFI_MULTICAST_STATE",
            "android.permission.CHANGE_WIFI_STATE","android.permission.ACCESS_FINE_LOCATION",
            "android.permission.ACCESS_COARSE_LOCATION","android.permission.NEARBY_WIFI_DEVICES",
+           # Bluetooth headset as the camera's microphone (plan §4): see it, open its voice channel.
+           "android.permission.BLUETOOTH_CONNECT","android.permission.MODIFY_AUDIO_SETTINGS",
           ]
           inject = "".join(
               f'    <uses-permission android:name="{p}"/>\n' for p in perms

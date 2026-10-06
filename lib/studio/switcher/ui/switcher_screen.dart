@@ -788,6 +788,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                           final isActive = cam.id == activePeerId;
                           final isPreview = cam.id == previewPeerId;
                           final rx = _subscriber.received[cam.id];
+                          final mic = _roomHost.camInfo[cam.id]?.mic ?? 'phone';
+                          final headset = mic != 'phone';
                           // The switcher's own camera uses its local renderer; remote ones, the subscriber's.
                           final isLocal = cam.id == _localCam.peerId;
                           final camRenderer = isLocal ? _localCam.renderer : _subscriber.getRenderer(cam.id);
@@ -846,8 +848,18 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                         const Center(child: Icon(SdIcons.videoCameraSlash, color: Sd.t3, size: 22)),
                                       // Audio level: a thin bar (green → amber when loud)
                                       Row(children: [
-                                        Icon(SdIcons.microphone, size: 13,
-                                            color: level > 0.66 ? Sd.amber : Sd.t2),
+                                        // Which microphone the camera uses: a headset shows its icon and name.
+                                        Tooltip(
+                                          message: headset ? 'Micrófono: $mic' : 'Micrófono del celular',
+                                          child: Icon(headset ? SdIcons.bluetooth : SdIcons.microphone, size: 13,
+                                              color: headset ? Sd.cyan : level > 0.66 ? Sd.amber : Sd.t2),
+                                        ),
+                                        if (headset) ...[
+                                          const SizedBox(width: 4),
+                                          ConstrainedBox(constraints: const BoxConstraints(maxWidth: 70),
+                                              child: Text(mic, style: SdText.caption.copyWith(color: Sd.cyan),
+                                                  overflow: TextOverflow.ellipsis)),
+                                        ],
                                         const SizedBox(width: 6),
                                         Expanded(child: ClipRRect(
                                           borderRadius: BorderRadius.circular(2),

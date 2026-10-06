@@ -8,6 +8,7 @@ import '../../../services/device_capabilities.dart';
 import '../audio/vad_reporter.dart';
 import '../control/control_client.dart';
 import '../transport/publisher.dart';
+import 'mic_picker.dart';
 import 'qr_scanner_sheet.dart';
 
 class CameraScreen extends StatefulWidget {
@@ -27,6 +28,8 @@ class _CameraScreenState extends State<CameraScreen> {
   final TextEditingController _nameController = TextEditingController(text: 'Cámara 1');
   bool _isRendererReady = false;
   CameraFacing _facing = CameraFacing.back;
+  MicChoice _mic = MicChoice.phone;
+  bool _btSeen = false;
 
   @override
   void initState() {
@@ -56,6 +59,18 @@ class _CameraScreenState extends State<CameraScreen> {
       _localRenderer.srcObject = stream;
       setState(() {});
     };
+    // A headset linked while the camera is open: offer it (one headset per presenter, plan §4).
+    navigator.mediaDevices.ondevicechange = (_) async {
+      final mics = await MicPicker.list();
+      final bt = mics.where((m) => m.kind == MicKind.bluetooth).firstOrNull;
+      if (bt == null) { _btSeen = false; if (_mic.kind == MicKind.bluetooth) _setMic(MicChoice.phone); return; }
+      if (_btSeen || _mic.kind == MicKind.bluetooth || !mounted) return;
+      _btSeen = true;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Auricular conectado: ${bt.label}'),
+        action: SnackBarAction(label: 'Usarlo como micrófono', onPressed: () => _setMic(bt)),
+      ));
+    };
     DeviceCapabilities.instance.ensure(cameraGranted: false).then((_) {
       _publisher.maxHeight = DeviceCapabilities.instance.maxSendHeight;
       if (_control.isConnected) _sendCamInfo();
@@ -64,7 +79,25 @@ class _CameraScreenState extends State<CameraScreen> {
 
   /// Tells the switcher what this camera is (see CamInfoMessage).
   void _sendCamInfo() {
-    _control.sendMessage(CamInfoMessage(peerId: _control.peerId, maxHeight: _publisher.maxHeight));
+    _control.sendMessage(CamInfoMessage(peerId: _control.peerId, maxHeight: _publisher.maxHeight, mic: _mic.infoName));
+  }
+
+  Future<void> _setMic(MicChoice m) async {
+    try {
+      await MicPicker.use(m);
+      if (!mounted) return;
+      setState(() => _mic = m);
+      if (_control.isConnected) _sendCamInfo();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo usar ${m.label}: $e')));
+      }
+    }
+  }
+
+  Future<void> _pickMic() async {
+    final m = await MicPicker.show(context, _mic);
+    if (m != null && m.id != _mic.id) await _setMic(m);
   }
 
   Future<void> _initCamera() async {
@@ -234,8 +267,30 @@ class _CameraScreenState extends State<CameraScreen> {
                         icon: const Icon(SdIcons.cameraRotate, color: Sd.t1),
                         tooltip: 'Girar cámara',
                       ),
-                      Expanded(child: Text(_control.peerId, textAlign: TextAlign.center,
-                          style: SdText.label, overflow: TextOverflow.ellipsis)),
+                      // Microphone: which one + its live level (talk: the bar must move).
+                      Expanded(child: InkWell(
+                        borderRadius: BorderRadius.circular(Sd.r3),
+                        onTap: _pickMic,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          child: Row(children: [
+                            Icon(_mic.icon, size: 18, color: _mic.kind == MicKind.phone ? Sd.t1 : Sd.cyan),
+                            const SizedBox(width: 8),
+                            Flexible(child: Text(_mic.label, style: SdText.label, overflow: TextOverflow.ellipsis)),
+                            const SizedBox(width: 8),
+                            SizedBox(width: 48, child: ClipRRect(
+                              borderRadius: BorderRadius.circular(2),
+                              child: LinearProgressIndicator(
+                                value: ((_control.currentDbfs + 60) / 60).clamp(0.0, 1.0), minHeight: 3,
+                                backgroundColor: const Color(0x33FFFFFF),
+                                valueColor: const AlwaysStoppedAnimation<Color>(Sd.green),
+                              ),
+                            )),
+                            const SizedBox(width: 4),
+                            const Icon(SdIcons.caretDown, size: 14, color: Sd.t2),
+                          ]),
+                        ),
+                      )),
                       IconButton(
                         onPressed: _control.disconnect,
                         icon: const Icon(SdIcons.x, color: Sd.red),
