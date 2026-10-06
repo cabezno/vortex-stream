@@ -1,7 +1,25 @@
 # Plan — conexión cámaras ↔ switcher y calidad sin cortes
 
 Fecha: 2026-10-05. Origen: pruebas con tres celulares (Xiaomi, Mi A3, Galaxy A10) del 2026-10-04 y conversación con
-el usuario. Estado: **planificado, sin empezar**. Nada de esto está implementado todavía.
+el usuario.
+
+**Estado 2026-10-06: todo lo de abajo está DESARROLLADO** (sin probar en equipos salvo §1). Cómo probar cada cosa:
+`docs/PRUEBAS-PENDIENTES.md` (P1–P10).
+
+| § | Qué | Estado |
+|---|---|---|
+| 1 | Red propia del switcher (hotspot + QR + WebRTC por esa red) | ✅ probado 10-05 (1 cámara) |
+| 2 | PGM/PVW: vista previa, corte instantáneo, calidad por rol | desarrollado (P1) |
+| 3 | Programa 4K, cámara al aire en 4K | desarrollado (P2) |
+| 4 | Micrófono por presentador (auricular Bluetooth / cable) | desarrollado (P3) |
+| 5 / 5b | Sincronía: alinear a la más lenta + medir con pitidos | desarrollado (P4) |
+| 6 | Cámara USB / capturadora HDMI | desarrollado (P5) |
+| — | Corte por audio como SAMBA (tabla, «Solo micrófono», planos) | desarrollado (P6) |
+| — | Imagen derecha a 270° (SRT/SBL/RTMP) | desarrollado (P7) |
+| — | Unirse a mano a la red propia (Android ≤ 9) | desarrollado (P8) |
+| — | NFC: emparejar acercando los celulares | desarrollado (P9) |
+| — | Reconexión automática de la cámara | desarrollado (P10) |
+| — | Bluetooth LE de respaldo / Wi-Fi Direct | evaluados: no se hacen por ahora (ver al final) |
 
 ## Principios (acordados con el usuario)
 
@@ -148,3 +166,13 @@ Relación: SAMBA (PC) tiene pendiente la prueba de «palmada» de sincronía (T1
 - **NFC:** como **emparejamiento por contacto**, alternativa al QR.
 - **A comparar con mediciones** (mismos celulares, misma ubicación): router vs hotspot local vs Wi-Fi Direct —
   pérdida de paquetes, fps recibidos, pausas máximas, temperatura y batería del switcher en 30 min.
+
+### Decisión 2026-10-06 tras desarrollar el resto
+- **Bluetooth LE de respaldo (control / tally):** con la reconexión automática de la cámara (P10) un corte de Wi-Fi
+  típico se recupera solo en segundos; BLE sumaría un servidor GATT, permisos de anuncio/escaneo y una segunda vía de
+  estado para cubrir cortes largos poco frecuentes. **No se hace** salvo que las pruebas muestren cortes largos.
+- **Wi-Fi Direct:** no aporta frente a la red propia del switcher: la misma limitación de WebRTC (interfaz que Android
+  no informa como red — ya resuelta para cualquier interfaz por WebRtcOwnNetwork) y más pasos para el usuario
+  (invitaciones que aceptar). **Se queda la red propia.** Si una prueba con 3+ cámaras muestra que el hotspot local
+  satura, se mide Wi-Fi Direct contra él con el mismo procedimiento.
+- **NFC:** hecho (P9).
