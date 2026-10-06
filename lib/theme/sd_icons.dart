@@ -20,6 +20,7 @@ class SdIcons {
   static const clipboardText = IconData(0xe198, fontFamily: _f);
   static const clockCounterClockwise = IconData(0xe1a0, fontFamily: _f);
   static const columns = IconData(0xe546, fontFamily: _f);
+  static const contactlessPayment = IconData(0xed42, fontFamily: _f);
   static const copy = IconData(0xe1ca, fontFamily: _f);
   static const copySimple = IconData(0xe1cc, fontFamily: _f);
   static const desktop = IconData(0xe560, fontFamily: _f);

@@ -62,6 +62,10 @@ class VortexCamPlugin(
     private val textureRegistry: TextureRegistry,
 ) : MethodChannel.MethodCallHandler {
 
+    // For NFC pairing (reader mode needs the activity) and native → Dart callbacks.
+    private var activity: java.lang.ref.WeakReference<FlutterActivity>? = null
+    private var channel: MethodChannel? = null
+
     // ---- Camera ----
     private var cameraManager:   CameraManager?            = null
     private var cameraDevice:    CameraDevice?             = null
@@ -172,8 +176,9 @@ class VortexCamPlugin(
                 activity.applicationContext,
                 flutterEngine.renderer,
             )
-            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
-                .setMethodCallHandler(plugin)
+            plugin.activity = java.lang.ref.WeakReference(activity)
+            plugin.channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+                .also { it.setMethodCallHandler(plugin) }
         }
     }
 
@@ -231,6 +236,32 @@ class VortexCamPlugin(
                 } catch (e: Exception) { result.success(false) }
             }
             "sdkInt" -> result.success(android.os.Build.VERSION.SDK_INT)
+            // NFC pairing (NfcPairing.kt): the switcher advertises its QR JSON as a card, a camera reads it.
+            "nfcInfo" -> {
+                val a = activity?.get()
+                result.success(mapOf("available" to (a != null && NfcPairing.available(a)),
+                                     "enabled" to (a != null && NfcPairing.enabled(a))))
+            }
+            "nfcSetPayload" -> {
+                NfcPairing.payload = call.argument<String>("json")?.toByteArray(Charsets.UTF_8)
+                result.success(true)
+            }
+            "nfcStartReader" -> {
+                val a = activity?.get()
+                if (a == null) { result.success(false); return }
+                NfcPairing.startReader(a) { json ->
+                    android.os.Handler(android.os.Looper.getMainLooper()).post { channel?.invokeMethod("nfcPayload", json) }
+                }
+                result.success(true)
+            }
+            "nfcStopReader" -> { activity?.get()?.let { NfcPairing.stopReader(it) }; result.success(true) }
+            "openNfcSettings" -> {
+                try {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_NFC_SETTINGS)
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    result.success(true)
+                } catch (e: Exception) { result.success(false) }
+            }
             "probeCapabilities" -> thread(name = "DeviceCaps") {
                 val caps = try { DeviceCaps.probe(context) } catch (e: Exception) { mapOf("error" to (e.message ?: "")) }
                 android.os.Handler(android.os.Looper.getMainLooper()).post { result.success(caps) }

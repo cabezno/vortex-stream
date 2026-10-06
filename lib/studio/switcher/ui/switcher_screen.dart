@@ -11,6 +11,7 @@ import 'package:qr_flutter/qr_flutter.dart';
 import '../../../theme/samba_theme.dart';
 import '../../../services/device_capabilities.dart';
 import '../../common/camera_picker.dart';
+import '../../../services/nfc_pairing.dart';
 import '../encode/program_encoder.dart';
 import '../local/local_camera.dart';
 import '../mixer/program_mixer.dart';
@@ -59,6 +60,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
       if (!on) {
         await _native.invokeMethod('stopHotspot');
         setState(() => _hotspot = null);
+        _advertiseNfc();
         return;
       }
       // Android asks for location (up to 12) or nearby-devices (13+) permission to create a network.
@@ -69,6 +71,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
       final r = Map<String, dynamic>.from(await _native.invokeMethod<Map>('startHotspot') ?? const {});
       if (r['ok'] == true && (r['ssid'] as String?)?.isNotEmpty == true) {
         setState(() => _hotspot = r);
+        _advertiseNfc();
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('No se pudo crear la red propia: ${r['error'] ?? 'sin detalle'}')));
@@ -81,6 +84,9 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
       if (mounted) setState(() => _hotspotBusy = false);
     }
   }
+
+  /// A camera touching this phone (NFC) gets the same as the QR: room address and own network.
+  void _advertiseNfc() => NfcPairing.advertise(_pairingJson);
 
   /// One line about the switcher's own network (name + band), or null when off.
   String? get _hotspotLine {
@@ -201,6 +207,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
       debugPrint('[IP] interfaces=${interfaces.map((i) => "${i.name}:${i.addresses.map((a) => a.address).join(",")}").join(" | ")}');
       debugPrint('[IP] elegida=$chosen (wlan=$wlan home=$home priv=$priv any=$any)');
       if (mounted) setState(() => _localIp = chosen);
+      _advertiseNfc();
     } catch (e) {
       debugPrint('[IP] error detectando IP: $e');
     }
@@ -234,8 +241,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 crossAxisAlignment: landscape ? CrossAxisAlignment.start : CrossAxisAlignment.center, children: [
               Text('$_roomIp : 8088', style: SdText.heading),
               const SizedBox(height: 4),
-              Text('En otro celular: Samba Air → Cámara → Switcher (celular)', style: SdText.caption,
-                  textAlign: landscape ? TextAlign.start : TextAlign.center),
+              Text('En otro celular: Samba Air → Cámara → Switcher (celular). Con NFC, también acercando los celulares.',
+                  style: SdText.caption, textAlign: landscape ? TextAlign.start : TextAlign.center),
               const SizedBox(height: 12),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero, dense: true,
@@ -633,6 +640,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   @override
   void dispose() {
     if (_hotspot != null) _native.invokeMethod('stopHotspot').catchError((_) => null);
+    NfcPairing.advertise(null);
     _mixer.removeListener(_syncNativeCameraSources);
     _director.removeListener(_syncNativeCameraSources);
     _subscriber.removeListener(_syncNativeCameraSources);

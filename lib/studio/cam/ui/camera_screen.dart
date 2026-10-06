@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:samba_protocol/samba_protocol.dart';
 import '../../../services/device_capabilities.dart';
+import '../../../services/nfc_pairing.dart';
 import '../audio/vad_reporter.dart';
 import '../control/control_client.dart';
 import '../transport/publisher.dart';
@@ -19,7 +20,7 @@ class CameraScreen extends StatefulWidget {
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen> {
+class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver {
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   late final WebRtcPublisher _publisher;
   late final CameraControlClient _control;
@@ -66,6 +67,8 @@ class _CameraScreenState extends State<CameraScreen> {
 
     _initCamera();
     _setupControlListeners();
+    _startNfc();
+    WidgetsBinding.instance.addObserver(this);
     // What this phone can send (4K on air): measured once per Android build / app version.
     _publisher.onCaptureChanged = (stream) {
       if (!mounted) return;
@@ -141,6 +144,46 @@ class _CameraScreenState extends State<CameraScreen> {
       ),
     );
     return r == true;
+  }
+
+  /// A switcher's pairing data, from its QR or by touching it (NFC): join its own network if it has one, then the room.
+  Future<void> _onPairing(PairingPayload payload) async {
+    if (_control.isConnected || !mounted) return;
+    // Keep ip:port from the QR (not just the ip) so the port is not lost.
+    setState(() => _ipController.text = '${payload.ip}:${payload.port}');
+    if (payload.hasWifi) {
+      // The switcher made its own network: join it first (Android shows its confirmation once).
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.showSnackBar(SnackBar(content: Text('Uniéndose a la red del switcher «${payload.wifiSsid}»…')));
+      bool ok = false;
+      try {
+        ok = await const MethodChannel('com.vortex.vortexcam/native').invokeMethod<bool>('connectWifi',
+            {'ssid': payload.wifiSsid, 'password': payload.wifiPassword ?? ''}) ?? false;
+      } catch (_) {}
+      if (!ok) {
+        // Android 9 and older cannot join from an app, or the user said no: guide the manual join.
+        if (!mounted) return;
+        final joined = await _manualWifiJoin(payload.wifiSsid!, payload.wifiPassword ?? '');
+        if (!joined) return;
+      }
+    }
+    _connect();
+  }
+
+  /// NFC on this phone: null = no NFC; enabled false = present but switched off.
+  ({bool available, bool enabled})? _nfc;
+
+  Future<void> _startNfc() async {
+    final i = await NfcPairing.info();
+    if (!mounted) return;
+    setState(() => _nfc = i.available ? i : null);
+    if (i.available && i.enabled) {
+      await NfcPairing.listen((json) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Switcher detectado por NFC')));
+        _onPairing(PairingPayload.parse(json));
+      });
+    }
   }
 
   /// Tells the switcher what this camera is (see CamInfoMessage).
@@ -260,8 +303,16 @@ class _CameraScreenState extends State<CameraScreen> {
     setState(() {});
   }
 
+  /// Back from Settings (NFC may have just been switched on): listen again.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && !_control.isConnected) _startNfc();
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    NfcPairing.stopListening();
     _vadReporter.dispose();
     _localRenderer.dispose();
     _publisher.dispose();
@@ -427,6 +478,20 @@ class _CameraScreenState extends State<CameraScreen> {
       const Text('Unirse a un switcher', style: SdText.heading),
       const SizedBox(height: 2),
       const Text('Escaneá su QR o escribí su IP.', style: SdText.caption),
+      if (_nfc != null) ...[
+        const SizedBox(height: 6),
+        InkWell(
+          onTap: _nfc!.enabled ? null : () async { await NfcPairing.openSettings(); },
+          child: Row(children: [
+            Icon(SdIcons.contactlessPayment, size: 16, color: _nfc!.enabled ? Sd.cyan : Sd.t3),
+            const SizedBox(width: 6),
+            Flexible(child: Text(_nfc!.enabled
+                ? 'O acercá este celular al switcher (por la parte de atrás).'
+                : 'NFC apagado: tocá para activarlo y emparejar acercando los celulares.',
+                style: SdText.caption.copyWith(color: _nfc!.enabled ? Sd.cyan : Sd.t2))),
+          ]),
+        ),
+      ],
       const SizedBox(height: 6),
       SwitchListTile(
         contentPadding: EdgeInsets.zero, dense: true,
@@ -450,27 +515,7 @@ class _CameraScreenState extends State<CameraScreen> {
                   icon: const Icon(SdIcons.qrCode, color: Sd.magenta, size: 22),
                   tooltip: 'Escanear el QR del switcher',
                   onPressed: () {
-                    QrScannerSheet.show(context, onScanned: (payload) async {
-                      // Keep ip:port from the QR (not just the ip) so the port is not lost.
-                      setState(() => _ipController.text = '${payload.ip}:${payload.port}');
-                      if (payload.hasWifi) {
-                        // The switcher made its own network: join it first (Android shows its confirmation once).
-                        final messenger = ScaffoldMessenger.of(context);
-                        messenger.showSnackBar(SnackBar(content: Text('Uniéndose a la red del switcher «${payload.wifiSsid}»…')));
-                        bool ok = false;
-                        try {
-                          ok = await const MethodChannel('com.vortex.vortexcam/native').invokeMethod<bool>('connectWifi',
-                              {'ssid': payload.wifiSsid, 'password': payload.wifiPassword ?? ''}) ?? false;
-                        } catch (_) {}
-                        if (!ok) {
-                          // Android 9 and older cannot join from an app, or the user said no: guide the manual join.
-                          if (!mounted) return;
-                          final joined = await _manualWifiJoin(payload.wifiSsid!, payload.wifiPassword ?? '');
-                          if (!joined) return;
-                        }
-                      }
-                      _connect();
-                    });
+                    QrScannerSheet.show(context, onScanned: _onPairing);
                   },
                 ),
                 IconButton(

@@ -89,6 +89,7 @@ jobs:
            "android.permission.ACCESS_COARSE_LOCATION","android.permission.NEARBY_WIFI_DEVICES",
            # Bluetooth headset as the camera's microphone (plan §4): see it, open its voice channel.
            "android.permission.BLUETOOTH_CONNECT","android.permission.MODIFY_AUDIO_SETTINGS",
+           "android.permission.NFC",
           ]
           inject = "".join(
               f'    <uses-permission android:name="{p}"/>\n' for p in perms
@@ -100,6 +101,28 @@ jobs:
               s = s.replace("</application>",
                   '    <service android:name=".StreamKeepAliveService" android:exported="false"'
                   ' android:foregroundServiceType="camera|microphone"/>\n    </application>', 1)
+          # NFC pairing (NfcPairing.kt): the switcher answers as an NFC card (HCE) with its pairing JSON.
+          import os as _os
+          _os.makedirs('android/app/src/main/res/values', exist_ok=True)
+          open('android/app/src/main/res/values/samba_nfc.xml', 'w', encoding='utf-8').write(
+              '<resources><string name="samba_nfc">Samba Air</string></resources>\n')
+          _os.makedirs('android/app/src/main/res/xml', exist_ok=True)
+          open('android/app/src/main/res/xml/samba_apdu.xml', 'w', encoding='utf-8').write(
+              '<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"\n'
+              '    android:description="@string/samba_nfc" android:requireDeviceUnlock="false">\n'
+              '  <aid-group android:description="@string/samba_nfc" android:category="other">\n'
+              '    <aid-filter android:name="F0534D424101"/>\n'
+              '  </aid-group>\n</host-apdu-service>\n')
+          if 'PairingHceService' not in s:
+              s = s.replace('</application>',
+                  '    <service android:name=".PairingHceService" android:exported="true"'
+                  ' android:permission="android.permission.BIND_NFC_SERVICE">\n'
+                  '        <intent-filter><action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE"/></intent-filter>\n'
+                  '        <meta-data android:name="android.nfc.cardemulation.host_apdu_service" android:resource="@xml/samba_apdu"/>\n'
+                  '    </service>\n    </application>', 1)
+          if 'android.hardware.nfc' not in s:
+              s = s.replace('<application', '<uses-feature android:name="android.hardware.nfc" android:required="false"/>\n'
+                  '    <uses-feature android:name="android.hardware.nfc.hce" android:required="false"/>\n    <application', 1)
           if "usesCleartextTraffic" not in s:
               s = s.replace("<application", '<application android:usesCleartextTraffic="true"', 1)
           # Set app label (flutter create uses the project name as label)

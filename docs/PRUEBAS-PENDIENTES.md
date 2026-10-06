@@ -157,3 +157,21 @@ tocando «Cancelar» cuando Android pregunta si conectarse), escaneá el QR del 
 
 **Si falla:** si entra a Ajustes pero al volver no se une: el celular se pasó de nuevo al Wi-Fi de la casa
 («sin internet»); elegir «mantener conectado» en el aviso de Android.
+
+## P9. Emparejar acercando los celulares (NFC)
+
+**Necesita:** NFC en el switcher (para «ser» la tarjeta) y en la cámara (para leerla), los dos con NFC activado.
+
+**Cómo:** switcher abierto (con o sin red propia). En la cámara: Cámara → Switcher (celular), en la pantalla de unirse.
+Apoyá la parte de atrás de la cámara contra la del switcher 1–2 segundos.
+
+**Qué tenés que ver:**
+- En la tarjeta de unirse de la cámara: «O acercá este celular al switcher» (celeste). Si NFC está apagado: «NFC
+  apagado: tocá para activarlo…» → abre Ajustes; al volver, ya escucha.
+- Al acercarlos: «Switcher detectado por NFC» y sigue sola como con el QR (se une a la red propia si la hay, entra a
+  la sala).
+- En un celular sin NFC no aparece la línea.
+
+**Si falla:** `NfcPairing` en el registro de la cámara («read N chars from the switcher» / «not a Samba switcher» /
+«read failed»). Si dice «not a Samba switcher»: el switcher no tiene la pantalla del switcher abierta o su NFC está
+apagado. Probar distintas posiciones (la antena suele estar al centro o arriba).
