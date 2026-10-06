@@ -199,13 +199,8 @@ class VortexCamPlugin(
             // Preview only (what goes to SAMBA is untouched): clockwise degrees to show the camera upright.
             "previewRotation" -> {
                 val sensor = cachedSensorOrientation
-                val disp = try {
-                    (context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
-                        .getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: 0
-                } catch (e: Exception) { 0 }
-                val dispDeg = disp * 90
-                val rot = if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) (sensor + dispDeg) % 360
-                          else (sensor - dispDeg + 360) % 360
+                val dispDeg = displayDegrees()
+                val rot = uprightDegrees()
                 result.success(mapOf("rotation" to rot, "sensor" to sensor, "display" to dispDeg,
                     "front" to (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT)))
             }
@@ -327,7 +322,7 @@ class VortexCamPlugin(
     private fun startPreviewSession() {
         val dev = cameraDevice ?: return
         val surfaces = mutableListOf(previewSurface ?: return)
-        if (encoderSurface != null) surfaces.add(encoderSurface!!)
+        (relay?.inputSurface ?: encoderSurface)?.let { surfaces.add(it) }
         try { dev.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(session: CameraCaptureSession) {
                 // The camera may have been closed (flip, stop, camera service death) while this session was being
@@ -383,6 +378,7 @@ class VortexCamPlugin(
                 cachedSensorOrientation = try {
                     cameraManager?.getCameraCharacteristics(cameraId)?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
                 } catch (e: Exception) { 90 }
+                updateRelayRotation()   // front and back cameras turn opposite ways
                 startPreviewSession()   // preview + (if streaming) the same encoder surface
                 val facing = if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) "frontal" else "trasera"
                 val msg = "[flip] cámara $facing (id $cameraId, sensor $cachedSensorOrientation°), transmisión ${if (streaming.get()) "sigue" else "no activa"}\n"
@@ -426,6 +422,32 @@ class VortexCamPlugin(
     // ====================================================================
     // Shared encode setup
     // ====================================================================
+    private fun displayDegrees(): Int = try {
+        ((context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+            .getDisplay(android.view.Display.DEFAULT_DISPLAY)?.rotation ?: 0) * 90
+    } catch (e: Exception) { 0 }
+
+    /** Clockwise degrees that turn the camera's raw frame upright (front cameras turn the other way). */
+    private fun uprightDegrees(): Int {
+        val sensor = cachedSensorOrientation; val d = displayDegrees()
+        return if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) (sensor + d) % 360 else (sensor - d + 360) % 360
+    }
+
+    // Pixel rotation for the stream (RotatingRelay): the phone held in either landscape gives 0 or 180.
+    private var relay: RotatingRelay? = null
+    private var displayListener: android.hardware.display.DisplayManager.DisplayListener? = null
+    private fun updateRelayRotation() {
+        val r = uprightDegrees()
+        relay?.rotation = if (r == 180) 180 else 0
+    }
+    private fun releaseRelay() {
+        displayListener?.let {
+            try { (context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager)
+                .unregisterDisplayListener(it) } catch (_: Exception) {}
+        }
+        displayListener = null
+        relay?.release(); relay = null
+    }
     // Returns the rotation angle (0/90/180/270) to apply to the encoder so that
     // VortexEngine receives upright video regardless of how the phone is held.
     private fun encoderRotationDegrees(): Int {
@@ -542,13 +564,28 @@ class VortexCamPlugin(
                     if (android.os.Build.VERSION.SDK_INT >= 30)
                         setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 }
-                if (rotation != 0)
+                // Portrait (90/270) keeps the old metadata hint; landscape either way is turned in PIXELS by the relay.
+                if (rotation == 90 || rotation == 270)
                     setInteger(MediaFormat.KEY_ROTATION, rotation)
             }
             encoder = MediaCodec.createEncoderByType(mime)
             encoder!!.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             encoderSurface = encoder!!.createInputSurface()
             encoder!!.start()
+            // Camera → relay → encoder, so a phone in reverse landscape is not upside down in SAMBA (SRT/SBL/RTMP).
+            releaseRelay()
+            relay = try { RotatingRelay(encoderSurface!!, encW, encH) }
+                    catch (e: Exception) { Log.w(TAG, "RotatingRelay unavailable (${e.message}): direct to the encoder"); null }
+            if (relay != null) {
+                updateRelayRotation()
+                val dm = context.getSystemService(Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+                displayListener = object : android.hardware.display.DisplayManager.DisplayListener {
+                    override fun onDisplayAdded(id: Int) {}
+                    override fun onDisplayRemoved(id: Int) {}
+                    override fun onDisplayChanged(id: Int) { updateRelayRotation() }
+                }.also { dm.registerDisplayListener(it, android.os.Handler(android.os.Looper.getMainLooper())) }
+                Log.i(TAG, "Stream turned in pixels: ${relay?.rotation}°")
+            }
 
             // Restart camera session with encoder surface
             captureSession?.close()
@@ -559,6 +596,7 @@ class VortexCamPlugin(
             lastEncoderError = "${width}x${height}: $e" + (e.cause?.let { " ← $it" } ?: "")
             try { encoder?.release() } catch (_: Exception) {}
             encoder = null
+            releaseRelay()
             encoderSurface = null
             false
         }
@@ -585,6 +623,7 @@ class VortexCamPlugin(
         try { encoder?.signalEndOfInputStream() } catch (_: Exception) {}
         try { encoder?.stop(); encoder?.release() } catch (_: Exception) {}
         encoder = null
+        releaseRelay()
         encoderSurface?.release(); encoderSurface = null
         srtSocket?.close(); srtSocket = null
         srtMuxer = null

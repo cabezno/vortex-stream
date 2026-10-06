@@ -131,3 +131,16 @@ CÁMARA» y «PLANOS ESPECIALES». Switcher en **AUTO**.
 
 **Si falla:** el «Solo micrófono» no aparece en la fila: versión vieja de la app en ese celular. Si no se escucha en
 el programa: `ProgramAudio: Mic-only phones in the mix: N` en el registro del switcher (N debe ser ≥ 1 al emitir).
+
+## P7. Imagen derecha con el celular girado (SRT / SBL / RTMP a SAMBA)
+
+**Cómo:** modo **Cámara → SAMBA (PC)** por SRT (y repetir con SBL). Transmitir con el celular apaisado normal; girarlo
+180° (apaisado al revés) **sin cortar**; volver. Repetir con la cámara frontal.
+
+**Qué tenés que ver:**
+- En SAMBA la imagen siempre **derecha**, en las dos posiciones apaisadas, y se acomoda sola al girar (en < 1 s).
+- La cámara frontal también derecha (antes podía estar al revés: se usaba la fórmula de la trasera).
+- En retrato sigue como antes (la imagen apaisada de lado: pendiente aparte).
+
+**Si falla:** `RotatingRelay` / `Stream turned in pixels: 180°` en el registro del celular. «RotatingRelay unavailable»
+= el celular no pudo armar el paso por GPU y va directo al codificador como antes.
