@@ -8,6 +8,7 @@ import '../../../services/device_capabilities.dart';
 import '../audio/vad_reporter.dart';
 import '../control/control_client.dart';
 import '../transport/publisher.dart';
+import '../../common/camera_picker.dart';
 import 'mic_picker.dart';
 import 'qr_scanner_sheet.dart';
 
@@ -167,7 +168,25 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  /// Choose the camera: back / front / a USB camera or HDMI capture (CameraPicker).
+  Future<void> _pickCamera() async {
+    final c = await CameraPicker.show(context, currentId: _publisher.deviceId);
+    if (c == null) return;
+    _publisher.deviceId = c.id;
+    _facing = c.facing == 'front' ? CameraFacing.front : CameraFacing.back;
+    try {
+      final stream = await _publisher.switchCamera(_facing);
+      _localRenderer.srcObject = stream;
+      if (mounted) setState(() {});
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo abrir ${c.label}: $e')));
+      }
+    }
+  }
+
   Future<void> _flipCamera() async {
+    _publisher.deviceId = null;   // back to the phone's own cameras
     _facing = _facing == CameraFacing.back ? CameraFacing.front : CameraFacing.back;
     // Re-abre la cámara y re-cablea el sender con replaceTrack (sin renegociar):
     // el switcher recibe la nueva cámara sin cortar ni irse a negro.
@@ -266,6 +285,11 @@ class _CameraScreenState extends State<CameraScreen> {
                         onPressed: _flipCamera,
                         icon: const Icon(SdIcons.cameraRotate, color: Sd.t1),
                         tooltip: 'Girar cámara',
+                      ),
+                      IconButton(
+                        onPressed: _pickCamera,
+                        icon: Icon(SdIcons.camera, color: _publisher.deviceId != null ? Sd.cyan : Sd.t1),
+                        tooltip: 'Elegir cámara (USB / HDMI)',
                       ),
                       // Microphone: which one + its live level (talk: the bar must move).
                       Expanded(child: InkWell(

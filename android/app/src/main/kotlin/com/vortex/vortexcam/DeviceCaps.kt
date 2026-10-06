@@ -87,6 +87,33 @@ object DeviceCaps {
         } catch (e: Exception) { Log.w(TAG, "camera caps: ${e.message}"); null }
     }
 
+    /**
+     * Every camera Android exposes NOW, with its id (what getUserMedia's deviceId takes), facing — back / front /
+     * external (a USB camera or HDMI capture dongle, UVC) — and largest 16:9 size; plus whether this phone supports
+     * external cameras at all (FEATURE_CAMERA_EXTERNAL — many makers leave it out, then a USB camera never appears).
+     */
+    fun listCameras(ctx: Context): Map<String, Any?> {
+        val cams = ArrayList<Map<String, Any?>>()
+        try {
+            val cm = ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            for (id in cm.cameraIdList) {
+                val ch = cm.getCameraCharacteristics(id)
+                val facing = when (ch.get(CameraCharacteristics.LENS_FACING)) {
+                    CameraCharacteristics.LENS_FACING_BACK -> "back"
+                    CameraCharacteristics.LENS_FACING_FRONT -> "front"
+                    else -> "external"
+                }
+                val sizes = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                    ?.getOutputSizes(SurfaceTexture::class.java) ?: emptyArray()
+                val best = sizes.filter { kotlin.math.abs(it.width * 9 - it.height * 16) <= it.height / 10 }
+                    .maxByOrNull { it.width * it.height } ?: sizes.maxByOrNull { it.width * it.height }
+                cams.add(mapOf("id" to id, "facing" to facing, "max" to best?.let { "${it.width}x${it.height}" }))
+            }
+        } catch (e: Exception) { Log.w(TAG, "listCameras: ${e.message}") }
+        val ext = ctx.packageManager.hasSystemFeature("android.hardware.camera.external")
+        return mapOf("cameras" to cams, "externalSupported" to ext)
+    }
+
     /** OMT encodes on the CPU (VMX): time a 1080p frame to know what this CPU sustains. */
     private fun omtCaps(): Map<String, Any?> {
         if (!OmtStreamPlugin.nativeAvailable) return mapOf("available" to false, "reason" to "falta la librería VMX")

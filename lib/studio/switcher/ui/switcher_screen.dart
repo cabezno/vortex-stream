@@ -9,6 +9,7 @@ import '../../../theme/sd_icons.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../../../theme/samba_theme.dart';
 import '../../../services/device_capabilities.dart';
+import '../../common/camera_picker.dart';
 import '../encode/program_encoder.dart';
 import '../local/local_camera.dart';
 import '../mixer/program_mixer.dart';
@@ -104,6 +105,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _mixer.addListener(_syncNativeCameraSources);
     _sync.addListener(_syncNativeCameraSources);
     _roomHost.addListener(_syncNativeCameraSources);
+    _localCam.addListener(_localCamChanged);
     _director.addListener(_syncNativeCameraSources);
     _subscriber.addListener(_syncNativeCameraSources);
 
@@ -152,6 +154,12 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     );
   }
   Object? _lastSources;
+
+  /// The local camera re-opened (flip / another camera): same renderer, NEW track — resend even if ids look equal.
+  void _localCamChanged() {
+    _lastSources = null;
+    _syncNativeCameraSources();
+  }
 
   Future<void> _detectLocalIp() async {
     try {
@@ -571,6 +579,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _subscriber.removeListener(_syncNativeCameraSources);
     _sync.removeListener(_syncNativeCameraSources);
     _roomHost.removeListener(_syncNativeCameraSources);
+    _localCam.removeListener(_localCamChanged);
     _sync.dispose();
 
     _localCam.dispose();
@@ -618,6 +627,15 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                     icon: const Icon(SdIcons.cameraRotate),
                     tooltip: 'Girar cámara local',
                     onPressed: () => _localCam.flip(),
+                  ),
+                if (on)
+                  IconButton(
+                    icon: Icon(SdIcons.camera, color: _localCam.deviceId != null ? Sd.cyan : null),
+                    tooltip: 'Elegir cámara local (USB / HDMI)',
+                    onPressed: () async {
+                      final c = await CameraPicker.show(context, currentId: _localCam.deviceId);
+                      if (c != null) await _localCam.useDevice(c.id, front: c.facing == 'front');
+                    },
                   ),
               ]);
             },

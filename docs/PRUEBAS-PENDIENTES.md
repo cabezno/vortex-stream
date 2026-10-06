@@ -92,3 +92,20 @@ lo mismo (un reloj con segundero en pantalla, o alguien aplaudiendo). Botón **c
 **Si falla:** `SyncProbe` en el registro del switcher («Cam: beeps heard 3/3 → 180 ms»); si oye 0/3, el audio de esa
 cámara no llega al switcher (¿micrófono apagado?) o el switcher sonó muy bajo. `[SourceSync]` con el resultado.
 `StudioSwitcher: Program primary … (delay N ms)` al cortar.
+
+## P5. Cámara USB / capturadora HDMI
+
+**Necesita:** una webcam USB o una capturadora HDMI→USB (UVC) y, si el celular es USB-C, un adaptador OTG.
+
+**Cómo:** en la **cámara de Studio**, botón de cámara (al lado de girar) → lista. En el **switcher**, con la cámara
+local encendida, el mismo botón arriba. Enchufá la cámara USB y tocá **buscar de nuevo** (flechas) en la lista.
+
+**Qué tenés que ver:**
+- La lista con «Trasera» (o «Trasera 1/2/3» si el celular tiene varias lentes), «Frontal» y, con la USB enchufada,
+  **«Cámara USB / HDMI · hasta 1920x1080»**. Elegirla: la imagen pasa a la de la cámara USB (el botón queda celeste).
+- Si el celular no soporta cámaras externas: el texto «Este celular no reconoce cámaras USB… su fabricante no activó
+  esa función». (Es esperable en muchos; anotar cuáles sí: probar los 3.)
+- En el switcher, la cámara local USB entra al programa (cortá a ella y mirá lo que se emite/graba).
+
+**Si falla:** `DeviceCaps: listCameras` en el registro. Si la USB figura pero no abre: `FlutterWebRTCPlugin` (error
+del capturer). Anotar el modelo de cámara USB.

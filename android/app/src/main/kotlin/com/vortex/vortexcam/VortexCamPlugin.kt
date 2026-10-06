@@ -226,6 +226,7 @@ class VortexCamPlugin(
             // Changes when Android or the app is updated → the capability probe must run again.
             "capsStamp" -> result.success(DeviceCaps.stamp(context))
             // What this phone can do (encoders, cameras, OMT speed) — the app offers only what works.
+            "listCameras" -> result.success(DeviceCaps.listCameras(context))
             "probeCapabilities" -> thread(name = "DeviceCaps") {
                 val caps = try { DeviceCaps.probe(context) } catch (e: Exception) { mapOf("error" to (e.message ?: "")) }
                 android.os.Handler(android.os.Looper.getMainLooper()).post { result.success(caps) }

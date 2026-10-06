@@ -11,6 +11,7 @@ class SdIcons {
   static const article = IconData(0xe0a8, fontFamily: _f);
   static const bluetooth = IconData(0xe0da, fontFamily: _f);
   static const broadcast = IconData(0xe0f2, fontFamily: _f);
+  static const camera = IconData(0xe10e, fontFamily: _f);
   static const cameraRotate = IconData(0xe7a4, fontFamily: _f);
   static const caretDown = IconData(0xe136, fontFamily: _f);
   static const caretRight = IconData(0xe13a, fontFamily: _f);
@@ -43,6 +44,8 @@ class SdIcons {
   static const squaresFour = IconData(0xe464, fontFamily: _f);
   static const stop = IconData(0xe46c, fontFamily: _f);
   static const timer = IconData(0xe492, fontFamily: _f);
+  static const usb = IconData(0xe956, fontFamily: _f);
+  static const userFocus = IconData(0xe6fc, fontFamily: _f);
   static const videoCamera = IconData(0xe4da, fontFamily: _f);
   static const videoCameraSlash = IconData(0xe4dc, fontFamily: _f);
   static const waveform = IconData(0xe802, fontFamily: _f);

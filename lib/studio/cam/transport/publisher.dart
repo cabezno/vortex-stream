@@ -20,6 +20,9 @@ class WebRtcPublisher {
   /// re-opening the camera at every cut would freeze the picture for a moment).
   int _captureW = SimulcastLayers.highWidth, _captureH = SimulcastLayers.highHeight;
 
+  /// A camera chosen by id (a USB camera / HDMI capture, or a specific lens): overrides [CameraFacing].
+  String? deviceId;
+
   /// Highest height this phone can send (its hardware encoder AND its camera, measured — DeviceCapabilities).
   int maxHeight = 1080;
 
@@ -71,7 +74,8 @@ class WebRtcPublisher {
         'autoGainControl': true,
       },
       'video': {
-        'facingMode': facing == CameraFacing.back ? 'environment' : 'user',
+        if (deviceId != null) 'deviceId': deviceId
+        else 'facingMode': facing == CameraFacing.back ? 'environment' : 'user',
         // Plain numbers, not {'ideal': N}: flutter_webrtc (GetUserMediaImpl.getConstrainInt, 1.6.2) looks for "ideal"
         // in the OUTER map, so a map is ignored and it falls back to its 1280x720 default — that is why WHIP and the
         // Studio camera always arrived at 720p (found 2026-10-04). A number is a target: the camera takes the closest

@@ -22,6 +22,8 @@ class LocalCameraSource extends ChangeNotifier {
   MediaStream? _stream;
   bool _active = false;
   bool _facingFront = true;
+  /// A camera chosen by id (USB camera / HDMI capture plugged into the switcher, or a specific lens).
+  String? deviceId;
   bool _rendererReady = false;
   Timer? _keepAlive;
 
@@ -62,10 +64,12 @@ class LocalCameraSource extends ChangeNotifier {
     final constraints = <String, dynamic>{
       'audio': false,
       'video': {
-        'facingMode': _facingFront ? 'user' : 'environment',
-        'width': {'ideal': 1280},
-        'height': {'ideal': 720},
-        'frameRate': {'ideal': 30},
+        if (deviceId != null) 'deviceId': deviceId
+        else 'facingMode': _facingFront ? 'user' : 'environment',
+        // Plain numbers (flutter_webrtc ignores {'ideal': N} and falls back to 720p): the program is 1080p.
+        'width': 1920,
+        'height': 1080,
+        'frameRate': 30,
       },
     };
     _stream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -78,8 +82,17 @@ class LocalCameraSource extends ChangeNotifier {
   /// con re-apuntar el renderer al stream nuevo.)
   Future<void> flip() async {
     if (!_active) return;
+    deviceId = null;
     _facingFront = !_facingFront;
     await _openCamera();
+    notifyListeners();
+  }
+
+  /// Uses the camera [id] (CameraPicker); [front] for the mirror hint only.
+  Future<void> useDevice(String id, {bool front = false}) async {
+    deviceId = id;
+    _facingFront = front;
+    if (_active) await _openCamera();
     notifyListeners();
   }
 
