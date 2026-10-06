@@ -175,3 +175,15 @@ Apoyá la parte de atrás de la cámara contra la del switcher 1–2 segundos.
 **Si falla:** `NfcPairing` en el registro de la cámara («read N chars from the switcher» / «not a Samba switcher» /
 «read failed»). Si dice «not a Samba switcher»: el switcher no tiene la pantalla del switcher abierta o su NFC está
 apagado. Probar distintas posiciones (la antena suele estar al centro o arriba).
+
+## P10. La cámara se reconecta sola
+
+**Cómo:** cámara unida al switcher. (a) En la cámara, apagá el Wi-Fi 5 s y volvé a prenderlo. (b) Cerrá el switcher
+y volvé a abrirlo (modo Switcher). (c) Tocá la X de la cámara (salir a propósito).
+
+**Qué tenés que ver:**
+- (a) y (b): la cámara muestra «RECONECTANDO…» (ámbar) y «Se perdió el switcher: reconectando sola…» con un botón
+  Salir; vuelve sola en segundos, con el mismo nombre en el multiview.
+- (c): NO reintenta: vuelve a la tarjeta de unirse.
+
+**Si falla:** `[Camera] sin conexión con el switcher: reintento en N s` en el registro de la cámara.

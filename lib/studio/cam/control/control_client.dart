@@ -50,6 +50,12 @@ class CameraControlClient extends ChangeNotifier {
 
   /// Connect to Switcher WebSocket room server via IP, host:port, ws:// URI, or QR JSON
   Future<void> connect(String target, {int defaultPort = 8088}) async {
+    // A retry after a dropped connection: drop the dead channel first.
+    _stopTimers();
+    await _subscription?.cancel();
+    _subscription = null;
+    try { await _channel?.sink.close(); } catch (_) {}
+    _channel = null;
     _state = CameraConnectionState.connecting;
     _errorMessage = '';
     notifyListeners();

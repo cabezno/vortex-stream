@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../../theme/sd_icons.dart';
 import '../../../theme/samba_theme.dart';
@@ -67,6 +68,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
 
     _initCamera();
     _setupControlListeners();
+    _control.addListener(_onControlChanged);
     _startNfc();
     WidgetsBinding.instance.addObserver(this);
     // What this phone can send (4K on air): measured once per Android build / app version.
@@ -259,7 +261,36 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     };
   }
 
+  /// The user joined a room and has not left it: a dropped connection (Wi-Fi blip, switcher restarted) is retried
+  /// by itself — before, the camera stayed «SIN CONEXIÓN» until someone tapped «Unirse» again (2026-10-06).
+  bool _wantRoom = false;
+  Timer? _retry;
+  int _retries = 0;
+
+  void _onControlChanged() {
+    if (!_wantRoom || !mounted) return;
+    if (_control.isConnected) { _retries = 0; return; }
+    if (_retry != null) return;
+    final wait = Duration(seconds: [2, 4, 8][_retries.clamp(0, 2)]);
+    debugPrint('[Camera] sin conexión con el switcher: reintento en ${wait.inSeconds} s');
+    _retry = Timer(wait, () async {
+      _retry = null;
+      _retries++;
+      if (_wantRoom && !_control.isConnected && mounted) await _connect();
+      if (mounted) setState(() {});
+    });
+    setState(() {});
+  }
+
+  void _leave() {
+    _wantRoom = false;
+    _retry?.cancel(); _retry = null; _retries = 0;
+    _control.disconnect();
+    setState(() {});
+  }
+
   Future<void> _connect() async {
+    _wantRoom = true;
     _control.name = _nameController.text;
     await _control.connect(_ipController.text.trim());
 
@@ -312,6 +343,8 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _retry?.cancel();
+    _control.removeListener(_onControlChanged);
     NfcPairing.stopListening();
     _vadReporter.dispose();
     _localRenderer.dispose();
@@ -394,7 +427,9 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
                     const Spacer(),
                     connected
                         ? const SdPill('CONECTADO', color: Sd.green, icon: SdIcons.plugsConnected)
-                        : const SdPill('SIN CONEXIÓN', color: Sd.t3, icon: SdIcons.plugs),
+                        : _wantRoom
+                            ? const SdPill('RECONECTANDO…', color: Sd.amber, icon: SdIcons.arrowsClockwise)
+                            : const SdPill('SIN CONEXIÓN', color: Sd.t3, icon: SdIcons.plugs),
                   ]);
                 },
               ),
@@ -406,6 +441,20 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
               child: ListenableBuilder(
                 listenable: _control,
                 builder: (context, _) {
+                  if (!_control.isConnected && _wantRoom) {
+                    // Lost the switcher: retrying by itself (or leave).
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(color: const Color(0xCC000000), borderRadius: BorderRadius.circular(Sd.r3),
+                          border: Border.all(color: Sd.wash(Sd.amber, 0.6))),
+                      child: Row(children: [
+                        const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.6, color: Sd.amber)),
+                        const SizedBox(width: 10),
+                        const Expanded(child: Text('Se perdió el switcher: reconectando sola…', style: SdText.label)),
+                        TextButton(onPressed: _leave, child: const Text('Salir')),
+                      ]),
+                    );
+                  }
                   if (!_control.isConnected) return _joinCard(context);
                   return Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
@@ -450,7 +499,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
                         ),
                       )),
                       IconButton(
-                        onPressed: _control.disconnect,
+                        onPressed: _leave,
                         icon: const Icon(SdIcons.x, color: Sd.red),
                         tooltip: 'Salir de la sala',
                       ),
