@@ -80,6 +80,55 @@ class ProgramAudioEncoder(
         }
     }
 
+    /**
+     * A «Solo micrófono» phone (a presenter's dedicated microphone, 2026-10-06): ALWAYS in the mix, whatever camera
+     * is on air — its own ring, resampler and alignment delay.
+     */
+    private inner class TrackInput(val track: AudioTrack) : AudioTrackSink {
+        val ring = Ring()
+        private var pos = 0.0; private var lastL = 0f; private var lastR = 0f
+        override fun onData(data: ByteBuffer, bits: Int, rate: Int, ch: Int, frames: Int, absTimeMs: Long) {
+            if (bits != 16 || ch < 1 || rate <= 0) return
+            val s = data.duplicate().order(ByteOrder.nativeOrder()).asShortBuffer()
+            if (rate == SAMPLE_RATE) {
+                for (i in 0 until frames) {
+                    val l = s.get(i * ch) / 32768f
+                    ring.write(l, if (ch > 1) s.get(i * ch + 1) / 32768f else l)
+                }
+                return
+            }
+            val step = rate.toDouble() / SAMPLE_RATE
+            var p = pos
+            while (p < frames) {
+                val i = p.toInt(); val f = (p - i).toFloat()
+                val l1 = s.get(i * ch) / 32768f; val r1 = if (ch > 1) s.get(i * ch + 1) / 32768f else l1
+                val l0 = if (i == 0) lastL else s.get((i - 1) * ch) / 32768f
+                val r0 = if (i == 0) lastR else (if (ch > 1) s.get((i - 1) * ch + 1) / 32768f else l0)
+                ring.write(l0 + (l1 - l0) * f, r0 + (r1 - r0) * f)
+                p += step
+            }
+            pos = p - frames
+            lastL = s.get((frames - 1) * ch) / 32768f
+            lastR = if (ch > 1) s.get((frames - 1) * ch + 1) / 32768f else lastL
+        }
+    }
+    private val micTracks = java.util.concurrent.CopyOnWriteArrayList<TrackInput>()
+
+    /** The «Solo micrófono» phones' tracks with their alignment delays; others are dropped. */
+    fun setMicTracks(tracks: List<Pair<AudioTrack, Int>>) {
+        for (m in micTracks) if (tracks.none { it.first === m.track }) {
+            try { m.track.removeSink(m) } catch (_: Exception) {}
+            micTracks.remove(m)
+        }
+        for ((t, d) in tracks) {
+            val m = micTracks.firstOrNull { it.track === t } ?: TrackInput(t).also {
+                try { t.addSink(it); micTracks.add(it) } catch (e: Exception) { Log.w(TAG, "mic track addSink: ${e.message}") }
+            }
+            m.ring.delayFrames = framesOf(d)
+        }
+        Log.i(TAG, "Mic-only phones in the mix: ${micTracks.size}")
+    }
+
     @Volatile var useMic = useMic
         private set
     @Volatile var useCamera = useCamera
@@ -230,6 +279,7 @@ class ProgramAudioEncoder(
             java.util.Arrays.fill(mix, 0f)
             if (useCamera) camRing.mixInto(mix, FRAME, 1f)
             if (useMic && micRunning.get()) micRing.mixInto(mix, FRAME, 1f)
+            for (m in micTracks) m.ring.mixInto(mix, FRAME, 1f)
             for (i in mix.indices) {
                 val v = (mix[i].coerceIn(-1f, 1f) * 32767f).toInt()
                 pcm[i * 2] = v.toByte(); pcm[i * 2 + 1] = (v shr 8).toByte()
@@ -272,6 +322,7 @@ class ProgramAudioEncoder(
     fun stop() {
         running.set(false)
         setCameraTrack(null)
+        setMicTracks(emptyList())
         stopMic()
         try { clockThread?.join(500) } catch (_: InterruptedException) {}
         try { codec?.stop() } catch (_: Exception) {}

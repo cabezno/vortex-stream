@@ -30,6 +30,18 @@ class _CameraScreenState extends State<CameraScreen> {
   bool _isRendererReady = false;
   CameraFacing _facing = CameraFacing.back;
   MicChoice _mic = MicChoice.phone;
+  /// «Solo micrófono»: this phone joins as a dedicated microphone (no video).
+  bool _micOnly = false;
+
+  Future<void> _setMicOnly(bool v) async {
+    if (_control.isConnected || v == _micOnly) return;
+    setState(() { _micOnly = v; _isRendererReady = false; });
+    _publisher.audioOnly = v;
+    _control.role = v ? PeerRole.mic : PeerRole.camera;
+    final stream = await _publisher.initMediaStream(facing: _facing);
+    _localRenderer.srcObject = v ? null : stream;
+    if (mounted) setState(() => _isRendererReady = true);
+  }
   bool _btSeen = false;
 
   @override
@@ -216,7 +228,25 @@ class _CameraScreenState extends State<CameraScreen> {
             // 1. Camera viewport
             // Center, NOT Positioned.fill: with the preview stretched to the whole Stack the engine stops producing
             // frames on the Galaxy A10 and the Mi A3 (screen fully black, everything NEEDS-PAINT, no error) — 2026-10-05.
-            Center(
+            if (_micOnly)
+              // A dedicated microphone: a big level meter instead of the picture (talk: it must move).
+              Center(child: ListenableBuilder(listenable: _control, builder: (context, _) {
+                final level = ((_control.currentDbfs + 60) / 60).clamp(0.0, 1.0);
+                return Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(_mic.icon, size: 56, color: level > 0.1 ? Sd.green : Sd.t3),
+                  const SizedBox(height: 12),
+                  Text('SOLO MICRÓFONO', style: SdText.overline.copyWith(color: Sd.t2, letterSpacing: 1.4)),
+                  const SizedBox(height: 10),
+                  SizedBox(width: 220, child: ClipRRect(borderRadius: BorderRadius.circular(3),
+                    child: LinearProgressIndicator(value: _control.isConnected ? level : 0, minHeight: 6,
+                        backgroundColor: const Color(0x33FFFFFF),
+                        valueColor: AlwaysStoppedAnimation<Color>(level > 0.8 ? Sd.amber : Sd.green)))),
+                  const SizedBox(height: 6),
+                  Text(_control.isConnected ? '${_control.currentDbfs.toStringAsFixed(0)} dB' : 'sin conexión',
+                      style: SdText.caption),
+                ]);
+              }))
+            else Center(
               child: _isRendererReady
                   ? RTCVideoView(
                       _localRenderer,
@@ -251,7 +281,7 @@ class _CameraScreenState extends State<CameraScreen> {
                             ? const SdPill('VISTA PREVIA', color: Sd.green, icon: SdIcons.eye)
                             : const SdPill('EN ESPERA', color: Sd.t2, icon: SdIcons.circle),
                     // What this phone is sending: high only while on air / in preview / second camera of a split.
-                    if (connected) ...[
+                    if (connected && !_micOnly) ...[
                       const SizedBox(width: 6),
                       SdPill(_publisher.sentHeight > 0
                           ? '${high ? 'CALIDAD ALTA' : 'CALIDAD BAJA'} · ${_publisher.sentHeight}p'
@@ -281,12 +311,12 @@ class _CameraScreenState extends State<CameraScreen> {
                       border: Border.all(color: Sd.borderStrong),
                     ),
                     child: Row(children: [
-                      IconButton(
+                      if (!_micOnly) IconButton(
                         onPressed: _flipCamera,
                         icon: const Icon(SdIcons.cameraRotate, color: Sd.t1),
                         tooltip: 'Girar cámara',
                       ),
-                      IconButton(
+                      if (!_micOnly) IconButton(
                         onPressed: _pickCamera,
                         icon: Icon(SdIcons.camera, color: _publisher.deviceId != null ? Sd.cyan : Sd.t1),
                         tooltip: 'Elegir cámara (USB / HDMI)',
@@ -344,7 +374,16 @@ class _CameraScreenState extends State<CameraScreen> {
       const Text('Unirse a un switcher', style: SdText.heading),
       const SizedBox(height: 2),
       const Text('Escaneá su QR o escribí su IP.', style: SdText.caption),
-      const SizedBox(height: 14),
+      const SizedBox(height: 6),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero, dense: true,
+        title: const Text('Solo micrófono', style: SdText.bodyHi),
+        subtitle: const Text('Este celular capta la voz de un presentador, sin video. En el switcher se elige a qué '
+            'cámara corta cuando habla.', style: SdText.caption),
+        value: _micOnly,
+        onChanged: _setMicOnly,
+      ),
+      const SizedBox(height: 8),
       Row(children: [
         Expanded(
           flex: 2,

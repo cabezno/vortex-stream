@@ -149,6 +149,11 @@ class ProgramEncoder extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// «Solo micrófono» phones: received audio track id → alignment delay (ms). Always mixed into the program.
+  Future<void> setMicTracks(Map<String, int> tracks) async {
+    try { if (!kIsWeb) await _channel.invokeMethod('setMicTracks', {'tracks': tracks}); } catch (_) {}
+  }
+
   /// Plays beeps on this phone's loudspeaker and times them in each camera's audio: peerId → end-to-end latency in
   /// ms (null = that camera did not hear them). [audioTrackIds]: peerId → its received audio track id.
   Future<Map<String, int?>> measureLatency(Map<String, String> audioTrackIds) async {

@@ -95,6 +95,10 @@ class HardwareProgramEncoder(
     private var cameraAudioDelayMs = 0
     private var micDelayMs = 0
     fun setCameraAudioDelay(ms: Int) { cameraAudioDelayMs = ms; audio?.setCameraDelay(ms) }
+    /** «Solo micrófono» phones, always in the program mix, each with its alignment delay. */
+    private var micTracks: List<Pair<org.webrtc.AudioTrack, Int>> = emptyList()
+    fun setMicTracks(tracks: List<Pair<org.webrtc.AudioTrack, Int>>) { micTracks = tracks; audio?.setMicTracks(tracks) }
+
     /** The switcher's own microphone, held to line up with the cameras (they arrive later than it). */
     fun setMicDelay(ms: Int) { micDelayMs = ms; audio?.setMicDelay(ms) }
 
@@ -249,6 +253,7 @@ class HardwareProgramEncoder(
             audioReady = false
             if (pa.start()) {
                 audio = pa; pa.setCameraTrack(cameraAudioTrack, cameraAudioDelayMs); pa.setMicDelay(micDelayMs)
+                pa.setMicTracks(micTracks)
             } else audioReady = true
         }
 

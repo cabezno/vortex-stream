@@ -51,7 +51,7 @@ class SourceSync extends ChangeNotifier {
   /// The latency everything is aligned to: the slowest connected camera, capped.
   int get targetMs {
     var t = 0;
-    for (final c in roomHost.cameras) {
+    for (final c in [...roomHost.cameras, ...roomHost.mics]) {
       final l = latencyOf(c.id)?.ms ?? 0;
       if (l <= maxMs && l > t) t = l;
     }
@@ -76,7 +76,7 @@ class SourceSync extends ChangeNotifier {
   Future<void> measure() async {
     if (_measuring) return;
     final tracks = <String, String>{};
-    for (final c in roomHost.cameras) {
+    for (final c in [...roomHost.cameras, ...roomHost.mics]) {
       if (c.id == localPeerId) continue;
       final a = subscriber.remoteStreams[c.id]?.getAudioTracks() ?? const [];
       if (a.isNotEmpty && a.first.id != null) tracks[c.id] = a.first.id!;

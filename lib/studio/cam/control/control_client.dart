@@ -10,6 +10,8 @@ enum CameraConnectionState { disconnected, connecting, connected, error }
 class CameraControlClient extends ChangeNotifier {
   final String peerId;
   String name;
+  /// camera, or mic for a phone that only sends audio («Solo micrófono»).
+  PeerRole role = PeerRole.camera;
 
   CameraConnectionState _state = CameraConnectionState.disconnected;
   WebSocketChannel? _channel;
@@ -81,7 +83,7 @@ class CameraControlClient extends ChangeNotifier {
       sendMessage(JoinMessage(
         peerId: peerId,
         name: name,
-        role: PeerRole.camera,
+        role: role,
       ));
 
       _startTimers();

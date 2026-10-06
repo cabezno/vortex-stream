@@ -38,6 +38,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private var primaryAudioTrackId: String? = null
     private var primaryAudioDelayMs = 0
     private var micDelayMs = 0
+    private var micTracks: List<Pair<org.webrtc.AudioTrack, Int>> = emptyList()
     private var secondaryTrack: VideoTrack? = null
 
     private fun register() {
@@ -66,6 +67,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                         )
                         encoder.setCameraAudioTrack(primaryAudioTrack, primaryAudioDelayMs)
                         encoder.setMicDelay(micDelayMs)
+                        encoder.setMicTracks(micTracks)
                         encoder.primarySink = primarySink
                         encoder.secondarySink = secondarySink
                         encoder.rtmpStreamer = rtmpStreamer
@@ -96,6 +98,13 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                     val tracks = ids.mapNotNull { (peer, id) -> audioTrackById(id)?.let { peer to it } }.toMap()
                     if (tracks.isEmpty()) { result.success(emptyMap<String, Int?>()); return@setMethodCallHandler }
                     SyncProbe { r -> result.success(r) }.run(tracks)
+                }
+                // «Solo micrófono» phones: {trackId: delayMs}, always mixed into the program.
+                "setMicTracks" -> {
+                    val m = call.argument<Map<String, Int>>("tracks") ?: emptyMap()
+                    micTracks = m.mapNotNull { (id, d) -> audioTrackById(id)?.let { it to d } }
+                    programEncoder?.setMicTracks(micTracks)
+                    result.success(true)
                 }
                 "setAudioSources" -> {
                     programEncoder?.setAudioSources(call.argument<Boolean>("mic") ?: false,

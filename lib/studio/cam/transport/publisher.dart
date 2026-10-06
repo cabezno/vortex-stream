@@ -23,6 +23,9 @@ class WebRtcPublisher {
   /// A camera chosen by id (a USB camera / HDMI capture, or a specific lens): overrides [CameraFacing].
   String? deviceId;
 
+  /// «Solo micrófono»: this phone sends only audio (a presenter's dedicated microphone, PeerRole.mic).
+  bool audioOnly = false;
+
   /// Highest height this phone can send (its hardware encoder AND its camera, measured — DeviceCapabilities).
   int maxHeight = 1080;
 
@@ -73,7 +76,7 @@ class WebRtcPublisher {
         'noiseSuppression': true,
         'autoGainControl': true,
       },
-      'video': {
+      'video': audioOnly ? false : {
         if (deviceId != null) 'deviceId': deviceId
         else 'facingMode': facing == CameraFacing.back ? 'environment' : 'user',
         // Plain numbers, not {'ideal': N}: flutter_webrtc (GetUserMediaImpl.getConstrainInt, 1.6.2) looks for "ideal"
@@ -87,6 +90,7 @@ class WebRtcPublisher {
     };
 
     _localStream = await navigator.mediaDevices.getUserMedia(constraints);
+    if (audioOnly) return _localStream!;
     // The size the camera really gave (the low layer is a fraction of it).
     try {
       final st = _localStream!.getVideoTracks().first.getSettings();
@@ -137,7 +141,7 @@ class WebRtcPublisher {
     _peerConnection!.onConnectionState = (state) {
       debugPrint('[WebRtcPublisher] PeerConnection state: $state');
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected &&
-          !_encoderKickChecked) {
+          !_encoderKickChecked && !audioOnly) {
         _encoderKickChecked = true;
         _maybeKickEncoder();
       }

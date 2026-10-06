@@ -103,5 +103,47 @@ void main() {
       expect(res!.targetPeerId, 'cam2');
       expect(res.reason, contains('Desempate por volumen'));
     });
+
+    test('Mic → camera table: a mic cuts to its assigned camera', () {
+      final config = SwitcherConfig(autoSwitch: true, holdSec: 0, onsetMs: 50,
+          micToCamera: {'micA': 'cam2', 'cam1': ''});
+      final events = <SwitchEvent>[];
+      final engine = AudioSwitcherEngine(config: config, onSwitch: events.add);
+      engine.setPeers(['cam1', 'cam2', 'micA']);
+      engine.micOnly.add('micA');
+      // cam1's own mic is set to never cut
+      engine.feedRms({'cam1': -20}, 100);
+      engine.tick(0.1);
+      expect(events, isEmpty);
+      // the mic-only phone micA cuts to cam2
+      engine.feedRms({'cam1': -80, 'micA': -20}, 100);
+      engine.tick(0.1);
+      expect(events.single.targetPeerId, 'cam2');
+    });
+
+    test('A mic-only phone with no entry does not cut', () {
+      final engine = AudioSwitcherEngine(config: SwitcherConfig(autoSwitch: true, holdSec: 0, onsetMs: 50));
+      engine.setPeers(['cam1', 'micB']);
+      engine.micOnly.add('micB');
+      expect(engine.targetOf('micB'), isNull);
+      expect(engine.targetOf('cam1'), 'cam1');
+    });
+
+    test('Two mics of the same camera are one speaker (no overlap shot)', () {
+      final config = SwitcherConfig(autoSwitch: true, holdSec: 0, onsetMs: 50, overlapPeerId: 'wide',
+          micToCamera: {'micA': 'cam1'});
+      final events = <SwitchEvent>[];
+      final engine = AudioSwitcherEngine(config: config, onSwitch: events.add);
+      engine.setPeers(['cam1', 'micA', 'wide']);
+      engine.micOnly.add('micA');
+      engine.feedRms({'cam1': -20, 'micA': -22}, 100);
+      engine.tick(0.1);
+      expect(events.single.targetPeerId, 'cam1');
+    });
+
+    test('SwitcherConfig keeps the mic table through JSON', () {
+      final c = SwitcherConfig.fromJson(SwitcherConfig(micToCamera: {'m': 'c', 'x': ''}).toJson());
+      expect(c.micToCamera, {'m': 'c', 'x': ''});
+    });
   });
 }

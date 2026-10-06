@@ -110,6 +110,16 @@ class AudioSwitcherEngine {
     }
   }
 
+  /// Microphones that are NOT a camera's own (mic-only phones): with no table entry they do not cut.
+  final Set<String> micOnly = {};
+
+  /// The camera [micId] cuts to, or null if it never cuts.
+  String? targetOf(String micId) {
+    final t = config.micToCamera[micId];
+    if (t != null) return t.isEmpty ? null : t;
+    return micOnly.contains(micId) ? null : micId;
+  }
+
   /// Feed current measured RMS (in dBFS) for a specific peer.
   /// [dtMs] is the time elapsed since last measurement (e.g. ~50ms or ~100ms).
   void feedPeerRms(String peerId, double rmsDb, double dtMs) {
@@ -152,9 +162,10 @@ class AudioSwitcherEngine {
 
     _holdTimerSec += dtSec;
 
-    // Collect active peers
-    final activeTracks = _tracks.values.where((t) => t.enabled && t.active).toList();
-    final activeCount = activeTracks.length;
+    // Collect active microphones, and the cameras they ask for (mic → camera table; a mic with no entry asks for its
+    // own camera, '' = never cuts). Two mics of the same camera talking is ONE speaker for the overlap rule.
+    final activeTracks = _tracks.values.where((t) => t.enabled && t.active && targetOf(t.peerId) != null).toList();
+    final activeCount = activeTracks.map((t) => targetOf(t.peerId)).toSet().length;
 
     if (activeCount > 0) {
       _silenceTimerSec = 0.0;
@@ -184,13 +195,14 @@ class AudioSwitcherEngine {
             loudest = activeTracks[i];
           }
         }
-        desiredPeerId = loudest.peerId;
+        desiredPeerId = targetOf(loudest.peerId);
         switchReason = 'Desempate por volumen: ${loudest.peerId} más fuerte (${loudest.rmsDb.toStringAsFixed(1)} dBFS)';
       }
     } else {
       // Exactly 1 speaker active
-      final single = activeTracks.first;
-      desiredPeerId = single.peerId;
+      // One camera asked (maybe by several of its mics): the loudest of them names the reason.
+      final single = activeTracks.reduce((a, b) => a.rmsDb >= b.rmsDb ? a : b);
+      desiredPeerId = targetOf(single.peerId);
       switchReason = 'Orador activo en ${single.peerId} (${single.rmsDb.toStringAsFixed(1)} dBFS)';
     }
 

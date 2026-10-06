@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -146,6 +147,16 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
       pd: _sync.delayFor(primaryPeerId), sd: _sync.delayFor(secondaryPeerId), vd: _sync.delayFor(previewPeerId),
       md: _sync.micDelayMs,
     );
+    // «Solo micrófono» phones: always in the program mix, aligned like the cameras.
+    final micTracks = <String, int>{};
+    for (final m in _roomHost.mics) {
+      final a = _subscriber.remoteStreams[m.id]?.getAudioTracks() ?? const [];
+      if (a.isNotEmpty && a.first.id != null) micTracks[a.first.id!] = _sync.delayFor(m.id);
+    }
+    if (!mapEquals(micTracks, _lastMicTracks)) {
+      _lastMicTracks = micTracks;
+      _encoder.setMicTracks(micTracks);
+    }
     if (args == _lastSources) return;   // the room/subscriber notify often: only send changes
     _lastSources = args;
     _encoder.setCameraSources(
@@ -154,6 +165,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     );
   }
   Object? _lastSources;
+  Map<String, int>? _lastMicTracks;
 
   /// The local camera re-opened (flip / another camera): same renderer, NEW track — resend even if ids look equal.
   void _localCamChanged() {
@@ -385,6 +397,53 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 slider('Tiempo para silencio', '${silence.toStringAsFixed(1)} s', silence, 1, 6, 25, (val) {
                   setModalState(() => silence = val); _director.updateConfig(silenceSec: val);
                 }),
+                // Mic → camera table (like SAMBA): every microphone — each camera's own and the «Solo micrófono»
+                // phones — and the camera it cuts to.
+                const SizedBox(height: 8),
+                Text('QUÉ MICRÓFONO CORTA A QUÉ CÁMARA', style: SdText.overline),
+                const SizedBox(height: 6),
+                if (_roomHost.cameras.isEmpty && _roomHost.mics.isEmpty)
+                  const Text('Sin cámaras ni micrófonos todavía.', style: SdText.caption),
+                for (final mic in [..._roomHost.cameras, ..._roomHost.mics])
+                  Row(children: [
+                    Icon(mic.role == PeerRole.mic ? SdIcons.microphone : SdIcons.videoCamera, size: 15, color: Sd.t2),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(mic.role == PeerRole.mic ? mic.name : 'Mic de ${mic.name}',
+                        style: SdText.label.copyWith(color: Sd.t1), overflow: TextOverflow.ellipsis)),
+                    DropdownButton<String>(
+                      value: _director.micTarget(mic.id) ?? '',
+                      isDense: true,
+                      dropdownColor: Sd.raised,
+                      style: SdText.label.copyWith(color: Sd.cyan),
+                      underline: const SizedBox.shrink(),
+                      items: [
+                        for (final c in _roomHost.cameras) DropdownMenuItem(value: c.id, child: Text('→ ${c.name}')),
+                        const DropdownMenuItem(value: '', child: Text('No corta')),
+                      ],
+                      onChanged: (v) => setModalState(() => _director.setMicTarget(mic.id, v ?? '')),
+                    ),
+                  ]),
+                const SizedBox(height: 12),
+                Text('PLANOS ESPECIALES', style: SdText.overline),
+                const SizedBox(height: 4),
+                for (final (label, isOverlap) in [('Cuando hablan varios', true), ('Cuando nadie habla', false)])
+                  Row(children: [
+                    Expanded(child: Text(label, style: SdText.label.copyWith(color: Sd.t1))),
+                    DropdownButton<String>(
+                      value: (isOverlap ? cfg.overlapPeerId : cfg.silencePeerId) ?? '',
+                      isDense: true,
+                      dropdownColor: Sd.raised,
+                      style: SdText.label.copyWith(color: Sd.cyan),
+                      underline: const SizedBox.shrink(),
+                      items: [
+                        DropdownMenuItem(value: '', child: Text(isOverlap ? 'El más fuerte' : 'Quedarse')),
+                        for (final c in _roomHost.cameras) DropdownMenuItem(value: c.id, child: Text(c.name)),
+                      ],
+                      onChanged: (v) => setModalState(() => isOverlap
+                          ? _director.updateConfig(overlapPeerId: v ?? '')
+                          : _director.updateConfig(silencePeerId: v ?? '')),
+                    ),
+                  ]),
               ]),
             ),
             actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
@@ -856,6 +915,42 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                       style: SdText.caption, overflow: TextOverflow.ellipsis)),
                 ]),
               ),
+
+              // 2b. «Solo micrófono» phones: level and the camera each one cuts to (tap: the audio table).
+              if (_roomHost.mics.isNotEmpty)
+                SizedBox(height: 40, child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+                  children: [
+                    for (final m in _roomHost.mics)
+                      Padding(padding: const EdgeInsets.only(right: 8), child: InkWell(
+                        borderRadius: BorderRadius.circular(Sd.r3),
+                        onTap: _showAudioSettingsDialog,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(color: Sd.raised, borderRadius: BorderRadius.circular(Sd.r3),
+                              border: Border.all(color: Sd.border)),
+                          child: Row(mainAxisSize: MainAxisSize.min, children: [
+                            Icon(SdIcons.microphone, size: 14,
+                                color: m.lastAudioDbfs > _director.config.thresholdDbfs ? Sd.green : Sd.t2),
+                            const SizedBox(width: 6),
+                            Text(m.name, style: SdText.label.copyWith(color: Sd.t1)),
+                            const SizedBox(width: 6),
+                            SizedBox(width: 36, child: LinearProgressIndicator(
+                              value: ((m.lastAudioDbfs + 60) / 60).clamp(0.0, 1.0), minHeight: 3,
+                              backgroundColor: const Color(0x33FFFFFF),
+                              valueColor: const AlwaysStoppedAnimation<Color>(Sd.green))),
+                            const SizedBox(width: 6),
+                            Text(() {
+                              final t = _director.micTarget(m.id);
+                              final tn = t == null ? null : cameras.where((c) => c.id == t).map((c) => c.name).firstOrNull;
+                              return tn == null ? 'no corta' : '→ $tn';
+                            }(), style: SdText.caption),
+                          ]),
+                        ),
+                      )),
+                  ],
+                )),
 
               // 3. Multiview cards
               Expanded(

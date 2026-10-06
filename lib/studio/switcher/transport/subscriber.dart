@@ -154,20 +154,27 @@ class WebRtcSubscriber extends ChangeNotifier {
       }
       try {
         final reports = await p.getStats();
-        double rttS = 0, jbS = 0, decS = 0;
+        double rttS = 0, jbS = 0, decS = 0, audioJbS = 0;
+        var hasVideo = false;
         for (final r in reports) {
           final v = r.values;
           if (r.type == 'candidate-pair' && v['nominated'] == true && v['currentRoundTripTime'] is num) {
             rttS = (v['currentRoundTripTime'] as num).toDouble();
           }
+          if (r.type == 'inbound-rtp' && (v['mediaType'] == 'audio' || v['kind'] == 'audio')) {
+            final em = (v['jitterBufferEmittedCount'] as num?)?.toDouble() ?? 0;
+            if (em > 0) audioJbS = ((v['jitterBufferDelay'] as num?)?.toDouble() ?? 0) / em;
+          }
           if (r.type == 'inbound-rtp' && (v['mediaType'] == 'video' || v['kind'] == 'video')) {
+            hasVideo = true;
             final em = (v['jitterBufferEmittedCount'] as num?)?.toDouble() ?? 0;
             if (em > 0) jbS = ((v['jitterBufferDelay'] as num?)?.toDouble() ?? 0) / em;
             final fd = (v['framesDecoded'] as num?)?.toDouble() ?? 0;
             if (fd > 0) decS = ((v['totalDecodeTime'] as num?)?.toDouble() ?? 0) / fd;
           }
         }
-        final est = ((rttS / 2 + jbS + decS) * 1000).round();
+        // A «Solo micrófono» phone has no video: its audio buffer stands for it.
+        final est = ((rttS / 2 + (hasVideo ? jbS + decS : audioJbS)) * 1000).round();
         if (est > 0 && latencyEstMs[peerId] != est) { latencyEstMs[peerId] = est; notifyListeners(); }
         for (final r in reports) {
           final v = r.values;

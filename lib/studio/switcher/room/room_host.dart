@@ -30,6 +30,8 @@ class RoomHost extends ChangeNotifier {
 
   bool get isRunning => _server != null;
   List<Peer> get cameras => room.peers.values.where((p) => p.role == PeerRole.camera).toList();
+  /// Phones in «Solo micrófono»: dedicated microphones (audio only, not in the multiview).
+  List<Peer> get mics => room.peers.values.where((p) => p.role == PeerRole.mic).toList();
   String? get activePeerId => room.activePeerId;
   String? get previewPeerId => room.previewPeerId;
 

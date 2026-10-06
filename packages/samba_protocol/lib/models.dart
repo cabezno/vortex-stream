@@ -4,7 +4,9 @@ import 'dart:convert';
 
 enum PeerRole {
   camera,
-  switcher;
+  switcher,
+  /// A phone that only sends audio: a dedicated microphone for one presenter (no video, not in the multiview).
+  mic;
 
   String toJson() => name;
   static PeerRole fromJson(String value) =>
@@ -90,6 +92,9 @@ class SwitcherConfig {
   double thresholdDbfs;
   String? overlapPeerId;
   String? silencePeerId;
+  /// Which camera each microphone cuts to (like SAMBA's mic → camera table). A mic missing from the map cuts to its
+  /// own camera (a camera's mic) — a mic-only phone with no entry does not cut. Value '' = this mic never cuts.
+  Map<String, String> micToCamera;
   int crossfadeMs;
   int programWidth;
   int programHeight;
@@ -104,12 +109,13 @@ class SwitcherConfig {
     this.thresholdDbfs = -40.0,
     this.overlapPeerId,
     this.silencePeerId,
+    Map<String, String>? micToCamera,
     this.crossfadeMs = 120,
     this.programWidth = 1280,
     this.programHeight = 720,
     this.programBitrateKbps = 3500,
     this.abr = true,
-  });
+  }) : micToCamera = micToCamera ?? {};
 
   Map<String, dynamic> toJson() => {
     'autoSwitch': autoSwitch,
@@ -119,6 +125,7 @@ class SwitcherConfig {
     'thresholdDbfs': thresholdDbfs,
     if (overlapPeerId != null) 'overlapPeerId': overlapPeerId,
     if (silencePeerId != null) 'silencePeerId': silencePeerId,
+    if (micToCamera.isNotEmpty) 'micToCamera': micToCamera,
     'crossfadeMs': crossfadeMs,
     'programWidth': programWidth,
     'programHeight': programHeight,
@@ -134,6 +141,7 @@ class SwitcherConfig {
     thresholdDbfs: (json['thresholdDbfs'] as num?)?.toDouble() ?? -40.0,
     overlapPeerId: json['overlapPeerId'] as String?,
     silencePeerId: json['silencePeerId'] as String?,
+    micToCamera: (json['micToCamera'] as Map?)?.map((k, v) => MapEntry(k.toString(), v.toString())),
     crossfadeMs: json['crossfadeMs'] as int? ?? 120,
     programWidth: json['programWidth'] as int? ?? 1280,
     programHeight: json['programHeight'] as int? ?? 720,

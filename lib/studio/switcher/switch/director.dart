@@ -49,10 +49,26 @@ class Director extends ChangeNotifier {
   String? get activePeerId => roomHost.activePeerId;
   List<String> get switchHistory => List.unmodifiable(_switchHistory);
 
+  /// Every microphone the engine listens to: each camera's own and the «Solo micrófono» phones.
   void _syncPeers() {
-    final cameraIds = roomHost.cameras.map((c) => c.id).toList();
-    _engine.setPeers(cameraIds);
+    final micIds = roomHost.mics.map((m) => m.id).toList();
+    _engine.setPeers([...roomHost.cameras.map((c) => c.id), ...micIds]);
+    _engine.micOnly..clear()..addAll(micIds);
+    notifyListeners();
   }
+
+  /// Mic → camera table (null = default: a camera's mic cuts to itself, a mic-only phone does not cut; '' = never).
+  void setMicTarget(String micId, String? cameraId) {
+    if (cameraId == null) {
+      _engine.config.micToCamera.remove(micId);
+    } else {
+      _engine.config.micToCamera[micId] = cameraId;
+    }
+    notifyListeners();
+  }
+
+  /// The camera [micId] cuts to now (null = it does not cut).
+  String? micTarget(String micId) => _engine.targetOf(micId);
 
   void _startEngineLoop() {
     _engineTimer?.cancel();
@@ -138,8 +154,9 @@ class Director extends ChangeNotifier {
     if (onsetMs != null) _engine.config.onsetMs = onsetMs;
     if (holdSec != null) _engine.config.holdSec = holdSec;
     if (silenceSec != null) _engine.config.silenceSec = silenceSec;
-    if (overlapPeerId != null) _engine.config.overlapPeerId = overlapPeerId;
-    if (silencePeerId != null) _engine.config.silencePeerId = silencePeerId;
+    // '' clears the overlap / silence shot (back to: loudest speaker / stay).
+    if (overlapPeerId != null) _engine.config.overlapPeerId = overlapPeerId.isEmpty ? null : overlapPeerId;
+    if (silencePeerId != null) _engine.config.silencePeerId = silencePeerId.isEmpty ? null : silencePeerId;
     notifyListeners();
   }
 

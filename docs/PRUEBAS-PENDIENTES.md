@@ -109,3 +109,25 @@ local encendida, el mismo botón arriba. Enchufá la cámara USB y tocá **busca
 
 **Si falla:** `DeviceCaps: listCameras` en el registro. Si la USB figura pero no abre: `FlutterWebRTCPlugin` (error
 del capturer). Anotar el modelo de cámara USB.
+
+## P6. Corte por audio como SAMBA (tabla micrófono → cámara, «Solo micrófono», planos especiales)
+
+**Cómo:** switcher + 2 cámaras + 1 celular en **Cámara → Switcher (celular)** con **«Solo micrófono»** activado
+(antes de unirse). En el switcher: ajustes de audio (ícono de deslizadores) → abajo «QUÉ MICRÓFONO CORTA A QUÉ
+CÁMARA» y «PLANOS ESPECIALES». Switcher en **AUTO**.
+1. Asigná el «Solo micrófono» a la Cámara 2; poné el micrófono de la Cámara 1 en «No corta».
+2. Hablá cerca del «Solo micrófono». Después cerca de la Cámara 1.
+3. «Cuando hablan varios» → una cámara (plano general). Hablen dos a la vez.
+4. «Cuando nadie habla» → una cámara. Silencio unos segundos.
+5. Emití/grabá: el «Solo micrófono» se escucha siempre en el programa.
+
+**Qué tenés que ver:**
+- El celular «Solo micrófono»: en vez de la cámara, un micrófono grande, «SOLO MICRÓFONO» y una barra que se mueve.
+- En el switcher, una fila **MICRÓFONOS** bajo el multiview: el nombre, su nivel y «→ Cámara 2» (o «no corta»);
+  NO aparece como miniatura de cámara.
+- Paso 2: hablar en el «Solo micrófono» corta a la Cámara 2; hablar en la Cámara 1 no corta.
+- Paso 3: corta al plano elegido para «varios»; paso 4: al de «nadie habla» después del «Tiempo para silencio».
+- La barra de abajo del switcher dice por qué cortó («Orador activo en …», «Solapamiento…», «Silencio sostenido…»).
+
+**Si falla:** el «Solo micrófono» no aparece en la fila: versión vieja de la app en ese celular. Si no se escucha en
+el programa: `ProgramAudio: Mic-only phones in the mix: N` en el registro del switcher (N debe ser ≥ 1 al emitir).
