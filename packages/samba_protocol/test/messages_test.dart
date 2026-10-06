@@ -75,6 +75,14 @@ void main() {
       expect(info.clockOffsetMs, -7);
     });
 
+    test('SetLayerMessage carries the wanted height (4K on air), 1080 by default', () {
+      final m = SambaMessage.decode(const SetLayerMessage(peerId: 'c', layer: Layer.high, height: 2160).encode())
+          as SetLayerMessage;
+      expect(m.height, 2160);
+      final old = SambaMessage.decode('{"t":"set_layer","peerId":"c","layer":"high"}') as SetLayerMessage;
+      expect(old.height, 1080);
+    });
+
     test('CamInfoMessage defaults for an older camera', () {
       final info = SambaMessage.decode('{"t":"cam_info","peerId":"c"}') as CamInfoMessage;
       expect(info.mic, 'phone');

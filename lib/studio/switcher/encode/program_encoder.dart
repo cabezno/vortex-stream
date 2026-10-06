@@ -46,6 +46,14 @@ class ProgramEncoder extends ChangeNotifier {
   bool audioCamera = true;
   bool audioMic = false;
 
+  /// Program height chosen by the user: 1080, or 2160 (4K) when this phone's encoder can (Emitir dialog). Applied at
+  /// the next start; the native side still steps down if the video hardware refuses (it is shared with the decoders).
+  int programHeight = 1080;
+  bool get is4k => programHeight >= 2160;
+  int get defaultKbps => is4k ? 20000 : 6000;
+  /// Ceiling for the adaptive bitrate.
+  int get maxKbps => is4k ? 25000 : 8000;
+
   bool get isEncoding => _isEncoding;
   int get width => _width;
   int get height => _height;
@@ -66,16 +74,16 @@ class ProgramEncoder extends ChangeNotifier {
 
   /// Start hardware encoding the Program stream
   Future<void> start({
-    int width = 1920,
-    int height = 1080,
-    int bitrateKbps = 6000,
+    int? width,
+    int? height,
+    int? bitrateKbps,
     int fps = 30,
     EncoderCodec codec = EncoderCodec.h264,
     String? outputPath,
   }) async {
-    _width = width;
-    _height = height;
-    _bitrateKbps = bitrateKbps;
+    _width = width ?? (is4k ? 3840 : 1920);
+    _height = height ?? (is4k ? 2160 : 1080);
+    _bitrateKbps = bitrateKbps ?? defaultKbps;
     _fps = fps;
     _codec = codec;
 
@@ -171,7 +179,7 @@ class ProgramEncoder extends ChangeNotifier {
 
   /// Dynamically adjust target bitrate (used by Adaptive Bitrate / ABR on 5G uplink)
   Future<void> updateBitrate(int newBitrateKbps) async {
-    _bitrateKbps = newBitrateKbps.clamp(800, 8000);
+    _bitrateKbps = newBitrateKbps.clamp(800, maxKbps);
     try {
       if (!kIsWeb && _isEncoding) {
         await _channel.invokeMethod('setBitrate', {

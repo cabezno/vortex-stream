@@ -143,7 +143,8 @@ class HardwareProgramEncoder(
         // 0xffffec77) and nothing went out (2026-10-04). Detected here, live: step down until the encoder accepts.
         var codec: MediaCodec? = null
         var surface: Surface? = null
-        val ladder = listOf(width to height, 1280 to 720, 960 to 540, 640 to 360).filter { it.first <= width }.distinct()
+        val ladder = listOf(width to height, 2560 to 1440, 1920 to 1080, 1280 to 720, 960 to 540, 640 to 360)
+            .filter { it.first <= width }.distinct()
         for ((w, h) in ladder) {
             val format = MediaFormat.createVideoFormat(MIME_TYPE, w, h).apply {
                 setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)

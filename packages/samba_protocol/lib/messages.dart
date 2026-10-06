@@ -183,10 +183,14 @@ class CamInfoMessage extends SambaMessage {
 class SetLayerMessage extends SambaMessage {
   final String peerId;
   final Layer layer;
+  /// For [Layer.high]: the height the switcher wants (1080, or 2160 for the on-air camera of a 4K program). The
+  /// camera sends the closest it can — never more than its own encoder / camera measured maximum.
+  final int height;
 
   const SetLayerMessage({
     required this.peerId,
     required this.layer,
+    this.height = 1080,
   }) : super('set_layer');
 
   @override
@@ -194,11 +198,13 @@ class SetLayerMessage extends SambaMessage {
     't': t,
     'peerId': peerId,
     'layer': layer.toJson(),
+    'height': height,
   };
 
   factory SetLayerMessage.fromJson(Map<String, dynamic> json) => SetLayerMessage(
     peerId: json['peerId'] as String,
     layer: Layer.fromJson(json['layer'] as String),
+    height: (json['height'] as num?)?.toInt() ?? 1080,
   );
 }
 

@@ -14,7 +14,17 @@ class WebRtcPublisher {
   RTCRtpTransceiver? _videoTransceiver;
   Timer? _statsTimer;
   Layer _currentLayer = Layer.low;
+  int _currentHeight = 1080;               // height asked with the high layer (1080 / 2160)
   int _captureHeight = SimulcastLayers.highHeight;
+  /// Requested capture size: 1080p, raised to 4K the first time the switcher asks it (and kept for the session —
+  /// re-opening the camera at every cut would freeze the picture for a moment).
+  int _captureW = SimulcastLayers.highWidth, _captureH = SimulcastLayers.highHeight;
+
+  /// Highest height this phone can send (its hardware encoder AND its camera, measured — DeviceCapabilities).
+  int maxHeight = 1080;
+
+  /// Called after the camera was re-opened at another size (4K), so the UI re-points its preview.
+  void Function(MediaStream stream)? onCaptureChanged;
   CameraFacing _facing = CameraFacing.back;
   bool _encoderKickChecked = false;
 
@@ -34,6 +44,9 @@ class WebRtcPublisher {
   void Function(MediaStream stream)? onLocalStreamReplaced;
 
   RTCPeerConnection? get peerConnection => _peerConnection;
+  /// Height being sent now (after the switcher's order and this phone's limits).
+  int get sentHeight => _sentHeight;
+  int _sentHeight = 0;
   MediaStream? get localStream => _localStream;
   Layer get currentLayer => _currentLayer;
   bool get isHighActive => _currentLayer == Layer.high;
@@ -63,8 +76,8 @@ class WebRtcPublisher {
         // in the OUTER map, so a map is ignored and it falls back to its 1280x720 default — that is why WHIP and the
         // Studio camera always arrived at 720p (found 2026-10-04). A number is a target: the camera takes the closest
         // format it supports.
-        'width': SimulcastLayers.highWidth,
-        'height': SimulcastLayers.highHeight,
+        'width': _captureW,
+        'height': _captureH,
         'frameRate': {'ideal': 30, 'min': 15},
       },
     };
@@ -286,9 +299,24 @@ class WebRtcPublisher {
     await _peerConnection!.addCandidate(candidate);
   }
 
-  /// Switcher's order: high or low quality (see the class comment).
-  Future<void> setLayer(Layer layer) async {
+  /// Switcher's order: high or low quality, and for high the wanted height (see the class comment).
+  Future<void> setLayer(Layer layer, {int height = 1080}) async {
     _currentLayer = layer;
+    _currentHeight = height;
+    // 4K asked and this phone can: re-open the camera at 4K once (replaceTrack, no renegotiation).
+    if (layer == Layer.high && height >= SimulcastLayers.uhdHeight && maxHeight >= SimulcastLayers.uhdHeight &&
+        _captureH < SimulcastLayers.uhdHeight && _peerConnection != null) {
+      _captureW = SimulcastLayers.uhdWidth;
+      _captureH = SimulcastLayers.uhdHeight;
+      try {
+        final s = await switchCamera(_facing);
+        onCaptureChanged?.call(s);
+        debugPrint('[WebRtcPublisher] cámara reabierta en ${_captureHeight}p para el programa 4K');
+      } catch (e) {
+        debugPrint('[WebRtcPublisher] no se pudo abrir la cámara en 4K: $e');
+        _captureW = SimulcastLayers.highWidth; _captureH = SimulcastLayers.highHeight;
+      }
+    }
     await _applyLayerParams();
   }
 
@@ -306,18 +334,22 @@ class WebRtcPublisher {
       final encs = params.encodings;
       if (encs == null || encs.isEmpty) return;
       final high = _currentLayer == Layer.high;
-      final scale = high || _captureHeight <= SimulcastLayers.lowHeight
-          ? 1.0 : _captureHeight / SimulcastLayers.lowHeight;
+      final target = high ? _currentHeight.clamp(SimulcastLayers.lowHeight, maxHeight) : SimulcastLayers.lowHeight;
+      final scale = _captureHeight <= target ? 1.0 : _captureHeight / target;
+      final sent = (_captureHeight / scale).round();
+      final uhd = high && sent >= SimulcastLayers.uhdHeight;
+      final maxBps = !high ? SimulcastLayers.lowMaxBitrate : uhd ? SimulcastLayers.uhdMaxBitrate : SimulcastLayers.highMaxBitrate;
+      final minBps = !high ? 100000 : uhd ? SimulcastLayers.uhdMinBitrate : SimulcastLayers.highMinBitrate;
       for (final e in encs) {
         e.active = true;
         e.scaleResolutionDownBy = scale;
-        e.maxBitrate = high ? SimulcastLayers.highMaxBitrate : SimulcastLayers.lowMaxBitrate;
-        e.minBitrate = high ? SimulcastLayers.highMinBitrate : 100000;
+        e.maxBitrate = maxBps;
+        e.minBitrate = minBps;
         e.maxFramerate = high ? SimulcastLayers.highMaxFramerate : SimulcastLayers.lowMaxFramerate;
       }
       await t.sender.setParameters(params);
-      debugPrint('[WebRtcPublisher] capa ${high ? 'ALTA' : 'BAJA'}: ${(_captureHeight / scale).round()}p, '
-          'hasta ${(high ? SimulcastLayers.highMaxBitrate : SimulcastLayers.lowMaxBitrate) ~/ 1000} kbps');
+      _sentHeight = sent;
+      debugPrint('[WebRtcPublisher] capa ${high ? 'ALTA' : 'BAJA'}: ${sent}p, hasta ${maxBps ~/ 1000} kbps');
     } catch (e) {
       debugPrint('[WebRtcPublisher] no se pudo aplicar la capa ${_currentLayer.name}: $e');
     }

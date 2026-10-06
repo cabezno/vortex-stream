@@ -26,6 +26,8 @@ class Peer {
   final PeerRole role;
   bool connected;
   Layer activeLayer;
+  /// Height asked with [activeLayer] high (1080 / 2160), see SetLayerMessage.
+  int layerHeight = 1080;
   double lastAudioDbfs;
   DateTime lastSeen;
 

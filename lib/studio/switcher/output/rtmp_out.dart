@@ -73,6 +73,7 @@ class RtmpOut extends ChangeNotifier {
 
     try {
       // Ensure hardware encoder is running
+      _currentBitrateKbps = encoder.defaultKbps;
       if (!encoder.isEncoding) {
         await encoder.start(bitrateKbps: _currentBitrateKbps);
       }
@@ -137,14 +138,16 @@ class RtmpOut extends ChangeNotifier {
   /// Adaptive Bitrate (ABR) algorithm: adjusts video bitrate based on dropped frames/packets
   void _evaluateAbr() {
     final dropped = _droppedPackets > 0 ? _droppedPackets : encoder.droppedFrames;
+    final top = encoder.defaultKbps;   // 6 Mbps at 1080p, 20 Mbps at 4K; steps scale with it
+    final step = top ~/ 10;
     if (dropped > 5 && _currentBitrateKbps > 1500) {
       // Throttle down on congestion
-      _currentBitrateKbps = (_currentBitrateKbps - 600).clamp(1500, 6000);
+      _currentBitrateKbps = (_currentBitrateKbps - step).clamp(1500, top);
       encoder.updateBitrate(_currentBitrateKbps);
       debugPrint('[ABR] Real network congestion detected (dropped=$dropped), throttling bitrate to $_currentBitrateKbps kbps');
-    } else if (dropped == 0 && _currentBitrateKbps < 6000) {
+    } else if (dropped == 0 && _currentBitrateKbps < top) {
       // Step up when network stabilizes
-      _currentBitrateKbps = (_currentBitrateKbps + 300).clamp(1500, 6000);
+      _currentBitrateKbps = (_currentBitrateKbps + step ~/ 2).clamp(1500, top);
       encoder.updateBitrate(_currentBitrateKbps);
     }
   }

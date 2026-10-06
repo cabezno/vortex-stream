@@ -4,6 +4,7 @@ import '../../../theme/samba_theme.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:samba_protocol/samba_protocol.dart';
+import '../../../services/device_capabilities.dart';
 import '../audio/vad_reporter.dart';
 import '../control/control_client.dart';
 import '../transport/publisher.dart';
@@ -49,6 +50,21 @@ class _CameraScreenState extends State<CameraScreen> {
 
     _initCamera();
     _setupControlListeners();
+    // What this phone can send (4K on air): measured once per Android build / app version.
+    _publisher.onCaptureChanged = (stream) {
+      if (!mounted) return;
+      _localRenderer.srcObject = stream;
+      setState(() {});
+    };
+    DeviceCapabilities.instance.ensure(cameraGranted: false).then((_) {
+      _publisher.maxHeight = DeviceCapabilities.instance.maxSendHeight;
+      if (_control.isConnected) _sendCamInfo();
+    });
+  }
+
+  /// Tells the switcher what this camera is (see CamInfoMessage).
+  void _sendCamInfo() {
+    _control.sendMessage(CamInfoMessage(peerId: _control.peerId, maxHeight: _publisher.maxHeight));
   }
 
   Future<void> _initCamera() async {
@@ -62,7 +78,8 @@ class _CameraScreenState extends State<CameraScreen> {
 
   void _setupControlListeners() {
     _control.onSetLayer = (msg) async {
-      await _publisher.setLayer(msg.layer);
+      await _publisher.setLayer(msg.layer, height: msg.height);
+      if (mounted) setState(() {});
     };
 
     _control.onAnswer = (msg) async {
@@ -112,6 +129,7 @@ class _CameraScreenState extends State<CameraScreen> {
         to: 'switcher',
         sdp: offer.sdp ?? '',
       ));
+      _sendCamInfo();
       _vadReporter.start();
     }
   }
@@ -183,7 +201,9 @@ class _CameraScreenState extends State<CameraScreen> {
                     // What this phone is sending: high only while on air / in preview / second camera of a split.
                     if (connected) ...[
                       const SizedBox(width: 6),
-                      SdPill(high ? 'CALIDAD ALTA' : 'CALIDAD BAJA', color: high ? Sd.cyan : Sd.t3),
+                      SdPill(_publisher.sentHeight > 0
+                          ? '${high ? 'CALIDAD ALTA' : 'CALIDAD BAJA'} · ${_publisher.sentHeight}p'
+                          : (high ? 'CALIDAD ALTA' : 'CALIDAD BAJA'), color: high ? Sd.cyan : Sd.t3),
                     ],
                     const Spacer(),
                     connected

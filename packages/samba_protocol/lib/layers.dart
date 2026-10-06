@@ -22,4 +22,10 @@ class SimulcastLayers {
   static const int highMinBitrate = 3500000; // 3.5 Mbps floor (see publisher.dart): at 2 Mbps VP8 still scaled 1080p to 720p/540p
   static const int highMaxFramerate = 30;
   static const double highScaleResolutionDownBy = 1.0;
+
+  /// 4K: only the on-air camera of a 4K program (the switcher asks height 2160), when the phone can.
+  static const int uhdWidth = 3840;
+  static const int uhdHeight = 2160;
+  static const int uhdMaxBitrate = 20000000; // 20 Mbps (YouTube asks 20–50 for 4K30)
+  static const int uhdMinBitrate = 8000000;
 }

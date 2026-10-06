@@ -91,6 +91,28 @@ class DeviceCapabilities extends ChangeNotifier {
   String? get maxHevc => _enc('hevc')?['max30'] as String?;
   String? get cameraMax => (raw['cameraBack'] is Map) ? raw['cameraBack']['max'] as String? : null;
 
+  /// Shorter side of a "WxH" string (2160 for "3840x2160"), 0 if unknown.
+  static int heightOf(String? wxh) {
+    final m = RegExp(r'(\d+)x(\d+)').firstMatch(wxh ?? '');
+    if (m == null) return 0;
+    final a = int.parse(m[1]!), b = int.parse(m[2]!);
+    return a < b ? a : b;
+  }
+
+  /// Highest height this phone can SEND as a camera: its hardware H.264 encoder at 30 fps and its back camera, the
+  /// smaller of the two. 1080 when not measured (what every phone tested does).
+  int get maxSendHeight {
+    final enc = heightOf(maxH264), cam = heightOf(cameraMax);
+    if (enc == 0) return 1080;
+    return cam == 0 ? enc : (enc < cam ? enc : cam);
+  }
+
+  /// Highest height this phone can ENCODE as a switcher program (its hardware H.264 encoder at 30 fps).
+  int get maxProgramHeight {
+    final enc = heightOf(maxH264);
+    return enc == 0 ? 1080 : enc;
+  }
+
   TransportSupport support(Transport t) {
     if (!ready) return const TransportSupport(true);       // not measured: offer it (as before)
     final h264 = _enc('avc');

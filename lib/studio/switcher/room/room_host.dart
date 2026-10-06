@@ -40,6 +40,16 @@ class RoomHost extends ChangeNotifier {
   /// Cameras the program composition needs at full quality besides PGM and PVW (the second camera of a split / PiP),
   /// set by the ProgramMixer.
   Set<String> _extraHigh = {};
+
+  /// Program height (1080, or 2160 for a 4K program). Only the ON-AIR camera is asked for it; preview and the second
+  /// camera of a split stay at 1080: a cut then goes 1080 → 4K with no black, at half the Wi-Fi of two 4K streams.
+  int _programHeight = 1080;
+  int get programHeight => _programHeight;
+  set programHeight(int h) {
+    if (h == _programHeight) return;
+    _programHeight = h;
+    _applyLayers();
+  }
   set extraHigh(Set<String> ids) {
     if (setEquals(ids, _extraHigh)) return;
     _extraHigh = Set.of(ids);
@@ -207,9 +217,12 @@ class RoomHost extends ChangeNotifier {
     for (final p in room.peers.values) {
       if (p.role != PeerRole.camera) continue;
       final want = high.contains(p.id) ? Layer.high : Layer.low;
-      if (want == p.activeLayer && !force.contains(p.id)) continue;
+      final h = want == Layer.high && p.id == room.activePeerId ? _programHeight
+          : (_programHeight < 1080 ? _programHeight : 1080);
+      if (want == p.activeLayer && h == p.layerHeight && !force.contains(p.id)) continue;
       p.activeLayer = want;
-      sendToPeer(p.id, SetLayerMessage(peerId: p.id, layer: want));
+      p.layerHeight = h;
+      sendToPeer(p.id, SetLayerMessage(peerId: p.id, layer: want, height: h));
       changed = true;
     }
     if (changed) notifyListeners();

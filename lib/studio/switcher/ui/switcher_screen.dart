@@ -8,6 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../../theme/sd_icons.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../../../theme/samba_theme.dart';
+import '../../../services/device_capabilities.dart';
 import '../encode/program_encoder.dart';
 import '../local/local_camera.dart';
 import '../mixer/program_mixer.dart';
@@ -102,6 +103,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _subscriber.addListener(_syncNativeCameraSources);
 
     _detectLocalIp();
+    // What this phone can encode (4K program): measured once per Android build / app version.
+    DeviceCapabilities.instance.ensure(cameraGranted: false).then((_) { if (mounted) setState(() {}); });
     _roomHost.start().then((_) {
       setState(() {});
     });
@@ -289,6 +292,10 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     bool abr = _rtmpOut.abrEnabled;
     bool audioCam = _encoder.audioCamera;
     bool audioMic = _encoder.audioMic;
+    bool want4k = _encoder.is4k;
+    final can4k = DeviceCapabilities.instance.maxProgramHeight >= 2160;
+    // Facebook and Twitch take up to 1080p: a 4K program there would be refused or re-scaled.
+    bool only1080(String url) => url.contains('facebook.com') || url.contains('twitch.tv');
     Widget sw(String title, String sub, bool v, ValueChanged<bool> on) => SwitchListTile(
           contentPadding: EdgeInsets.zero, dense: true,
           title: Text(title, style: SdText.bodyHi),
@@ -309,6 +316,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
           content: Column(mainAxisSize: MainAxisSize.min, children: [
             TextField(
               controller: urlCtrl,
+              onChanged: (_) => setModal(() {}),   // the quality note depends on the destination
               style: SdText.bodyHi,
               decoration: const InputDecoration(
                 labelText: 'URL del servidor (RTMP / RTMPS)',
@@ -326,6 +334,30 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
               decoration: const InputDecoration(labelText: 'Clave de transmisión'),
             ),
             const SizedBox(height: 8),
+            const SizedBox(height: 4),
+            Align(alignment: Alignment.centerLeft, child: Text('CALIDAD DEL PROGRAMA', style: SdText.overline)),
+            const SizedBox(height: 6),
+            SegmentedButton<bool>(
+              segments: [
+                const ButtonSegment(value: false, label: Text('1080p')),
+                ButtonSegment(value: true, label: Text('4K'), enabled: can4k && !only1080(urlCtrl.text)),
+              ],
+              selected: {want4k && can4k && !only1080(urlCtrl.text)},
+              onSelectionChanged: (v) => setModal(() => want4k = v.first),
+              showSelectedIcon: false,
+            ),
+            const SizedBox(height: 4),
+            Align(alignment: Alignment.centerLeft, child: Text(
+              !can4k
+                  ? 'Este celular codifica hasta ${DeviceCapabilities.instance.maxH264 ?? '1920x1080'}: 4K no disponible.'
+                  : only1080(urlCtrl.text)
+                      ? 'Facebook y Twitch reciben hasta 1080p: se emite en 1080p.'
+                      : want4k
+                          ? '4K: la cámara al aire manda 4K si su celular puede (las demás, 1080p). ~20 Mbps de subida: '
+                            'usá una conexión rápida.'
+                          : '1080p a 6 Mbps.',
+              style: SdText.caption)),
+            const SizedBox(height: 8),
             sw('Bitrate adaptativo', 'Baja la calidad si la red se satura', abr, (v) => setModal(() => abr = v)),
             sw('Audio de la cámara al aire', 'El sonido sigue al corte: se escucha a quien está en pantalla',
                 audioCam, (v) => setModal(() => audioCam = v)),
@@ -341,6 +373,12 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
               onPressed: () async {
                 _rtmpOut.configure(url: urlCtrl.text.trim(), streamKey: keyCtrl.text.trim(), abrEnabled: abr);
                 Navigator.pop(ctx);
+                final h = want4k && can4k && !only1080(urlCtrl.text) ? 2160 : 1080;
+                if (h != _encoder.programHeight && _encoder.isEncoding) {
+                  await _encoder.stop();   // the size is fixed at start: restart it at the new quality
+                }
+                _encoder.programHeight = h;
+                _roomHost.programHeight = h;   // the on-air camera is asked for it
                 if (_encoder.isEncoding) {
                   await _encoder.setAudioSources(camera: audioCam, mic: audioMic);
                 } else {
