@@ -86,11 +86,17 @@ class HardwareProgramEncoder(
     val audioCameraOn: Boolean get() = audio?.useCamera == true
     val audioMicOn: Boolean get() = audio?.micActive == true
 
-    /** The on-air camera's WebRTC audio track (audio follows video). */
-    fun setCameraAudioTrack(track: org.webrtc.AudioTrack?) {
+    /** The on-air camera's WebRTC audio track (audio follows video), held [delayMs] like its picture. */
+    fun setCameraAudioTrack(track: org.webrtc.AudioTrack?, delayMs: Int = cameraAudioDelayMs) {
         cameraAudioTrack = track
-        audio?.setCameraTrack(track)
+        cameraAudioDelayMs = delayMs
+        audio?.setCameraTrack(track, delayMs)
     }
+    private var cameraAudioDelayMs = 0
+    private var micDelayMs = 0
+    fun setCameraAudioDelay(ms: Int) { cameraAudioDelayMs = ms; audio?.setCameraDelay(ms) }
+    /** The switcher's own microphone, held to line up with the cameras (they arrive later than it). */
+    fun setMicDelay(ms: Int) { micDelayMs = ms; audio?.setMicDelay(ms) }
 
     fun setAudioSources(mic: Boolean, camera: Boolean) { audio?.setSources(mic, camera) }
     val programWidth get() = width
@@ -241,7 +247,9 @@ class HardwareProgramEncoder(
                 }
             }, audioMic, audioCamera)
             audioReady = false
-            if (pa.start()) { audio = pa; pa.setCameraTrack(cameraAudioTrack) } else audioReady = true
+            if (pa.start()) {
+                audio = pa; pa.setCameraTrack(cameraAudioTrack, cameraAudioDelayMs); pa.setMicDelay(micDelayMs)
+            } else audioReady = true
         }
 
         // 6. Start Render Loop Thread (~30fps presentation to encoder surface)

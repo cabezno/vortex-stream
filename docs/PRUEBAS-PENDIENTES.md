@@ -69,3 +69,26 @@ micrófono en la barra de abajo de la cámara → elegí el auricular. Hablá. V
 
 **Si falla:** `[Mic] usando: …` / `[Mic] no se pudo cambiar…` en la cámara. Si el auricular no aparece en la lista:
 falta el permiso «Dispositivos cercanos» (Ajustes → Apps → Samba Air → Permisos).
+
+## P4. Sincronía de cámaras (alinear a la más lenta + medir con pitidos)
+
+**Cómo:** switcher con la **cámara local encendida** (ícono de cámara arriba) + 2 cámaras remotas, todas apuntando a
+lo mismo (un reloj con segundero en pantalla, o alguien aplaudiendo). Botón **cronómetro** en la barra del switcher →
+«Sincronía de cámaras».
+1. Mirá la lista: cada cámara con «estimado N ms» y a la derecha «+N ms» (cuánto se la retrasa).
+2. Tocá **Medir con pitidos** (silencio, cámaras a pocos metros). El switcher suena 3 pitidos.
+3. Emití o grabá a SD 1 minuto en **Dividida**, con la cámara local de un lado y una remota del otro, aplaudiendo.
+4. Repetí con «Alinear en el programa» apagado.
+
+**Qué tenés que ver:**
+- En las miniaturas: «≈150 ms» (estimado) y, después de medir, «180 ms» sin «≈». Ámbar si pasa de 500 ms.
+- Al medir: «Medido: Cam1 180 ms · Cam2 210 ms» (si una no escuchó: «No se escucharon los pitidos en: …»).
+- La cámara más lenta queda con «+0 ms», las demás con la diferencia; la cámara local con la mayor.
+- En la grabación/emisión (paso 3): el aplauso se ve **a la vez en las dos mitades**; con la alineación apagada
+  (paso 4), la cámara local va adelantada.
+- Si la cámara local se ve igual adelantada: subir «Cámara de este celular: ajuste fino».
+- Cortar desde vista previa no salta en el tiempo; un corte directo puede congelar un instante (≤ el retraso).
+
+**Si falla:** `SyncProbe` en el registro del switcher («Cam: beeps heard 3/3 → 180 ms»); si oye 0/3, el audio de esa
+cámara no llega al switcher (¿micrófono apagado?) o el switcher sonó muy bajo. `[SourceSync]` con el resultado.
+`StudioSwitcher: Program primary … (delay N ms)` al cortar.

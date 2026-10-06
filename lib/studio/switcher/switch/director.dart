@@ -33,8 +33,11 @@ class Director extends ChangeNotifier {
       }
     };
 
-    roomHost.onPeerJoined = (_) => _syncPeers();
-    roomHost.onPeerLeft = (_) => _syncPeers();
+    // Chain, don't replace: the subscriber registered onPeerLeft first (closes the camera's connection) — assigning
+    // over it left a departed camera's WebRTC session open (found 2026-10-06).
+    final prevJoined = roomHost.onPeerJoined, prevLeft = roomHost.onPeerLeft;
+    roomHost.onPeerJoined = (p) { prevJoined?.call(p); _syncPeers(); };
+    roomHost.onPeerLeft = (id) { prevLeft?.call(id); _syncPeers(); };
 
     _startEngineLoop();
   }

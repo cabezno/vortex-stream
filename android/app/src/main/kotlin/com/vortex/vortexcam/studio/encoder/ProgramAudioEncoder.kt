@@ -48,20 +48,26 @@ class ProgramAudioEncoder(
         private const val MAX_LEVEL = SAMPLE_RATE * 250 / 1000            // > 250 ms queued → trim to PREBUFFER
     }
 
-    /** Stereo float ring, written by one source thread and read by the clock thread. */
+    /**
+     * Stereo float ring, written by one source thread and read by the clock thread. [delayFrames] holds the source
+     * back (alignment with slower cameras, 2026-10-06): reading starts once that much more is queued, and the trim
+     * keeps it — the level settles around PREBUFFER + delay.
+     */
     private class Ring {
         private val buf = FloatArray(SAMPLE_RATE * CHANNELS)              // 1 s
         private var w = 0; private var r = 0; private var level = 0       // level in frames
         private var primed = false
         var fadeIn = 0                                                   // frames of fade-in left (after a cut)
+        @Volatile var delayFrames = 0
         @Synchronized fun write(l: Float, rr: Float) {
             if (level >= buf.size / CHANNELS) { r = (r + CHANNELS) % buf.size; level-- }
             buf[w] = l; buf[w + 1] = rr; w = (w + CHANNELS) % buf.size; level++
         }
         /** Adds `frames` frames × gain into out (stereo interleaved); silence while not primed / empty. */
         @Synchronized fun mixInto(out: FloatArray, frames: Int, gain: Float) {
-            if (!primed) { if (level >= PREBUFFER) primed = true else return }
-            if (level > MAX_LEVEL) { val drop = level - PREBUFFER; r = (r + drop * CHANNELS) % buf.size; level -= drop }
+            val base = PREBUFFER + delayFrames
+            if (!primed) { if (level >= base) primed = true else return }
+            if (level > MAX_LEVEL + delayFrames) { val drop = level - base; r = (r + drop * CHANNELS) % buf.size; level -= drop }
             val n = minOf(frames, level)
             for (i in 0 until n) {
                 var g = gain
@@ -122,11 +128,15 @@ class ProgramAudioEncoder(
 
     val micActive: Boolean get() = micRunning.get()
 
+    private fun framesOf(ms: Int) = (ms.coerceIn(0, 500) * SAMPLE_RATE / 1000)
+    fun setCameraDelay(ms: Int) { camRing.delayFrames = framesOf(ms) }
+    fun setMicDelay(ms: Int) { micRing.delayFrames = framesOf(ms) }
+
     /** The on-air camera's audio track (null = none). A new track starts with a fresh ring and a 20 ms fade-in. */
-    @Synchronized fun setCameraTrack(track: AudioTrack?) {
-        if (track === camTrack) return
+    @Synchronized fun setCameraTrack(track: AudioTrack?, delayMs: Int = 0) {
+        if (track === camTrack) { setCameraDelay(delayMs); return }
         try { camTrack?.removeSink(camSink) } catch (_: Exception) {}
-        camRing = Ring().also { it.fadeIn = 960 }
+        camRing = Ring().also { it.fadeIn = 960; it.delayFrames = framesOf(delayMs) }
         resPos = 0.0
         camTrack = track
         try { track?.addSink(camSink) } catch (e: Exception) { Log.w(TAG, "addSink: ${e.message}") }

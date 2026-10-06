@@ -16,6 +16,7 @@ import '../output/recorder.dart';
 import '../output/rtmp_out.dart';
 import '../room/room_host.dart';
 import '../switch/director.dart';
+import '../sync/source_sync.dart';
 import '../transport/subscriber.dart';
 import 'program_layout_view.dart';
 
@@ -35,6 +36,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   late final ProgramRecorder _recorder;
   late final ProgramMixer _mixer;
   late final LocalCameraSource _localCam;
+  late final SourceSync _sync;
   String _localIp = '127.0.0.1';
 
   // The switcher's own Wi-Fi network for its cameras (plan §1): one hop instead of two through a router, no foreign
@@ -97,8 +99,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _recorder = ProgramRecorder(encoder: _encoder);
     _mixer = ProgramMixer(roomHost: _roomHost, encoder: _encoder);
     _localCam = LocalCameraSource(roomHost: _roomHost);
+    _sync = SourceSync(roomHost: _roomHost, subscriber: _subscriber, encoder: _encoder, localPeerId: _localCam.peerId);
 
     _mixer.addListener(_syncNativeCameraSources);
+    _sync.addListener(_syncNativeCameraSources);
+    _roomHost.addListener(_syncNativeCameraSources);
     _director.addListener(_syncNativeCameraSources);
     _subscriber.addListener(_syncNativeCameraSources);
 
@@ -126,17 +131,27 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     if (!_kEnableNativeEncoderSources) return;
     final primaryPeerId = _mixer.primaryPeerId ?? _director.activePeerId;
     final secondaryPeerId = _mixer.secondaryPeerId;
-    final primaryRenderer = primaryPeerId != null ? _subscriber.getRenderer(primaryPeerId) : null;
-    final secondaryRenderer = secondaryPeerId != null ? _subscriber.getRenderer(secondaryPeerId) : null;
+    final previewPeerId = _roomHost.previewPeerId;
+    // The switcher's own camera has its local renderer; remote ones, the subscriber's.
+    RTCVideoRenderer? rendererOf(String? id) => id == null ? null
+        : id == _localCam.peerId ? (_localCam.isActive ? _localCam.renderer : null) : _subscriber.getRenderer(id);
     // Audio follows video: the program carries the on-air camera's audio track.
     final primaryStream = primaryPeerId != null ? _subscriber.remoteStreams[primaryPeerId] : null;
     final audioTracks = primaryStream?.getAudioTracks() ?? const [];
+    final args = (
+      p: rendererOf(primaryPeerId)?.textureId, s: rendererOf(secondaryPeerId)?.textureId,
+      v: rendererOf(previewPeerId)?.textureId, a: audioTracks.isNotEmpty ? audioTracks.first.id : null,
+      pd: _sync.delayFor(primaryPeerId), sd: _sync.delayFor(secondaryPeerId), vd: _sync.delayFor(previewPeerId),
+      md: _sync.micDelayMs,
+    );
+    if (args == _lastSources) return;   // the room/subscriber notify often: only send changes
+    _lastSources = args;
     _encoder.setCameraSources(
-      primaryTextureId: primaryRenderer?.textureId,
-      secondaryTextureId: secondaryRenderer?.textureId,
-      primaryAudioTrackId: audioTracks.isNotEmpty ? audioTracks.first.id : null,
+      primaryTextureId: args.p, secondaryTextureId: args.s, previewTextureId: args.v, primaryAudioTrackId: args.a,
+      primaryDelayMs: args.pd, secondaryDelayMs: args.sd, previewDelayMs: args.vd, micDelayMs: args.md,
     );
   }
+  Object? _lastSources;
 
   Future<void> _detectLocalIp() async {
     try {
@@ -233,6 +248,91 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
           actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cerrar'))],
         );
       }),
+    );
+  }
+
+  /// Alignment of the cameras in the program (SourceSync): latencies, the beep measurement, fine-tune.
+  void _showSyncDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => ListenableBuilder(
+        listenable: _sync,
+        builder: (ctx, _) {
+          final cams = _roomHost.cameras;
+          return AlertDialog(
+            scrollable: true,
+            title: const Row(children: [
+              Icon(SdIcons.timer, color: Sd.cyan, size: 22),
+              SizedBox(width: 10),
+              Expanded(child: Text('Sincronía de cámaras')),
+            ]),
+            content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero, dense: true,
+                title: const Text('Alinear en el programa', style: SdText.bodyHi),
+                subtitle: const Text('Retrasa las fuentes rápidas para que coincidan con la más lenta (hasta 0,5 s). '
+                    'Solo el programa: tus monitores siguen en vivo.', style: SdText.caption),
+                value: _sync.align,
+                onChanged: (v) => _sync.align = v,
+              ),
+              const SizedBox(height: 8),
+              if (cams.isEmpty) const Text('Sin cámaras.', style: SdText.caption),
+              for (final c in cams)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(children: [
+                    Expanded(child: Text(c.name, style: SdText.label.copyWith(color: Sd.t1), overflow: TextOverflow.ellipsis)),
+                    Builder(builder: (_) {
+                      final lat = _sync.latencyOf(c.id);
+                      final local = c.id == _localCam.peerId;
+                      final txt = local ? 'este celular'
+                          : lat == null ? 'midiendo…'
+                          : '${lat.measured ? 'medido' : 'estimado'} ${lat.ms} ms';
+                      return Text(txt, style: SdText.caption.copyWith(
+                          color: _sync.tooSlow(c.id) ? Sd.amber : lat?.measured == true ? Sd.cyan : Sd.t2));
+                    }),
+                    const SizedBox(width: 10),
+                    SizedBox(width: 84, child: Text(
+                        _sync.tooSlow(c.id) ? 'muy lenta' : '+${_sync.delayFor(c.id)} ms', textAlign: TextAlign.end,
+                        style: SdText.caption.copyWith(color: _sync.tooSlow(c.id) ? Sd.amber : Sd.t1))),
+                  ]),
+                ),
+              if (cams.isNotEmpty) ...[
+                const SizedBox(height: 2),
+                Text('A la derecha: cuánto se retrasa cada una en el programa. Micrófono de este celular: '
+                    '+${_sync.micDelayMs} ms.', style: SdText.caption),
+              ],
+              const SizedBox(height: 14),
+              SizedBox(width: double.infinity, child: OutlinedButton.icon(
+                icon: _sync.measuring
+                    ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 1.6))
+                    : const Icon(SdIcons.speakerHigh, size: 18),
+                label: Text(_sync.measuring ? 'Escuchando…' : 'Medir con pitidos'),
+                onPressed: _sync.measuring ? null : _sync.measure,
+              )),
+              const SizedBox(height: 6),
+              const Text('Este celular suena 3 pitidos; cada cámara los escucha y se mide cuánto tardan en volver '
+                  '(incluye auriculares Bluetooth). Con las cámaras a pocos metros y en silencio.', style: SdText.caption),
+              if (_sync.lastResult.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(_sync.lastResult, style: SdText.caption.copyWith(color: Sd.t1)),
+              ],
+              if (_localCam.isActive) ...[
+                const SizedBox(height: 14),
+                Row(children: [
+                  const Expanded(child: Text('Cámara de este celular: ajuste fino', style: SdText.label)),
+                  Text('${_sync.localAdjustMs} ms', style: SdText.label.copyWith(color: Sd.t1)),
+                ]),
+                Slider(value: _sync.localAdjustMs.toDouble(), min: 0, max: 300, divisions: 30,
+                    onChanged: (v) => _sync.localAdjustMs = v.round()),
+                const Text('Subilo si la cámara de este celular se ve adelantada respecto a las otras.',
+                    style: SdText.caption),
+              ],
+            ]),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
+          );
+        },
+      ),
     );
   }
 
@@ -469,6 +569,9 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _mixer.removeListener(_syncNativeCameraSources);
     _director.removeListener(_syncNativeCameraSources);
     _subscriber.removeListener(_syncNativeCameraSources);
+    _sync.removeListener(_syncNativeCameraSources);
+    _roomHost.removeListener(_syncNativeCameraSources);
+    _sync.dispose();
 
     _localCam.dispose();
     _mixer.dispose();
@@ -528,6 +631,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             icon: const Icon(SdIcons.slidersHorizontal),
             tooltip: 'Ajustes Audio Switcher',
             onPressed: _showAudioSettingsDialog,
+          ),
+          IconButton(
+            icon: const Icon(SdIcons.timer),
+            tooltip: 'Sincronía de cámaras',
+            onPressed: _showSyncDialog,
           ),
           // Auto / manual switching
           ListenableBuilder(
@@ -595,7 +703,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
         ],
       ),
       body: SafeArea(top: false, child: ListenableBuilder(
-        listenable: Listenable.merge([_roomHost, _subscriber, _rtmpOut, _recorder, _encoder, _mixer, _localCam, _director]),
+        listenable: Listenable.merge([_roomHost, _subscriber, _rtmpOut, _recorder, _encoder, _mixer, _localCam, _director, _sync]),
         builder: (context, _) {
           final cameras = _roomHost.cameras;
           final activePeerId = _roomHost.activePeerId;
@@ -871,6 +979,13 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                         const SizedBox(width: 6),
                                         Text('${cam.lastAudioDbfs.toStringAsFixed(0)} dB', style: SdText.caption),
                                         // What really arrives (check for PGM/PVW: high only for on air / preview).
+                                        // Latency: «180 ms» measured with the beeps, «≈150 ms» estimated; amber if
+                                        // over the alignment cap (that camera is not lined up).
+                                        if (_sync.latencyOf(cam.id) case final lat? when cam.id != _localCam.peerId) ...[
+                                          const SizedBox(width: 8),
+                                          Text('${lat.measured ? '' : '≈'}${lat.ms} ms', style: SdText.caption.copyWith(
+                                              color: _sync.tooSlow(cam.id) ? Sd.amber : Sd.t3)),
+                                        ],
                                         if (rx != null && rx.height > 0) ...[
                                           const SizedBox(width: 8),
                                           Text('${rx.height}p · ${rx.fps}', style: SdText.caption.copyWith(

@@ -128,16 +128,37 @@ class ProgramEncoder extends ChangeNotifier {
   }
 
   /// Inform native pipeline of active WebRTC VideoTracks by their Flutter textureIds
-  Future<void> setCameraSources({int? primaryTextureId, int? secondaryTextureId, String? primaryAudioTrackId}) async {
+  /// [previewTextureId]: the camera in preview, kept attached so a cut to it keeps its (already filled) delay.
+  /// Delays: how much the PROGRAM holds each source to line it up with the slowest camera (SourceSync).
+  Future<void> setCameraSources({int? primaryTextureId, int? secondaryTextureId, int? previewTextureId,
+      String? primaryAudioTrackId, int primaryDelayMs = 0, int secondaryDelayMs = 0, int previewDelayMs = 0,
+      int micDelayMs = 0}) async {
     try {
       if (!kIsWeb) {
         await _channel.invokeMethod('setCameraSources', {
           'primaryTextureId': primaryTextureId,
           'secondaryTextureId': secondaryTextureId,
+          'previewTextureId': previewTextureId,
           'primaryAudioTrackId': primaryAudioTrackId,
+          'primaryDelayMs': primaryDelayMs,
+          'secondaryDelayMs': secondaryDelayMs,
+          'previewDelayMs': previewDelayMs,
+          'micDelayMs': micDelayMs,
         });
       }
     } catch (_) {}
+  }
+
+  /// Plays beeps on this phone's loudspeaker and times them in each camera's audio: peerId → end-to-end latency in
+  /// ms (null = that camera did not hear them). [audioTrackIds]: peerId → its received audio track id.
+  Future<Map<String, int?>> measureLatency(Map<String, String> audioTrackIds) async {
+    try {
+      final r = await _channel.invokeMapMethod<String, dynamic>('measureLatency', {'tracks': audioTrackIds});
+      return {for (final e in (r ?? const {}).entries) e.key: (e.value as num?)?.toInt()};
+    } catch (e) {
+      debugPrint('[ProgramEncoder] measureLatency: $e');
+      return {};
+    }
   }
 
   /// Changes what the program's audio carries, live.

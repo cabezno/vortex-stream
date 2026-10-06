@@ -24,6 +24,11 @@ class WebRtcSubscriber extends ChangeNotifier {
   /// can be checked at a glance — e.g. "1080p · 30" for the on-air one, "360p · 15" for the others.
   final Map<String, ({int height, int fps})> received = {};
 
+  /// Estimated latency of each camera, from WebRTC's own numbers (every 3 s): half the round trip + the playout
+  /// (jitter) buffer + decoding. It does not see the camera's capture/encoding, so it reads LOWER than the beep
+  /// measurement (SourceSync), which is the one used once taken.
+  final Map<String, int> latencyEstMs = {};
+
   Map<String, RTCVideoRenderer> get renderers => _renderers;
   Map<String, MediaStream> get remoteStreams => _remoteStreams;
   String? get activeAudioPeerId => _activeAudioPeerId;
@@ -149,6 +154,21 @@ class WebRtcSubscriber extends ChangeNotifier {
       }
       try {
         final reports = await p.getStats();
+        double rttS = 0, jbS = 0, decS = 0;
+        for (final r in reports) {
+          final v = r.values;
+          if (r.type == 'candidate-pair' && v['nominated'] == true && v['currentRoundTripTime'] is num) {
+            rttS = (v['currentRoundTripTime'] as num).toDouble();
+          }
+          if (r.type == 'inbound-rtp' && (v['mediaType'] == 'video' || v['kind'] == 'video')) {
+            final em = (v['jitterBufferEmittedCount'] as num?)?.toDouble() ?? 0;
+            if (em > 0) jbS = ((v['jitterBufferDelay'] as num?)?.toDouble() ?? 0) / em;
+            final fd = (v['framesDecoded'] as num?)?.toDouble() ?? 0;
+            if (fd > 0) decS = ((v['totalDecodeTime'] as num?)?.toDouble() ?? 0) / fd;
+          }
+        }
+        final est = ((rttS / 2 + jbS + decS) * 1000).round();
+        if (est > 0 && latencyEstMs[peerId] != est) { latencyEstMs[peerId] = est; notifyListeners(); }
         for (final r in reports) {
           final v = r.values;
           if (r.type == 'inbound-rtp' &&
@@ -201,6 +221,7 @@ class WebRtcSubscriber extends ChangeNotifier {
 
     _remoteStreams.remove(peerId);
     received.remove(peerId);
+    latencyEstMs.remove(peerId);
     notifyListeners();
   }
 

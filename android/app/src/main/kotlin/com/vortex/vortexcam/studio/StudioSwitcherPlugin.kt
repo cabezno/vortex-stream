@@ -28,11 +28,16 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private val hotspot by lazy { LocalHotspot(appContext) }
     private var rtmpStreamer: RtmpStreamer? = null
 
+    // One delayed sink per camera the program may need: on air, preview, second camera of a split (2026-10-06).
+    // A cut from preview reuses that camera's sink, already filled → the aligned delay holds with no jump.
+    private val sinks = HashMap<VideoTrack, WebRtcSourceSink>()
     private var primarySink: WebRtcSourceSink? = null
     private var secondarySink: WebRtcSourceSink? = null
     private var primaryTrack: VideoTrack? = null
     private var primaryAudioTrack: org.webrtc.AudioTrack? = null
     private var primaryAudioTrackId: String? = null
+    private var primaryAudioDelayMs = 0
+    private var micDelayMs = 0
     private var secondaryTrack: VideoTrack? = null
 
     private fun register() {
@@ -59,7 +64,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                             audioMic = audioMic,
                             audioCamera = audioCamera
                         )
-                        encoder.setCameraAudioTrack(primaryAudioTrack)
+                        encoder.setCameraAudioTrack(primaryAudioTrack, primaryAudioDelayMs)
+                        encoder.setMicDelay(micDelayMs)
                         encoder.primarySink = primarySink
                         encoder.secondarySink = secondarySink
                         encoder.rtmpStreamer = rtmpStreamer
@@ -74,9 +80,22 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                 "setCameraSources" -> {
                     val primaryId = call.argument<Int>("primaryTextureId")
                     val secondaryId = call.argument<Int>("secondaryTextureId")
-                    setCameraSources(primaryId, secondaryId)
-                    setPrimaryAudio(call.argument<String>("primaryAudioTrackId"))
+                    val previewId = call.argument<Int>("previewTextureId")
+                    // Alignment of sources: how much to hold each one in the PROGRAM (0 = live).
+                    val pd = call.argument<Int>("primaryDelayMs") ?: 0
+                    setCameraSources(primaryId, secondaryId, previewId, pd,
+                        call.argument<Int>("secondaryDelayMs") ?: 0, call.argument<Int>("previewDelayMs") ?: 0)
+                    micDelayMs = call.argument<Int>("micDelayMs") ?: 0
+                    programEncoder?.setMicDelay(micDelayMs)
+                    setPrimaryAudio(call.argument<String>("primaryAudioTrackId"), pd)
                     result.success(true)
+                }
+                // Beeps on the loudspeaker, heard back through every camera: each one's end-to-end latency (SyncProbe).
+                "measureLatency" -> {
+                    val ids = call.argument<Map<String, String>>("tracks") ?: emptyMap()
+                    val tracks = ids.mapNotNull { (peer, id) -> audioTrackById(id)?.let { peer to it } }.toMap()
+                    if (tracks.isEmpty()) { result.success(emptyMap<String, Int?>()); return@setMethodCallHandler }
+                    SyncProbe { r -> result.success(r) }.run(tracks)
                 }
                 "setAudioSources" -> {
                     programEncoder?.setAudioSources(call.argument<Boolean>("mic") ?: false,
@@ -201,60 +220,51 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     }
 
     /** The on-air camera's remote audio track, looked up by id in flutter_webrtc (MethodCallHandlerImpl.getTrackForId). */
-    private fun setPrimaryAudio(trackId: String?) {
+    private fun setPrimaryAudio(trackId: String?, delayMs: Int = 0) {
+        if (delayMs != primaryAudioDelayMs) {
+            primaryAudioDelayMs = delayMs
+            programEncoder?.setCameraAudioDelay(delayMs)
+        }
         if (trackId == primaryAudioTrackId && (trackId == null || primaryAudioTrack != null)) return
         primaryAudioTrackId = trackId
-        primaryAudioTrack = trackId?.let { id ->
-            try {
-                val plugin = engine.plugins.get(FlutterWebRTCPlugin::class.java) as? FlutterWebRTCPlugin ?: return@let null
-                val hf = FlutterWebRTCPlugin::class.java.getDeclaredField("methodCallHandler").apply { isAccessible = true }
-                val handler = hf.get(plugin) ?: return@let null
-                handler.javaClass.getMethod("getTrackForId", String::class.java, String::class.java)
-                    .invoke(handler, id, null) as? org.webrtc.AudioTrack
-            } catch (e: Exception) { Log.w(TAG, "Audio track $id not found: ${e.message}"); null }
-        }
+        primaryAudioTrack = trackId?.let { audioTrackById(it) }
         Log.i(TAG, "On-air audio track: ${primaryAudioTrack?.id() ?: "none"} (asked $trackId)")
-        programEncoder?.setCameraAudioTrack(primaryAudioTrack)
+        programEncoder?.setCameraAudioTrack(primaryAudioTrack, primaryAudioDelayMs)
     }
 
-    private fun setCameraSources(primaryTextureId: Int?, secondaryTextureId: Int?) {
-        // 1. Primary Source
-        if (primaryTextureId != null && primaryTextureId >= 0) {
-            val newTrack = getVideoTrackForTextureId(primaryTextureId)
-            if (newTrack != primaryTrack) {
-                primaryTrack?.removeSink(primarySink)
-                primaryTrack = newTrack
-                if (primarySink == null) {
-                    primarySink = WebRtcSourceSink()
-                }
-                primaryTrack?.addSink(primarySink)
-                programEncoder?.primarySink = primarySink
-                Log.i(TAG, "Attached primary VideoSink to VideoTrack: ${newTrack?.id()}")
-            }
-        } else {
-            primaryTrack?.removeSink(primarySink)
-            primaryTrack = null
-            programEncoder?.primarySink = null
-        }
+    /** A remote audio track by its flutter_webrtc id (MethodCallHandlerImpl.getTrackForId). */
+    private fun audioTrackById(id: String): org.webrtc.AudioTrack? = try {
+        val plugin = engine.plugins.get(FlutterWebRTCPlugin::class.java) as? FlutterWebRTCPlugin
+        val hf = FlutterWebRTCPlugin::class.java.getDeclaredField("methodCallHandler").apply { isAccessible = true }
+        val handler = plugin?.let { hf.get(it) }
+        handler?.javaClass?.getMethod("getTrackForId", String::class.java, String::class.java)
+            ?.invoke(handler, id, null) as? org.webrtc.AudioTrack
+    } catch (e: Exception) { Log.w(TAG, "Audio track $id not found: ${e.message}"); null }
 
-        // 2. Secondary Source (for Split-Screen / PiP)
-        if (secondaryTextureId != null && secondaryTextureId >= 0) {
-            val newTrack = getVideoTrackForTextureId(secondaryTextureId)
-            if (newTrack != secondaryTrack) {
-                secondaryTrack?.removeSink(secondarySink)
-                secondaryTrack = newTrack
-                if (secondarySink == null) {
-                    secondarySink = WebRtcSourceSink()
-                }
-                secondaryTrack?.addSink(secondarySink)
-                programEncoder?.secondarySink = secondarySink
-                Log.i(TAG, "Attached secondary VideoSink to VideoTrack: ${newTrack?.id()}")
-            }
-        } else {
-            secondaryTrack?.removeSink(secondarySink)
-            secondaryTrack = null
-            programEncoder?.secondarySink = null
+    private fun setCameraSources(primaryTextureId: Int?, secondaryTextureId: Int?, previewTextureId: Int?,
+                                 primaryDelayMs: Int, secondaryDelayMs: Int, previewDelayMs: Int) {
+        fun track(id: Int?) = if (id != null && id >= 0) getVideoTrackForTextureId(id) else null
+        val p = track(primaryTextureId); val sec = track(secondaryTextureId); val pvw = track(previewTextureId)
+        val wanted = listOfNotNull(p, sec, pvw).toSet()
+        // Sinks of cameras no longer needed: detach and free their frames.
+        for (t in sinks.keys.toList()) if (t !in wanted) {
+            val old = sinks.remove(t)
+            try { t.removeSink(old) } catch (_: Exception) {}
+            old?.release()
         }
+        for (t in wanted) if (t !in sinks) {
+            val sk = WebRtcSourceSink()
+            try { t.addSink(sk); sinks[t] = sk } catch (e: Exception) { Log.w(TAG, "addSink: ${e.message}") }
+        }
+        p?.let { sinks[it]?.delayMs = primaryDelayMs }
+        sec?.let { sinks[it]?.delayMs = secondaryDelayMs }
+        pvw?.let { if (it != p && it != sec) sinks[it]?.delayMs = previewDelayMs }
+        if (p != primaryTrack) Log.i(TAG, "Program primary: ${p?.id()} (delay $primaryDelayMs ms)")
+        primaryTrack = p; secondaryTrack = sec
+        primarySink = p?.let { sinks[it] }
+        secondarySink = sec?.let { sinks[it] }
+        programEncoder?.primarySink = primarySink
+        programEncoder?.secondarySink = secondarySink
     }
 
     private fun stopHardwareEncoder() {
@@ -268,10 +278,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     }
 
     fun dispose() {
-        primaryTrack?.removeSink(primarySink)
-        secondaryTrack?.removeSink(secondarySink)
-        primarySink?.release()
-        secondarySink?.release()
+        for ((t, sk) in sinks) { try { t.removeSink(sk) } catch (_: Exception) {}; sk.release() }
+        sinks.clear()
         primarySink = null
         secondarySink = null
         stopHardwareEncoder()

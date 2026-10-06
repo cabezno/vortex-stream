@@ -37,10 +37,12 @@ class SdIcons {
   static const scissors = IconData(0xeae0, fontFamily: _f);
   static const slidersHorizontal = IconData(0xe434, fontFamily: _f);
   static const sparkle = IconData(0xe6a2, fontFamily: _f);
+  static const speakerHigh = IconData(0xe44a, fontFamily: _f);
   static const speakerSlash = IconData(0xe45a, fontFamily: _f);
   static const square = IconData(0xe45e, fontFamily: _f);
   static const squaresFour = IconData(0xe464, fontFamily: _f);
   static const stop = IconData(0xe46c, fontFamily: _f);
+  static const timer = IconData(0xe492, fontFamily: _f);
   static const videoCamera = IconData(0xe4da, fontFamily: _f);
   static const videoCameraSlash = IconData(0xe4dc, fontFamily: _f);
   static const waveform = IconData(0xe802, fontFamily: _f);
