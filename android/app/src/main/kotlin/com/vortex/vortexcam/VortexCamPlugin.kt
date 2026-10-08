@@ -836,8 +836,7 @@ class VortexCamPlugin(
                 val cvo = srtCvo()
                 if (cvo != lastCvo || nowMs - lastCvoSentMs >= 1000) {
                     if (cvo != lastCvo) {
-                        val msg = "[orientación] SRT → rotación $cvo (${cvo * 90}°)
-"
+                        val msg = "[orientación] SRT → rotación $cvo (${cvo * 90}°)\n"
                         Log.i(TAG, msg.trim())
                         Thread { sendLogBytes(msg, "orientation") }.start()
                     }
