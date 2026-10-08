@@ -818,9 +818,33 @@ class VortexCamPlugin(
         } catch (e: Exception) { Log.w(TAG, "sendLog: $e"); false }
     }
 
+    // What SAMBA still has to turn the SRT picture (CVO 0..3): the camera's upright turn minus what the relay
+    // already turned in pixels (landscape upside down). Portrait used to rely on KEY_ROTATION, which MPEG-TS
+    // never carries → the phone held upright arrived sideways in SAMBA (2026-10-08).
+    private fun srtCvo(): Int = ((uprightDegrees() - (relay?.rotation ?: 0) + 360) % 360) / 90
+
     private fun drainToSrt(muxer: TsMuxer) {
         val info = MediaCodec.BufferInfo()
+        var lastCvo = -1
+        var lastCvoSentMs = 0L
+        var lastCvoCheckMs = 0L
         while (streaming.get()) {
+            // Orientation: at start, on every change (checked every 250 ms) and every ~1 s (survives a reconnect).
+            val nowMs = System.currentTimeMillis()
+            if (nowMs - lastCvoCheckMs >= 250) {
+                lastCvoCheckMs = nowMs
+                val cvo = srtCvo()
+                if (cvo != lastCvo || nowMs - lastCvoSentMs >= 1000) {
+                    if (cvo != lastCvo) {
+                        val msg = "[orientación] SRT → rotación $cvo (${cvo * 90}°)
+"
+                        Log.i(TAG, msg.trim())
+                        Thread { sendLogBytes(msg, "orientation") }.start()
+                    }
+                    synchronized(sendLock) { for (p in muxer.muxRotation(cvo)) srtSocket?.send(p) }
+                    lastCvo = cvo; lastCvoSentMs = nowMs
+                }
+            }
             val idx = encoder?.dequeueOutputBuffer(info, 10_000) ?: break
             when {
                 idx == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
@@ -1805,8 +1829,17 @@ class TsMuxer(private val mimeType: String, private val clock: StreamClock) {
 
     fun setFormat(fmt: MediaFormat) { /* SPS/PPS travel in-band with every keyframe */ }
 
+    // Phone orientation (MPEG-TS has no CVO like WHIP): "SROT" | u8 rotation, same PID as the log, one packet.
+    // Values as CVO: 0 = 0°, 1 = 90° clockwise, 2 = 180°, 3 = 90° counter-clockwise — what the receiver turns the
+    // picture to see it upright. A SAMBA that does not know it only accepts "SLOG" and ignores it.
+    @Synchronized fun muxRotation(cvo: Int): List<ByteArray> {
+        val out = mutableListOf<ByteArray>()
+        logCc = packetize(logPid, "SROT".toByteArray(Charsets.US_ASCII) + byteArrayOf((cvo and 0x03).toByte()), logCc, out)
+        return out
+    }
+
     // Diagnostic log inside the stream. Message: "SLOG" | u32 BE textLen | u8 reasonLen | reason | text.
-    fun muxLog(text: ByteArray, reason: String): List<ByteArray> {
+    @Synchronized fun muxLog(text: ByteArray, reason: String): List<ByteArray> {
         val r = reason.toByteArray(Charsets.UTF_8).let { if (it.size > 255) it.copyOf(255) else it }
         val hdr = java.nio.ByteBuffer.allocate(9 + r.size)
             .put("SLOG".toByteArray(Charsets.US_ASCII)).putInt(text.size).put(r.size.toByte()).put(r).array()
