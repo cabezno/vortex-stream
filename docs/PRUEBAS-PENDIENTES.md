@@ -140,10 +140,14 @@ el programa: `ProgramAudio: Mic-only phones in the mix: N` en el registro del sw
 **Qué tenés que ver:**
 - En SAMBA la imagen siempre **derecha**, en las dos posiciones apaisadas, y se acomoda sola al girar (en < 1 s).
 - La cámara frontal también derecha (antes podía estar al revés: se usaba la fórmula de la trasera).
-- En retrato sigue como antes (la imagen apaisada de lado: pendiente aparte).
+- **En retrato, solo por SRT y con un SAMBA que ya lo soporte** (Mac desde `a277097`; Windows cuando `mac` entre a
+  `main`): la imagen vertical, derecha, con barras al costado, y se acomoda sola al girar (en < 1 s). Con un SAMBA viejo
+  o por SBL/RTMP sigue como antes (de lado).
 
 **Si falla:** `RotatingRelay` / `Stream turned in pixels: 180°` en el registro del celular. «RotatingRelay unavailable»
-= el celular no pudo armar el paso por GPU y va directo al codificador como antes.
+= el celular no pudo armar el paso por GPU y va directo al codificador como antes. Retrato por SRT: en el log del
+celular que llega a SAMBA (phone_logs) tiene que aparecer `[orientación] SRT → rotación 1 (90°)` al girar, y en el
+log de SAMBA `phone orientation: rotation 1 (90°)`. Si está la del celular y no la de SAMBA, ese SAMBA es viejo.
 
 ## P8. Unirse a mano a la red propia (Android 9 o anterior, o conexión rechazada)
 
