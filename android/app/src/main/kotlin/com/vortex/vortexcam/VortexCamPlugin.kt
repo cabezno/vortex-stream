@@ -360,9 +360,25 @@ class VortexCamPlugin(
         }, cameraHandler)
     }
 
+    // The camera's largest output size with the encoder's aspect (±1 %), at most the encoder's size; null = none.
+    private fun cameraSizeForEncoder(cameraId: String, encW: Int, encH: Int): android.util.Size? = try {
+        val map = cameraManager?.getCameraCharacteristics(cameraId)
+            ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val target = encW.toDouble() / encH
+        map?.getOutputSizes(android.graphics.SurfaceTexture::class.java)
+            ?.filter { Math.abs(it.width.toDouble() / it.height - target) / target < 0.01 &&
+                       it.width <= encW && it.height <= encH }
+            ?.maxByOrNull { it.width.toLong() * it.height }
+    } catch (e: Exception) { null }
+
     private fun startPreviewSession() {
         val dev = cameraDevice ?: return
         val surfaces = mutableListOf(previewSurface ?: return)
+        relay?.let { r ->
+            val sz = cameraSizeForEncoder(dev.id, r.width, r.height)
+            if (sz != null) r.setInputSize(sz.width, sz.height)
+            else Log.w(TAG, "camera ${dev.id}: no ${r.width}x${r.height}-shaped size — the relay keeps the encoder size")
+        }
         (relay?.inputSurface ?: encoderSurface)?.let { surfaces.add(it) }
         try { dev.createCaptureSession(surfaces, object : CameraCaptureSession.StateCallback() {
             override fun onConfigured(session: CameraCaptureSession) {

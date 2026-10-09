@@ -16,7 +16,7 @@ import org.webrtc.GlRectDrawer
  * the picture upside down. The camera now draws into [inputSurface]; every frame is drawn into the encoder's surface
  * turned by [rotation] (0 or 180; follows the phone live). Costs one GPU copy per frame.
  */
-class RotatingRelay(encoderSurface: Surface, private val width: Int, private val height: Int) {
+class RotatingRelay(encoderSurface: Surface, val width: Int, val height: Int) {
     companion object { private const val TAG = "RotatingRelay" }
 
     @Volatile var rotation = 0
@@ -31,6 +31,16 @@ class RotatingRelay(encoderSurface: Surface, private val width: Int, private val
         private set
     @Volatile private var markRequested = false
     fun requestMark() { markTsNs = Long.MIN_VALUE; markRequested = true }
+
+    // Size the CAMERA writes into [inputSurface] (2026-10-09). It was the encoder's (3840x2160): a camera without that
+    // size (the Redmi's front one) picks another — 1920x1440, 4:3 — which was then stretched to 16:9. The caller gives
+    // the camera's own largest size with the encoder's aspect; the relay scales it, never distorts. Blocks until set.
+    fun setInputSize(w: Int, h: Int) {
+        val done = java.util.concurrent.CountDownLatch(1)
+        handler.post { try { texture.setDefaultBufferSize(w, h) } finally { done.countDown() } }
+        done.await(1, java.util.concurrent.TimeUnit.SECONDS)
+        Log.i(TAG, "camera → relay ${w}x$h (encoder ${width}x$height)")
+    }
 
     private val thread = HandlerThread("RotatingRelay").apply { start() }
     private val handler = Handler(thread.looper)
@@ -73,25 +83,22 @@ class RotatingRelay(encoderSurface: Surface, private val width: Int, private val
         Log.i(TAG, "relay ${width}x$height ready")
     }
 
-    // The SurfaceTexture transform of a camera already turns the picture upright for the CURRENT display rotation:
-    // with the phone held upright that is a 90° turn, and drawing it into the landscape encoder surface squeezed a
-    // portrait picture into 16:9 — SAMBA got it stretched, and then turned it again by the SROT it was sent
-    // (2026-10-08, DT-139). Cancel any quarter turn of that matrix (keep its crop / mirror) so the encoder always
-    // gets the sensor's own landscape frame; SAMBA turns it upright from SROT (srtCvo).
-    private val unturned = FloatArray(16)
-    private val quarter = FloatArray(16)
-    private fun withoutQuarterTurn(m: FloatArray): FloatArray {
-        // Column 0 = where u goes. Upright (or mirrored / 180°) keeps it on the u axis; a quarter turn moves it to v.
-        if (Math.abs(m[1]) <= Math.abs(m[0])) return m
-        for (deg in floatArrayOf(90f, -90f)) {
-            android.opengl.Matrix.setIdentityM(quarter, 0)
-            android.opengl.Matrix.translateM(quarter, 0, 0.5f, 0.5f, 0f)
-            android.opengl.Matrix.rotateM(quarter, 0, deg, 0f, 0f, 1f)
-            android.opengl.Matrix.translateM(quarter, 0, -0.5f, -0.5f, 0f)
-            android.opengl.Matrix.multiplyMM(unturned, 0, m, 0, quarter, 0)
-            if (unturned[0] > 0f) return unturned            // same handedness as the landscape case (u → +u)
-        }
-        return unturned
+    // The camera's SurfaceTexture transform is NOT used to draw (2026-10-09). It turns the picture by the sensor
+    // orientation (a fixed quarter turn) and, for the FRONT camera, also mirrors it like a selfie preview: drawing it
+    // squeezed a portrait picture into 16:9 (DT-139), and "cancelling" its quarter turn turned the front camera's mirror
+    // into an upside-down flip. The relay draws the sensor's own frame — no turn, no mirror, only GL's v flip — and the
+    // orientation goes as data (SROT / SBL header: Android's JPEG-orientation formula, sensor ∓ device turn).
+    private val raw = floatArrayOf(1f, 0f, 0f, 0f,  0f, -1f, 0f, 0f,  0f, 0f, 1f, 0f,  0f, 1f, 0f, 1f)   // (u, 1 − v)
+    // raw · quarter turn about the centre: what the back camera's own transform does for the phone held upright
+    // (+90); −90 for the other way. Used to send the picture UPRIGHT when the receiver cannot be told (RTMP).
+    private fun rawTurned(deg: Float, out: FloatArray): FloatArray {
+        val q = FloatArray(16)
+        android.opengl.Matrix.setIdentityM(q, 0)
+        android.opengl.Matrix.translateM(q, 0, 0.5f, 0.5f, 0f)
+        android.opengl.Matrix.rotateM(q, 0, deg, 0f, 0f, 1f)
+        android.opengl.Matrix.translateM(q, 0, -0.5f, -0.5f, 0f)
+        android.opengl.Matrix.multiplyMM(out, 0, raw, 0, q, 0)
+        return out
     }
 
     // At most [maxFps] frames into the encoder (2026-10-09). The camera may run up to 60 fps (its AE range keeps
@@ -110,19 +117,16 @@ class RotatingRelay(encoderSurface: Surface, private val width: Int, private val
             if (lastDrawnTs != Long.MIN_VALUE && ts - lastDrawnTs in 0 until minGapNs) return
             lastDrawnTs = ts
             if (markRequested) { markTsNs = ts; markRequested = false }
-            texture.getTransformMatrix(matrix)
-            val base = withoutQuarterTurn(matrix)
+            texture.getTransformMatrix(matrix)                 // only logged (see `raw`)
             if (matrix[0] != lastM0 || matrix[1] != lastM1) {
                 lastM0 = matrix[0]; lastM1 = matrix[1]
-                Log.i(TAG, "camera transform [${matrix[0]},${matrix[1]},${matrix[4]},${matrix[5]}] → " +
-                           if (base === matrix) "as is" else "quarter turn cancelled")
+                Log.i(TAG, "camera transform [${matrix[0]},${matrix[1]},${matrix[4]},${matrix[5]}] (not used: raw frame)")
             }
             // Receivers that cannot be told the orientation (RTMP: YouTube, Twitch, any server) get the picture
-            // UPRIGHT with black bars when the phone is held upright: the camera's own transform (`matrix`) is exactly
-            // that turn (back camera), drawn into a centred portrait-shaped viewport instead of stretched to 16:9.
+            // UPRIGHT with black bars when the phone is held upright, drawn into a centred portrait-shaped viewport.
             val turn = if (pillarbox) uprightTurn else 0
             if (turn == 90 || turn == 270) {
-                val m = if (turn == 90) matrix else turned.also { android.opengl.Matrix.multiplyMM(it, 0, matrix, 0, half, 0) }
+                val m = rawTurned(if (turn == 90) 90f else -90f, turned)
                 val vw = (height.toLong() * height / width).toInt()
                 GLES20.glViewport(0, 0, width, height)
                 GLES20.glClearColor(0f, 0f, 0f, 1f)
@@ -131,8 +135,8 @@ class RotatingRelay(encoderSurface: Surface, private val width: Int, private val
                 egl.swapBuffers(texture.timestamp)
                 return
             }
-            val m = if (rotation == 180) turned.also { android.opengl.Matrix.multiplyMM(it, 0, base, 0, half, 0) }
-                    else base
+            val m = if (rotation == 180) turned.also { android.opengl.Matrix.multiplyMM(it, 0, raw, 0, half, 0) }
+                    else raw
             GLES20.glViewport(0, 0, width, height)
             drawer.drawOes(oesTex, m, width, height, 0, 0, width, height)
             egl.swapBuffers(texture.timestamp)
