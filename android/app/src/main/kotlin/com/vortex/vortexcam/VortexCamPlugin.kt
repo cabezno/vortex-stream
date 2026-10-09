@@ -166,6 +166,7 @@ class VortexCamPlugin(
     private val SBL_MAX_PAYLOAD     = 1200
     private val SBL_HEADER_SIZE     = 32
     private val SBL_FRAME_HEADER_SIZE = 32
+    @Volatile private var sblFrameCvo = 0   // orientation the frame being sent was shot with (cvoForFrame)
 
     // ====================================================================
     // Registration
@@ -476,9 +477,52 @@ class VortexCamPlugin(
     // Pixel rotation for the stream (RotatingRelay): the phone held in either landscape gives 0 or 180.
     private var relay: RotatingRelay? = null
     private var displayListener: android.hardware.display.DisplayManager.DisplayListener? = null
+    // Orientation of what is STREAMED, from the accelerometer (2026-10-09). The display rotation (what the preview
+    // follows) only changes after Android's auto-rotate settles — ~1 s plus the animation — and SAMBA turned the picture
+    // that much later. The camera frame no longer depends on the display (the relay always sends the sensor's frame),
+    // so the stream can follow the phone itself. It switches 15° past the 45° edge: no flapping there, and a phone
+    // held a little tilted still turns (the first version waited until it was within 15° of upright: felt slow).
+    @Volatile private var deviceDisplayDeg = -1          // the display rotation the phone's pose means; -1 = unknown
+    private var orientListener: android.view.OrientationEventListener? = null
+    private fun startOrientationListener() {
+        if (orientListener != null) return
+        orientListener = object : android.view.OrientationEventListener(context, android.hardware.SensorManager.SENSOR_DELAY_UI) {
+            override fun onOrientationChanged(o: Int) {
+                if (o == ORIENTATION_UNKNOWN) return
+                val q    = ((o + 45) / 90 % 4) * 90                     // device turned q° clockwise from natural
+                val cand = (360 - q) % 360                              // → the display rotation that pose gives
+                val cur  = deviceDisplayDeg
+                if (cand == cur) return
+                if (cur >= 0) {
+                    var d = Math.abs(o - q); if (d > 180) d = 360 - d
+                    if (d > 30) return                                  // not yet 15° past the 45° edge
+                }
+                deviceDisplayDeg = cand
+                updateRelayRotation()
+            }
+        }.also {
+            if (it.canDetectOrientation()) { it.enable(); Log.i(TAG, "orientation from the accelerometer (stream)") }
+            else { orientListener = null; Log.i(TAG, "no accelerometer orientation — stream follows the display") }
+        }
+    }
+    private fun stopOrientationListener() {
+        orientListener?.disable(); orientListener = null; deviceDisplayDeg = -1
+    }
+    /** [uprightDegrees] for the STREAM: the phone's pose when known, else the display. */
+    private fun streamUprightDegrees(): Int {
+        val d = deviceDisplayDeg.takeIf { it >= 0 } ?: displayDegrees()
+        val sensor = cachedSensorOrientation
+        return if (cameraFacing == CameraCharacteristics.LENS_FACING_FRONT) (sensor + d) % 360 else (sensor - d + 360) % 360
+    }
+
+    // RTMP has no way to carry the orientation: the relay turns the picture upright itself (black bars when held
+    // upright). SRT / SBL send the sensor frame + the orientation (SROT / frame header) and SAMBA turns it.
+    @Volatile private var pillarboxPixels = false
     private fun updateRelayRotation() {
-        val r = uprightDegrees()
+        val r = streamUprightDegrees()
         relay?.rotation = if (r == 180) 180 else 0
+        relay?.pillarbox = pillarboxPixels
+        relay?.uprightTurn = (r - (relay?.rotation ?: 0) + 360) % 360
     }
     private fun releaseRelay() {
         displayListener?.let {
@@ -486,6 +530,7 @@ class VortexCamPlugin(
                 .unregisterDisplayListener(it) } catch (_: Exception) {}
         }
         displayListener = null
+        stopOrientationListener()
         relay?.release(); relay = null
     }
     // Returns the rotation angle (0/90/180/270) to apply to the encoder so that
@@ -624,6 +669,7 @@ class VortexCamPlugin(
                     override fun onDisplayRemoved(id: Int) {}
                     override fun onDisplayChanged(id: Int) { updateRelayRotation() }
                 }.also { dm.registerDisplayListener(it, android.os.Handler(android.os.Looper.getMainLooper())) }
+                android.os.Handler(android.os.Looper.getMainLooper()).post { startOrientationListener() }
                 Log.i(TAG, "Stream turned in pixels: ${relay?.rotation}°")
             }
 
@@ -768,6 +814,7 @@ class VortexCamPlugin(
 
         thread(name = "SrtStart") {
             try {
+                pillarboxPixels = false          // SRT: SAMBA turns it from SROT
                 if (!setupEncoder(codec, width, height, bitrate, keyframeMs)) {
                     result.error("ENC", "Encoder setup failed — $lastEncoderError", null); return@thread
                 }
@@ -821,27 +868,50 @@ class VortexCamPlugin(
     // What SAMBA still has to turn the SRT picture (CVO 0..3): the camera's upright turn minus what the relay
     // already turned in pixels (landscape upside down). Portrait used to rely on KEY_ROTATION, which MPEG-TS
     // never carries → the phone held upright arrived sideways in SAMBA (2026-10-08).
-    private fun srtCvo(): Int = ((uprightDegrees() - (relay?.rotation ?: 0) + 360) % 360) / 90
+    private fun srtCvo(): Int = ((streamUprightDegrees() - (relay?.rotation ?: 0) + 360) % 360) / 90
+
+    // Orientation tied to the FRAMES, not to the moment of the turn (2026-10-09). The video reaches SAMBA a few hundred
+    // ms after it is shot (encoder + network + receive buffer) but the orientation went out at once, so SAMBA turned
+    // frames shot BEFORE the turn — wrong for the whole delay. Now a change is armed (the relay marks the first camera
+    // frame drawn after it) and takes effect from the first ENCODED frame with that timestamp: SRT sends SROT right
+    // before that frame, SBL stamps every frame with the orientation it was shot with.
+    @Volatile private var frameCvo = 0
+    private var pendingCvo = -1
+    private val cvoLock = Any()
+    private fun armCvoChange() = synchronized(cvoLock) {
+        val t = srtCvo()
+        if (t == frameCvo) { pendingCvo = -1; return@synchronized }        // no change, or turned back in time
+        if (t == pendingCvo) return@synchronized
+        pendingCvo = t
+        val r = relay
+        if (r == null) { frameCvo = t; pendingCvo = -1 } else r.requestMark()
+    }
+    private fun cvoForFrame(ptsUs: Long): Int = synchronized(cvoLock) {
+        if (pendingCvo >= 0) {
+            val r = relay
+            val mark = r?.markTsNs ?: Long.MIN_VALUE
+            if (r == null || (mark != Long.MIN_VALUE && ptsUs * 1000 >= mark)) { frameCvo = pendingCvo; pendingCvo = -1 }
+        }
+        frameCvo
+    }
+    private fun resetCvo() = synchronized(cvoLock) { frameCvo = srtCvo(); pendingCvo = -1 }
 
     private fun drainToSrt(muxer: TsMuxer) {
         val info = MediaCodec.BufferInfo()
         var lastCvo = -1
         var lastCvoSentMs = 0L
         var lastCvoCheckMs = 0L
+        resetCvo()
         while (streaming.get()) {
-            // Orientation: at start, on every change (checked every 250 ms) and every ~1 s (survives a reconnect).
+            // Orientation: a change is ARMED when the phone turns (checked every 250 ms) and sent with the first frame
+            // shot after it (below); the current one is repeated every ~1 s (survives a reconnect).
             val nowMs = System.currentTimeMillis()
             if (nowMs - lastCvoCheckMs >= 250) {
                 lastCvoCheckMs = nowMs
-                val cvo = srtCvo()
-                if (cvo != lastCvo || nowMs - lastCvoSentMs >= 1000) {
-                    if (cvo != lastCvo) {
-                        val msg = "[orientación] SRT → rotación $cvo (${cvo * 90}°)\n"
-                        Log.i(TAG, msg.trim())
-                        Thread { sendLogBytes(msg, "orientation") }.start()
-                    }
-                    synchronized(sendLock) { for (p in muxer.muxRotation(cvo)) srtSocket?.send(p) }
-                    lastCvo = cvo; lastCvoSentMs = nowMs
+                armCvoChange()
+                if (lastCvo >= 0 && nowMs - lastCvoSentMs >= 1000) {
+                    synchronized(sendLock) { for (p in muxer.muxRotation(lastCvo)) srtSocket?.send(p) }
+                    lastCvoSentMs = nowMs
                 }
             }
             val idx = encoder?.dequeueOutputBuffer(info, 10_000) ?: break
@@ -855,10 +925,25 @@ class VortexCamPlugin(
             val buf = encoder!!.getOutputBuffer(idx) ?: run {
                 encoder!!.releaseOutputBuffer(idx, false); continue
             }
+            if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+                val cvo = cvoForFrame(info.presentationTimeUs)
+                if (cvo != lastCvo) {                    // right before the first frame shot with it
+                    synchronized(sendLock) { for (p in muxer.muxRotation(cvo)) srtSocket?.send(p) }
+                    val msg = "[orientación] SRT → rotación $cvo (${cvo * 90}°)\n"
+                    Log.i(TAG, msg.trim())
+                    Thread { sendLogBytes(msg, "orientation") }.start()
+                    lastCvo = cvo; lastCvoSentMs = System.currentTimeMillis()
+                }
+            }
+            // ONE write per frame (2026-10-09). Writing each 188-byte TS packet on its own (tcpNoDelay) meant ~20 000
+            // writes and TCP segments a second at 4K / 30 Mbps: this thread pegged a CPU core and the Wi-Fi radio
+            // sent tiny segments — the phone overheated and its encoder throttled to ~3 fps (jerky picture in SAMBA).
             val pkts = muxer.mux(buf, info)
-            for (pkt in pkts) {
-                synchronized(sendLock) { srtSocket?.send(pkt) }
-                bytesSent.addAndGet(pkt.size.toLong())
+            if (pkts.isNotEmpty()) {
+                val joined = ByteArray(pkts.size * 188)
+                for ((i, pkt) in pkts.withIndex()) pkt.copyInto(joined, i * 188)
+                synchronized(sendLock) { srtSocket?.send(joined) }
+                bytesSent.addAndGet(joined.size.toLong())
             }
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
@@ -878,6 +963,7 @@ class VortexCamPlugin(
 
         thread(name = "RtmpStart") {
             try {
+                pillarboxPixels = true           // RTMP: upright in the pixels (no orientation on the wire)
                 if (!setupEncoder("h264", width, height, bitrate, keyframeMs)) {
                     result.error("ENC", "Encoder setup failed — $lastEncoderError", null); return@thread
                 }
@@ -1001,6 +1087,7 @@ class VortexCamPlugin(
 
         thread(name = "SblStart") {
             try {
+                pillarboxPixels = false          // SBL: orientation in the frame header
                 if (!setupEncoder("h264", width, height, bitrate, 1000)) {
                     result.error("ENC", "Encoder setup failed — $lastEncoderError", null); return@thread
                 }
@@ -1271,9 +1358,12 @@ class VortexCamPlugin(
     private fun drainToSbl(width: Int, height: Int) {
         val info = MediaCodec.BufferInfo()
         var keepaliveNs = System.nanoTime()
+        var cvoCheckNs = 0L
+        resetCvo()
         while (streaming.get()) {
             // Keepalive every 1s
             val now = System.nanoTime()
+            if (now - cvoCheckNs > 250_000_000L) { cvoCheckNs = now; armCvoChange() }   // orientation → frame header
             if (now - keepaliveNs > 1_000_000_000L) {
                 sendSblKeepalive()
                 keepaliveNs = now
@@ -1316,6 +1406,7 @@ class VortexCamPlugin(
                 continue
             }
 
+            sblFrameCvo = cvoForFrame(info.presentationTimeUs)
             sendSblVideoFrame(nalData, isKey, streamClock.video.sessionUs(info.presentationTimeUs), width, height)
             bytesSent.addAndGet(nalData.size.toLong())
             encoder!!.releaseOutputBuffer(idx, false)
@@ -1413,7 +1504,9 @@ class VortexCamPlugin(
                 pkt.putShort(1)  // transferFunc
                 pkt.putShort(1)  // matrixCoeff
                 pkt.putInt(0)    // sampleRate (video=0)
-                pkt.putInt(0)    // reserved
+                // reserved → orientation (2026-10-09, DT-139): 0x80 | CVO 0..3, the same value SRT sends as SROT.
+                // SAMBA turns the picture from it; 0 (older apps) = no orientation, as before.
+                pkt.putInt(0x80 or sblFrameCvo)
             }
             pkt.put(chunk)
             val dg = pkt.array().copyOf(SBL_HEADER_SIZE + payloadLen)
