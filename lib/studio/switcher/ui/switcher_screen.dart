@@ -16,6 +16,8 @@ import '../encode/program_encoder.dart';
 import '../local/local_camera.dart';
 import '../mixer/program_mixer.dart';
 import '../output/recorder.dart';
+import '../output/recordings.dart';
+import 'recordings_sheet.dart';
 import '../output/rtmp_out.dart';
 import '../room/room_host.dart';
 import '../switch/director.dart';
@@ -121,6 +123,16 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     DeviceCapabilities.instance.ensure(cameraGranted: false).then((_) { if (mounted) setState(() {}); });
     _roomHost.start().then((_) {
       setState(() {});
+    });
+    // Recordings made before they went to the gallery are still in the private folder: move them out once.
+    Recordings.rescueOrphans().then((n) {
+      if (n > 0 && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(n == 1 ? 'Pasé 1 grabación anterior a la Galería (Movies/Samba Air).'
+                               : 'Pasé $n grabaciones anteriores a la Galería (Movies/Samba Air).'),
+          action: SnackBarAction(label: 'Ver', onPressed: () => RecordingsSheet.show(context)),
+        ));
+      }
     });
   }
 
@@ -588,12 +600,16 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
 
   Future<void> _toggleRecording() async {
     if (_recorder.isRecording) {
-      final path = await _recorder.stopRecording();
-      if (mounted && path != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Grabación guardada en: $path')),
-        );
-      }
+      await _recorder.stopRecording();
+      if (!mounted) return;
+      final uri = _recorder.lastUri;
+      ScaffoldMessenger.of(context).showSnackBar(uri != null
+          ? SnackBar(
+              content: const Text('Grabación guardada en la Galería (Movies/Samba Air).'),
+              action: SnackBarAction(label: 'Ver', onPressed: () => Recordings.open(uri)),
+            )
+          : const SnackBar(content: Text('Grabación guardada, pero no se pudo pasar a la Galería. '
+              'Se reintenta al volver a abrir el switcher.')));
     } else {
       await _recorder.startRecording();
     }
@@ -755,10 +771,15 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
               return IconButton(
                 icon: Icon(isRec ? SdIcons.record : SdIcons.record,
                     color: isRec ? Sd.magenta : Sd.t2),
-                tooltip: isRec ? 'Detener Grabación SD' : 'Grabar a SD',
+                tooltip: isRec ? 'Detener la grabación' : 'Grabar en el celular',
                 onPressed: _toggleRecording,
               );
             },
+          ),
+          IconButton(
+            icon: const Icon(Icons.video_library_outlined, color: Sd.t2),
+            tooltip: 'Grabaciones',
+            onPressed: () => RecordingsSheet.show(context),
           ),
           // Go live
           ListenableBuilder(

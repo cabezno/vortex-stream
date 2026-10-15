@@ -42,6 +42,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private var secondaryTrack: VideoTrack? = null
 
     private fun register() {
+        RecordingsStore.registerWith(engine, appContext)   // its own channel: recordings in the gallery
         MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "startEncoder" -> {
