@@ -74,6 +74,23 @@ class DeviceCapabilities extends ChangeNotifier {
     }
   }
 
+  /// WHIP already sent real video on this phone (verified live, not just probed).
+  bool get whipKnownGood {
+    final w = raw['webrtc'];
+    return w is Map && w['h264'] == true && w['live'] == true;
+  }
+
+  /// A connection sent real video over WHIP: remember it, so a later slow start is never read as "can't".
+  Future<void> markWhipSupported() async {
+    if (whipKnownGood) return;
+    final m = Map<String, dynamic>.from(_caps ?? {});
+    final prev = (m['webrtc'] is Map) ? Map<String, dynamic>.from(m['webrtc']) : <String, dynamic>{};
+    m['webrtc'] = {...prev, 'h264': true, 'live': true}..remove('reason');
+    m['webrtcChecked'] = true;
+    _caps = m; notifyListeners();
+    try { (await SharedPreferences.getInstance()).setString(_prefsKey, jsonEncode(m)); } catch (_) {}
+  }
+
   /// A connection found out live that WHIP can't encode (fallback when the probe could not run): remember it.
   Future<void> markWhipUnsupported(String reason) async {
     final m = Map<String, dynamic>.from(_caps ?? {});

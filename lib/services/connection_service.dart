@@ -362,6 +362,11 @@ class ConnectionService extends ChangeNotifier {
 
   // ---- Stats polling ----
   void _startStats() {
+    // ICE reports Connected AND then Completed: both call here. A second timer doubled _statsTick, so the
+    // "no video after 12 s" check below fired at ~6 s — before a 4K portrait encoder had sent its first frame
+    // (8 s on the Redmi Note 14, 2026-10-15) — and greyed WHIP for good on a phone that streams fine.
+    if (_statsTimer?.isActive ?? false) return;
+    _statsTick = 0;
     _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       if (_peerConnection == null) return;
       final stats = await _peerConnection!.getStats();
@@ -373,8 +378,12 @@ class ConnectionService extends ChangeNotifier {
           // Live safety net for the capability probe: connected for 12 s and (almost) no video BYTES sent = this
           // phone's encoder can't run inside WebRTC. Bytes, not framesEncoded: early stats can come without that
           // field (null), which read as 0 wrongly greyed WHIP on a Mi A3 that can do it (2026-10-04).
+          // Window is 20 s, not 12: a 4K encoder can take 8 s to start. Once video has flowed, the phone is
+          // remembered as WHIP-capable and never greyed by a later slow start or a stall.
           final sentBytes = (v['bytesSent'] as num?)?.toInt();
-          if (_statsTick == 6 && sentBytes != null && sentBytes < 20000) {
+          if (sentBytes != null && sentBytes >= 20000) {
+            DeviceCapabilities.instance.markWhipSupported();
+          } else if (_statsTick == 10 && sentBytes != null && !DeviceCapabilities.instance.whipKnownGood) {
             const why = 'el encoder H.264 no arrancó al transmitir';
             DeviceCapabilities.instance.markWhipUnsupported(why);
             _state        = ConnectionState.error;
@@ -394,6 +403,7 @@ class ConnectionService extends ChangeNotifier {
 
   // ---- Heartbeat via data channel (latency + keep-alive) ----
   void _startHeartbeat() {
+    if (_heartbeatTimer?.isActive ?? false) return;   // Connected + Completed both land here (see _startStats)
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!isConnected) return;
       final dc = _controlChannel;
