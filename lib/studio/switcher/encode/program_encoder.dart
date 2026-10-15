@@ -91,7 +91,7 @@ class ProgramEncoder extends ChangeNotifier {
       if (!kIsWeb) {
         // The mic permission is asked only if the mic goes into the program (the switcher never needed it before).
         bool mic = false;
-        if (audioMic) {
+        if (audioMic || _micForLocalCam) {
           try { mic = (await Permission.microphone.request()).isGranted; } catch (_) {}
         }
         await _channel.invokeMethod('startEncoder', {
@@ -174,12 +174,32 @@ class ProgramEncoder extends ChangeNotifier {
       try { micOk = (await Permission.microphone.request()).isGranted; } catch (_) {}
     }
     audioMic = micOk;
+    await _sendAudioSources();
+    notifyListeners();
+  }
+
+  /// The switcher's own camera opens without audio (no feedback from the operator's side), so with it on air and
+  /// «audio of the camera on air» the program was silent (2026-10-15). Its audio is this phone's mic: switch the mic
+  /// in while it is on air, without touching the user's own «Micrófono del switcher» choice.
+  bool _micForLocalCam = false;
+  Future<void> setLocalCameraOnAir(bool onAir) async {
+    final want = onAir && audioCamera;
+    if (want == _micForLocalCam) return;
+    if (want) {
+      bool ok = false;
+      try { ok = (await Permission.microphone.request()).isGranted; } catch (_) {}
+      if (!ok) return;
+    }
+    _micForLocalCam = want;
+    await _sendAudioSources();
+  }
+
+  Future<void> _sendAudioSources() async {
     try {
       if (!kIsWeb && _isEncoding) {
-        await _channel.invokeMethod('setAudioSources', {'camera': camera, 'mic': micOk});
+        await _channel.invokeMethod('setAudioSources', {'camera': audioCamera, 'mic': audioMic || _micForLocalCam});
       }
     } catch (_) {}
-    notifyListeners();
   }
 
   /// Fetch real metrics from the hardware MediaCodec pipeline
