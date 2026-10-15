@@ -5,6 +5,7 @@ import android.util.Log
 import android.util.LongSparseArray
 import com.cloudwebrtc.webrtc.FlutterWebRTCPlugin
 import com.vortex.vortexcam.studio.encoder.HardwareProgramEncoder
+import com.vortex.vortexcam.studio.encoder.SwitcherMic
 import com.vortex.vortexcam.studio.gl.LayoutMode
 import com.vortex.vortexcam.studio.rtmp.RtmpStreamer
 import com.vortex.vortexcam.studio.webrtc.WebRtcSourceSink
@@ -40,6 +41,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private var micDelayMs = 0
     private var micTracks: List<Pair<org.webrtc.AudioTrack, Int>> = emptyList()
     private var secondaryTrack: VideoTrack? = null
+    private val micMeterOwner = Any()
 
     private fun register() {
         RecordingsStore.registerWith(engine, appContext)   // its own channel: recordings in the gallery
@@ -112,6 +114,12 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                                                     call.argument<Boolean>("camera") ?: true)
                     result.success(true)
                 }
+                // Level meter of the switcher's own camera: keeps the mic open while that camera is on.
+                "setMicMeter" -> {
+                    val on = call.argument<Boolean>("on") ?: false
+                    result.success(if (on) SwitcherMic.acquire(micMeterOwner) else { SwitcherMic.release(micMeterOwner); false })
+                }
+                "getMicLevel" -> result.success(SwitcherMic.levelDbfs.toDouble())
                 "setLayoutMode" -> {
                     val modeStr = call.argument<String>("mode") ?: "single"
                     val layoutMode = when (modeStr.lowercase()) {
