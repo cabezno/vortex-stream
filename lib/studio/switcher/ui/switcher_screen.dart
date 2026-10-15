@@ -106,7 +106,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _director = Director(roomHost: _roomHost, subscriber: _subscriber);
     _encoder = ProgramEncoder();
     _rtmpOut = RtmpOut(encoder: _encoder);
-    _recorder = ProgramRecorder(encoder: _encoder);
+    _recorder = ProgramRecorder(encoder: _encoder, isLive: () => _rtmpOut.isStreaming);
     _mixer = ProgramMixer(roomHost: _roomHost, encoder: _encoder);
     _localCam = LocalCameraSource(roomHost: _roomHost);
     _sync = SourceSync(roomHost: _roomHost, subscriber: _subscriber, encoder: _encoder, localPeerId: _localCam.peerId);
@@ -175,6 +175,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
       _lastMicTracks = micTracks;
       _encoder.setMicTracks(micTracks);
     }
+    // The switcher's own camera has no audio track: on air, its audio is this phone's mic.
+    _encoder.setLocalCameraOnAir(_localCam.isActive && primaryPeerId == _localCam.peerId);
     if (args == _lastSources) return;   // the room/subscriber notify often: only send changes
     _lastSources = args;
     _encoder.setCameraSources(
@@ -867,7 +869,9 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                 icon: SdIcons.record),
                           ],
                           const Spacer(),
-                          SdPill('${_encoder.width}×${_encoder.height} · ${_encoder.fps} fps', color: Sd.t2),
+                          // What the program is encoded at — the recording and the live stream share it.
+                          SdPill('${_encoder.width}×${_encoder.height} · ${_encoder.fps} fps · '
+                              '${(_encoder.bitrateKbps / 1000).toStringAsFixed(1)} Mbps', color: Sd.t2),
                         ]),
                       ),
                       // Layout selector + second camera

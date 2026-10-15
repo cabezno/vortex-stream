@@ -18,7 +18,10 @@ class ProgramRecorder extends ChangeNotifier {
   int _bytesWritten = 0;
   String _errorMessage = '';
 
-  ProgramRecorder({required this.encoder});
+  /// True while the program is also live (RTMP): the encoder is shared, so stopping the recording must not stop it.
+  final bool Function()? isLive;
+
+  ProgramRecorder({required this.encoder, this.isLive});
 
   RecordingState get state => _state;
   bool get isRecording => _state == RecordingState.recording;
@@ -127,7 +130,13 @@ class ProgramRecorder extends ChangeNotifier {
       } catch (_) {}
     }
 
+    final kbps = encoder.bitrateKbps;
     await encoder.stop();   // the MP4 is closed when this returns (HardwareProgramEncoder.stop)
+    // Recording and the live stream share one encoder: stopping it left RTMP connected but fed nothing, so ending a
+    // recording silently killed the broadcast (2026-10-15). Restart it without a file (RTMP re-attaches natively).
+    if (!_disposed && (isLive?.call() ?? false)) {
+      try { await encoder.start(bitrateKbps: kbps); } catch (e) { debugPrint('[ProgramRecorder] re-arranque: $e'); }
+    }
 
     _state = RecordingState.idle;
     _recordingStartTime = null;
