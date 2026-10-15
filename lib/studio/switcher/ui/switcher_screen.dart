@@ -678,23 +678,16 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Sd.void_,
-      appBar: AppBar(
-        backgroundColor: Sd.void_,
-        titleSpacing: 4,
-        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('SWITCHER', style: SdText.overline.copyWith(color: Sd.magenta, letterSpacing: 1.6)),
-          const SizedBox(height: 2),
-          Row(children: [
-            const Flexible(child: Text('Samba Studio', overflow: TextOverflow.ellipsis)),
-            const SizedBox(width: 8),
-            Text(':8088', style: SdText.caption),
-          ]),
-        ]),
-        actions: [
+  /// Switcher tools. They lived in the app bar and on an upright phone did not fit: buttons piled up and the last
+  /// ones were cut off (2026-10-15). In a Wrap they take a second line instead of disappearing.
+  Widget _buildToolbar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 2),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 2,
+        runSpacing: 2,
+        children: [
           // Local camera (this phone's own camera as a source)
           ListenableBuilder(
             listenable: _localCam,
@@ -765,6 +758,33 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
               );
             },
           ),
+          IconButton(
+            icon: const Icon(Icons.video_library_outlined, color: Sd.t2),
+            tooltip: 'Grabaciones',
+            onPressed: () => RecordingsSheet.show(context),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Sd.void_,
+      appBar: AppBar(
+        backgroundColor: Sd.void_,
+        titleSpacing: 4,
+        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('SWITCHER', style: SdText.overline.copyWith(color: Sd.magenta, letterSpacing: 1.6)),
+          const SizedBox(height: 2),
+          Row(children: [
+            const Flexible(child: Text('Samba Studio', overflow: TextOverflow.ellipsis)),
+            const SizedBox(width: 8),
+            Text(':8088', style: SdText.caption),
+          ]),
+        ]),
+        actions: [
           // Record
           ListenableBuilder(
             listenable: _recorder,
@@ -777,11 +797,6 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 onPressed: _toggleRecording,
               );
             },
-          ),
-          IconButton(
-            icon: const Icon(Icons.video_library_outlined, color: Sd.t2),
-            tooltip: 'Grabaciones',
-            onPressed: () => RecordingsSheet.show(context),
           ),
           // Go live
           ListenableBuilder(
@@ -821,6 +836,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
 
           return Column(
             children: [
+              _buildToolbar(),
               // 1. Program monitor
               Expanded(
                 flex: 4,
@@ -850,25 +866,23 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                       // Status pills
                       Positioned(
                         top: 10, left: 10, right: 10,
-                        child: Row(children: [
+                        // Wrap: with REC + EN VIVO + SIN AUDIO + the quality pill the row overflowed on an upright phone.
+                        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Expanded(child: Wrap(spacing: 6, runSpacing: 6, children: [
                           const SdPill('PROGRAMA', color: Sd.red, solid: true),
                           if (_rtmpOut.isStreaming) ...[
-                            const SizedBox(width: 6),
                             _rtmpOut.reconnecting
                                 ? const SdPill('RECONECTANDO…', color: Sd.amber, icon: SdIcons.arrowsClockwise)
                                 : SdPill('EN VIVO · ${_rtmpOut.currentBitrateKbps} kbps', color: Sd.red,
                                     icon: SdIcons.broadcast),
-                            if (!_rtmpOut.reconnecting && !_rtmpOut.hasAudio) ...[
-                              const SizedBox(width: 6),
+                            if (!_rtmpOut.reconnecting && !_rtmpOut.hasAudio)
                               const SdPill('SIN AUDIO', color: Sd.amber, icon: SdIcons.speakerSlash),
-                            ],
                           ],
-                          if (_recorder.isRecording) ...[
-                            const SizedBox(width: 6),
+                          if (_recorder.isRecording)
                             SdPill('REC · ${_recorder.fileSizeMb.toStringAsFixed(1)} MB', color: Sd.magenta,
                                 icon: SdIcons.record),
-                          ],
-                          const Spacer(),
+                          ])),
+                          const SizedBox(width: 6),
                           // What the program is encoded at — the recording and the live stream share it.
                           SdPill('${_encoder.width}×${_encoder.height} · ${_encoder.fps} fps · '
                               '${(_encoder.bitrateKbps / 1000).toStringAsFixed(1)} Mbps', color: Sd.t2),
@@ -877,8 +891,12 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                       // Layout selector + second camera
                       Positioned(
                         bottom: 10, left: 10, right: 10,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        // Wrap: the layout chips + CORTE / second-camera menu did not fit side by side upright.
+                        child: Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 6,
+                          runSpacing: 6,
                           children: [
                             Container(
                               padding: const EdgeInsets.all(3),

@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:samba_protocol/samba_protocol.dart';
 import '../room/room_host.dart';
@@ -11,8 +13,9 @@ import '../room/room_host.dart';
 /// virtual" en el [RoomHost] para aparecer en la grilla/roster junto a las
 /// cámaras remotas y poder cortarla desde el Director igual que a las demás.
 ///
-/// Primer paso VIDEO-ONLY (audio:false) para evitar realimentación del micrófono
-/// del operador; el mic local + VAD para el Audio Switcher queda como follow-up.
+/// VIDEO-ONLY (audio:false): su audio es el micrófono del celular, que maneja el lado
+/// nativo (SwitcherMic) para el programa y para el medidor de nivel de su tarjeta.
+/// El nivel NO entra al corte automático: la voz del operador la pondría al aire.
 class LocalCameraSource extends ChangeNotifier {
   final RoomHost roomHost;
   final String peerId;
@@ -26,6 +29,8 @@ class LocalCameraSource extends ChangeNotifier {
   String? deviceId;
   bool _rendererReady = false;
   Timer? _keepAlive;
+  Timer? _meter;
+  static const _native = MethodChannel('com.samba.studio/program_encoder');
 
   LocalCameraSource({
     required this.roomHost,
@@ -54,9 +59,33 @@ class LocalCameraSource extends ChangeNotifier {
     _keepAlive = Timer.periodic(const Duration(seconds: 3), (_) {
       roomHost.touchPeer(peerId);
     });
+    _startMeter();
 
     _active = true;
     notifyListeners();
+  }
+
+  /// Nivel del micrófono del switcher en la tarjeta de esta cámara (antes quedaba vacío: no hay track de audio).
+  Future<void> _startMeter() async {
+    try {
+      if (!(await Permission.microphone.request()).isGranted) return;
+      if (await _native.invokeMethod<bool>('setMicMeter', {'on': true}) != true) return;
+    } catch (_) { return; }
+    if (!_active) { _stopMeter(); return; }
+    _meter?.cancel();
+    _meter = Timer.periodic(const Duration(milliseconds: 200), (_) async {
+      final db = ((await _native.invokeMethod<double>('getMicLevel').catchError((_) => null)) ?? -100).clamp(-60.0, 0.0);
+      final p = roomHost.room.peers[peerId];
+      if (p == null || (p.lastAudioDbfs - db).abs() < 1) return;
+      p.lastAudioDbfs = db;
+      notifyListeners();
+    });
+  }
+
+  void _stopMeter() {
+    _meter?.cancel();
+    _meter = null;
+    _native.invokeMethod('setMicMeter', {'on': false}).catchError((_) => null);
   }
 
   Future<void> _openCamera() async {
@@ -101,6 +130,7 @@ class LocalCameraSource extends ChangeNotifier {
     if (!_active) return;
     _keepAlive?.cancel();
     _keepAlive = null;
+    _stopMeter();
     _stream?.getTracks().forEach((t) => t.stop());
     _stream = null;
     renderer.srcObject = null;
@@ -113,6 +143,7 @@ class LocalCameraSource extends ChangeNotifier {
   void dispose() {
     _keepAlive?.cancel();
     _keepAlive = null;
+    _stopMeter();
     _stream?.getTracks().forEach((t) => t.stop());
     if (_rendererReady) renderer.dispose();
     super.dispose();
