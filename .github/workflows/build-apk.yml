@@ -216,7 +216,9 @@ jobs:
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
 
+      # Only main publishes «latest»; a branch run (workflow_dispatch --ref) leaves just the artifact.
       - name: Publish to GitHub Release (latest)
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
