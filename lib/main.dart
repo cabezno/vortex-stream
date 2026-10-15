@@ -721,8 +721,13 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     setState(() => _frontCam = !_frontCam);
     switch (_transport) {
       case Transport.whip:
-        final t = context.read<CameraService>().stream?.getVideoTracks().firstOrNull;
-        if (t != null) await Helper.switchCamera(t);
+        // Re-open the camera (CameraService.flipCamera → _buildStream → replaceTrack on the live sender), not
+        // Helper.switchCamera: that kept the 4K request of the first camera, so a front camera without 4K fell to
+        // its 4:3 format (1728x1296 on the Redmi Note 14, 2026-10-15), and CameraService still thought it was the
+        // back one. The Studio camera dropped switchCamera for the same reason (publisher.dart).
+        final cam = context.read<CameraService>();
+        await cam.flipCamera();
+        _renderer.srcObject = cam.stream;
       case Transport.srt:
         await const MethodChannel('com.vortex.vortexcam/native')
             .invokeMethod('flipCamera');
