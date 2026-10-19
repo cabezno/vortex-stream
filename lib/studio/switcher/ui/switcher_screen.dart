@@ -607,6 +607,9 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
       final uri = _recorder.lastUri;
       ScaffoldMessenger.of(context).showSnackBar(uri != null
           ? SnackBar(
+              // With an action the SnackBar stayed until tapped (it covered the bottom bar).
+              persist: false,
+              duration: const Duration(seconds: 6),
               content: const Text('Grabación guardada en la Galería (Movies/Samba Air).'),
               action: SnackBarAction(label: 'Ver', onPressed: () => Recordings.open(uri)),
             )
@@ -1118,6 +1121,22 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                       ]),
                                       if (!hasVideo)
                                         const Center(child: Icon(SdIcons.videoCameraSlash, color: Sd.t3, size: 22)),
+                                      // What really arrives and how late, on its own line: next to the meter it pushed the bar
+                                      // out and got cut off on an upright phone (2026-10-19).
+                                      // Latency: «180 ms» measured with the beeps, «≈150 ms» estimated; amber if over the
+                                      // alignment cap (that camera is not lined up). Resolution: high only on air / preview.
+                                      Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                                      Row(mainAxisSize: MainAxisSize.min, children: [
+                                        if (_sync.latencyOf(cam.id) case final lat? when cam.id != _localCam.peerId)
+                                          Text('${lat.measured ? '' : '≈'}${lat.ms} ms', style: SdText.caption.copyWith(
+                                              color: _sync.tooSlow(cam.id) ? Sd.amber : Sd.t3)),
+                                        if (rx != null && rx.height > 0) ...[
+                                          const SizedBox(width: 8),
+                                          Text('${rx.height}p · ${rx.fps}', style: SdText.caption.copyWith(
+                                              color: rx.height >= 720 ? Sd.cyan : Sd.t3)),
+                                        ],
+                                      ]),
+                                      const SizedBox(height: 2),
                                       // Audio level: a thin bar (green → amber when loud)
                                       Row(children: [
                                         // Which microphone the camera uses: a headset shows its icon and name.
@@ -1142,19 +1161,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                         )),
                                         const SizedBox(width: 6),
                                         Text('${cam.lastAudioDbfs.toStringAsFixed(0)} dB', style: SdText.caption),
-                                        // What really arrives (check for PGM/PVW: high only for on air / preview).
-                                        // Latency: «180 ms» measured with the beeps, «≈150 ms» estimated; amber if
-                                        // over the alignment cap (that camera is not lined up).
-                                        if (_sync.latencyOf(cam.id) case final lat? when cam.id != _localCam.peerId) ...[
-                                          const SizedBox(width: 8),
-                                          Text('${lat.measured ? '' : '≈'}${lat.ms} ms', style: SdText.caption.copyWith(
-                                              color: _sync.tooSlow(cam.id) ? Sd.amber : Sd.t3)),
-                                        ],
-                                        if (rx != null && rx.height > 0) ...[
-                                          const SizedBox(width: 8),
-                                          Text('${rx.height}p · ${rx.fps}', style: SdText.caption.copyWith(
-                                              color: rx.height >= 720 ? Sd.cyan : Sd.t3)),
-                                        ],
+                                      ]),
                                       ]),
                                     ],
                                   ),
