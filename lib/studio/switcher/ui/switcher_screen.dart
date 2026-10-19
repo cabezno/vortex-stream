@@ -1392,8 +1392,7 @@ class _ClapperboardPage extends StatelessWidget {
           color: on ? Colors.white : Colors.black,
           child: on ? const SizedBox.expand() : const Center(child: Padding(
             padding: EdgeInsets.all(24),
-            child: Text('Que las cámaras vean esta pantalla.
-Midiendo…', textAlign: TextAlign.center,
+            child: Text('Que las cámaras vean esta pantalla.\nMidiendo…', textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.white70, fontSize: 18, decoration: TextDecoration.none)),
           )),
         ),
