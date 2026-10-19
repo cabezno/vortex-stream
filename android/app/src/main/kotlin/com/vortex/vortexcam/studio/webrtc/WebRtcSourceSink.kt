@@ -66,7 +66,11 @@ class WebRtcSourceSink : VideoSink {
      */
     @Volatile var coverBox: android.util.Size? = null
 
-    /** [buf] cropped (centre) to the box's aspect, and scaled down to it if it is a texture; null = use it as is. */
+    /**
+     * [buf] cropped (centre) to the box's aspect, and scaled down to it if it is a texture; null = use it as is.
+     * Widths are multiples of 8: the chroma planes are half as wide and GL uploads rows 4-byte aligned — a 958-wide
+     * crop (479 chroma) came out sheared diagonally.
+     */
     private fun cropFor(buf: VideoFrame.Buffer, rotation: Int, box: android.util.Size): VideoFrame.Buffer? {
         val bw = buf.width; val bh = buf.height
         // The box is in screen orientation; the buffer is not rotated yet.
@@ -76,14 +80,14 @@ class WebRtcSourceSink : VideoSink {
         val target = tw.toFloat() / th; val aspect = bw.toFloat() / bh
         var cw = bw; var ch = bh
         if (kotlin.math.abs(aspect - target) / target > 0.02f) {
-            if (aspect > target) cw = ((bh * target).toInt() and 1.inv()).coerceIn(2, bw)
+            if (aspect > target) cw = ((bh * target).toInt() and 7.inv()).coerceIn(8, bw)
             else ch = ((bw / target).toInt() and 1.inv()).coerceIn(2, bh)
         }
         var sw = cw; var sh = ch
         // An I420 buffer cropped without scaling is a view (no copy); scaling it would be a CPU resize, so only
         // textures (read back by the GPU at whatever size) are scaled.
         if (buf is VideoFrame.TextureBuffer && tw < cw) {
-            sw = tw and 1.inv(); sh = ((ch.toLong() * tw / cw).toInt() and 1.inv()).coerceAtLeast(2)
+            sw = (tw and 7.inv()).coerceAtLeast(8); sh = ((ch.toLong() * sw / cw).toInt() and 1.inv()).coerceAtLeast(2)
         }
         if (cw == bw && ch == bh && sw == bw && sh == bh) return null
         return buf.cropAndScale(((bw - cw) / 2) and 1.inv(), ((bh - ch) / 2) and 1.inv(), cw, ch, sw, sh)
