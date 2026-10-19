@@ -2,7 +2,10 @@ package com.vortex.vortexcam.studio.gl
 
 import android.opengl.GLES20
 import android.util.Log
+import com.vortex.vortexcam.studio.webrtc.GpuFramePool
+import com.vortex.vortexcam.studio.webrtc.HeldFrame
 import com.vortex.vortexcam.studio.webrtc.WebRtcSourceSink
+import org.webrtc.RendererCommon
 import org.webrtc.GlRectDrawer
 import org.webrtc.VideoFrame
 import org.webrtc.VideoFrameDrawer
@@ -37,6 +40,7 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
         primarySink: WebRtcSourceSink?,
         secondarySink: WebRtcSourceSink?
     ) {
+        GpuFramePool.drainOrphans()                            // GPU copies of sinks that are gone
         // Clear background to studio dark grey
         GLES20.glClearColor(0.05f, 0.05f, 0.07f, 1.0f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
@@ -92,7 +96,42 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
      * otherwise fill it when the aspect is close (a 16:9 camera in a 16:9 program) and fit with bars when it is not
      * (a phone held upright: cropping a 9:16 picture to 16:9 would cut most of the person).
      */
-    private fun draw(frameDrawer: VideoFrameDrawer, frame: VideoFrame, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+    private fun draw(frameDrawer: VideoFrameDrawer, held: HeldFrame, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+        when (held) {
+            is HeldFrame.Cpu -> drawCpu(frameDrawer, held.frame, x, y, w, h, cover)
+            is HeldFrame.Gpu -> drawGpu(held, x, y, w, h, cover)
+        }
+    }
+
+    private val identity = RendererCommon.identityMatrix()
+
+    /** An upright RGBA copy (WebRtcSourceSink.gpuCopy): same fill/cover/fit rules as [drawCpu]. */
+    private fun drawGpu(g: HeldFrame.Gpu, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+        val fw = g.width.toFloat(); val fh = g.height.toFloat()
+        if (fw <= 0f || fh <= 0f || w <= 0 || h <= 0) return
+        val frameAspect = fw / fh; val boxAspect = w.toFloat() / h
+        val close = kotlin.math.abs(frameAspect - boxAspect) / boxAspect < 0.05f
+        when {
+            close -> rectDrawer.drawRgb(g.fb.textureId, identity, g.width, g.height, x, y, w, h)
+            cover -> {
+                val sx = if (frameAspect > boxAspect) boxAspect / frameAspect else 1f
+                val sy = if (frameAspect > boxAspect) 1f else frameAspect / boxAspect
+                cropMatrix.reset()
+                cropMatrix.preTranslate(0.5f, 0.5f)
+                cropMatrix.preScale(sx, sy)
+                cropMatrix.preTranslate(-0.5f, -0.5f)
+                rectDrawer.drawRgb(g.fb.textureId, RendererCommon.convertMatrixFromAndroidGraphicsMatrix(cropMatrix),
+                    g.width, g.height, x, y, w, h)
+            }
+            else -> {
+                val dw: Int; val dh: Int
+                if (frameAspect > boxAspect) { dw = w; dh = (w / frameAspect).toInt() } else { dh = h; dw = (h * frameAspect).toInt() }
+                rectDrawer.drawRgb(g.fb.textureId, identity, g.width, g.height, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh)
+            }
+        }
+    }
+
+    private fun drawCpu(frameDrawer: VideoFrameDrawer, frame: VideoFrame, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
         val fw = frame.rotatedWidth.toFloat(); val fh = frame.rotatedHeight.toFloat()
         if (fw <= 0f || fh <= 0f || w <= 0 || h <= 0) return
         val frameAspect = fw / fh; val boxAspect = w.toFloat() / h
