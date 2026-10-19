@@ -159,14 +159,33 @@ class ProgramEncoder extends ChangeNotifier {
     try { if (!kIsWeb) await _channel.invokeMethod('setMicTracks', {'tracks': tracks}); } catch (_) {}
   }
 
-  /// Plays beeps on this phone's loudspeaker and times them in each camera's audio: peerId → end-to-end latency in
-  /// ms (null = that camera did not hear them). [audioTrackIds]: peerId → its received audio track id.
-  Future<Map<String, int?>> measureLatency(Map<String, String> audioTrackIds) async {
+  /// Sync clapperboard (SourceSync.measure): attaches the detectors. [audio]: peerId → received audio track id;
+  /// [video]: peerId → renderer texture id; [localPeer]: the switcher's own camera (timed by its capture clock).
+  Future<bool> syncProbeStart(Map<String, String> audio, Map<String, int> video, String localPeer) async {
     try {
-      final r = await _channel.invokeMapMethod<String, dynamic>('measureLatency', {'tracks': audioTrackIds});
-      return {for (final e in (r ?? const {}).entries) e.key: (e.value as num?)?.toInt()};
+      return ((await _channel.invokeMethod<int>('syncProbeStart',
+          {'audio': audio, 'video': video, 'localPeer': localPeer})) ?? 0) > 0;
     } catch (e) {
-      debugPrint('[ProgramEncoder] measureLatency: $e');
+      debugPrint('[ProgramEncoder] syncProbeStart: $e');
+      return false;
+    }
+  }
+
+  /// A flash is on screen now: notes the time and beeps.
+  Future<void> syncProbeMark() async {
+    try { await _channel.invokeMethod('syncProbeMark'); } catch (_) {}
+  }
+
+  /// peerId → (video ms, audio ms), each null when not detected.
+  Future<Map<String, ({int? video, int? audio})>> syncProbeFinish() async {
+    try {
+      final r = await _channel.invokeMapMethod<String, dynamic>('syncProbeFinish');
+      return {
+        for (final e in (r ?? const {}).entries)
+          e.key: (video: ((e.value as Map?)?['video'] as num?)?.toInt(), audio: ((e.value as Map?)?['audio'] as num?)?.toInt()),
+      };
+    } catch (e) {
+      debugPrint('[ProgramEncoder] syncProbeFinish: $e');
       return {};
     }
   }

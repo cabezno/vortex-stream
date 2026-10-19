@@ -42,6 +42,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private var micTracks: List<Pair<org.webrtc.AudioTrack, Int>> = emptyList()
     private var secondaryTrack: VideoTrack? = null
     private val micMeterOwner = Any()
+    private var syncProbe: SyncProbe? = null
 
     private fun register() {
         RecordingsStore.registerWith(engine, appContext)   // its own channel: recordings in the gallery
@@ -95,12 +96,22 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                     setPrimaryAudio(call.argument<String>("primaryAudioTrackId"), pd)
                     result.success(true)
                 }
-                // Beeps on the loudspeaker, heard back through every camera: each one's end-to-end latency (SyncProbe).
-                "measureLatency" -> {
-                    val ids = call.argument<Map<String, String>>("tracks") ?: emptyMap()
-                    val tracks = ids.mapNotNull { (peer, id) -> audioTrackById(id)?.let { peer to it } }.toMap()
-                    if (tracks.isEmpty()) { result.success(emptyMap<String, Int?>()); return@setMethodCallHandler }
-                    SyncProbe { r -> result.success(r) }.run(tracks)
+                // Sync clapperboard (SyncProbe): this screen flashes and beeps, every camera is timed. Dart drives it:
+                // start → one mark per flash → finish (the results).
+                "syncProbeStart" -> {
+                    syncProbe?.finish()
+                    val a = (call.argument<Map<String, String>>("audio") ?: emptyMap())
+                        .mapNotNull { (peer, id) -> audioTrackById(id)?.let { peer to it } }.toMap()
+                    val v = (call.argument<Map<String, Int>>("video") ?: emptyMap())
+                        .mapNotNull { (peer, tex) -> getVideoTrackForTextureId(tex)?.let { peer to it } }.toMap()
+                    syncProbe = SyncProbe().also { it.start(a, v, call.argument<String>("localPeer")) }
+                    result.success(a.size + v.size)
+                }
+                "syncProbeMark" -> { syncProbe?.mark(); result.success(true) }
+                "syncProbeFinish" -> {
+                    val r = syncProbe?.finish() ?: emptyMap()
+                    syncProbe = null
+                    result.success(r)
                 }
                 // «Solo micrófono» phones: {trackId: delayMs}, always mixed into the program.
                 "setMicTracks" -> {
@@ -296,6 +307,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     }
 
     fun dispose() {
+        syncProbe?.finish(); syncProbe = null
         for ((t, sk) in sinks) { try { t.removeSink(sk) } catch (_: Exception) {}; sk.release() }
         sinks.clear()
         primarySink = null

@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show mapEquals;
+import 'package:flutter/foundation.dart' show ValueListenable, mapEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -227,7 +227,10 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _recorder = ProgramRecorder(encoder: _encoder, isLive: () => _rtmpOut.isStreaming);
     _mixer = ProgramMixer(roomHost: _roomHost, encoder: _encoder);
     _localCam = LocalCameraSource(roomHost: _roomHost);
-    _sync = SourceSync(roomHost: _roomHost, subscriber: _subscriber, encoder: _encoder, localPeerId: _localCam.peerId);
+    _sync = SourceSync(roomHost: _roomHost, subscriber: _subscriber, encoder: _encoder, localPeerId: _localCam.peerId,
+        textureOf: (id) => id == _localCam.peerId
+            ? (_localCam.isActive ? _localCam.renderer.textureId : null)
+            : _subscriber.getRenderer(id)?.textureId);
 
     _encoder.addListener(_applyPendingQuality);
     _mixer.addListener(_syncNativeCameraSources);
@@ -412,7 +415,19 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     );
   }
 
-  /// Alignment of the cameras in the program (SourceSync): latencies, the beep measurement, fine-tune.
+  /// The clapperboard: a full-screen page that flashes while SourceSync measures, closed when it is done.
+  Future<void> _runClapperboard() async {
+    final nav = Navigator.of(context);
+    final route = PageRouteBuilder<void>(
+      opaque: true,
+      pageBuilder: (_, __, ___) => _ClapperboardPage(flash: _sync.flash),
+    );
+    nav.push(route);
+    await _sync.measure();
+    if (route.isActive) nav.removeRoute(route);
+  }
+
+  /// Alignment of the cameras in the program (SourceSync): latencies, the clapperboard, fine-tune.
   void _showSyncDialog() {
     showDialog(
       context: context,
@@ -446,7 +461,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                     Builder(builder: (_) {
                       final lat = _sync.latencyOf(c.id);
                       final local = c.id == _localCam.peerId;
-                      final txt = local ? 'este celular'
+                      final txt = local ? 'este celular${lat?.measured == true ? ' · medido ${lat!.ms} ms' : ''}'
                           : lat == null ? 'midiendo…'
                           : '${lat.measured ? 'medido' : 'estimado'} ${lat.ms} ms';
                       return Text(txt, style: SdText.caption.copyWith(
@@ -468,12 +483,13 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 icon: _sync.measuring
                     ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 1.6))
                     : const Icon(SdIcons.speakerHigh, size: 18),
-                label: Text(_sync.measuring ? 'Escuchando…' : 'Medir con pitidos'),
-                onPressed: _sync.measuring ? null : _sync.measure,
+                label: Text(_sync.measuring ? 'Midiendo…' : 'Sincronizar con claqueta'),
+                onPressed: _sync.measuring ? null : _runClapperboard,
               )),
               const SizedBox(height: 6),
-              const Text('Este celular suena 3 pitidos; cada cámara los escucha y se mide cuánto tardan en volver '
-                  '(incluye auriculares Bluetooth). Con las cámaras a pocos metros y en silencio.', style: SdText.caption),
+              const Text('La pantalla de este celular destella y suena un pitido 5 veces. Poné el celular donde las '
+                  'cámaras vean la pantalla, a pocos metros y en silencio: cada una se mide por la imagen (el destello) '
+                  'y por el audio (el pitido).', style: SdText.caption),
               if (_sync.lastResult.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 Text(_sync.lastResult, style: SdText.caption.copyWith(color: Sd.t1)),
@@ -484,10 +500,10 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                   const Expanded(child: Text('Cámara de este celular: ajuste fino', style: SdText.label)),
                   Text('${_sync.localAdjustMs} ms', style: SdText.label.copyWith(color: Sd.t1)),
                 ]),
-                Slider(value: _sync.localAdjustMs.toDouble(), min: 0, max: 300, divisions: 30,
+                Slider(value: _sync.localAdjustMs.clamp(-150, 150).toDouble(), min: -150, max: 150, divisions: 30,
                     onChanged: (v) => _sync.localAdjustMs = v.round()),
-                const Text('Subilo si la cámara de este celular se ve adelantada respecto a las otras.',
-                    style: SdText.caption),
+                const Text('La claqueta la mide sola. Subilo si igual se ve adelantada respecto a las otras; '
+                    'bajalo si se ve atrasada.', style: SdText.caption),
               ],
             ]),
             actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
@@ -1362,4 +1378,24 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
       )),
     );
   }
+}
+
+/// The clapperboard's screen: black, white while [flash] is on. The cameras film it (SourceSync.measure).
+class _ClapperboardPage extends StatelessWidget {
+  final ValueListenable<bool> flash;
+  const _ClapperboardPage({required this.flash});
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<bool>(
+        valueListenable: flash,
+        builder: (_, on, __) => ColoredBox(
+          color: on ? Colors.white : Colors.black,
+          child: on ? const SizedBox.expand() : const Center(child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text('Que las cámaras vean esta pantalla.
+Midiendo…', textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70, fontSize: 18, decoration: TextDecoration.none)),
+          )),
+        ),
+      );
 }

@@ -27,6 +27,9 @@ object SwitcherMic {
     /** Receives every frame (left, right) while set: the program's mic ring. */
     @Volatile var sink: ((Float, Float) -> Unit)? = null
 
+    /** Sees every block read (pcm, samples, channels, nanoTime it ended): the sync clapperboard's beep reference. */
+    @Volatile var tap: ((ShortArray, Int, Int, Long) -> Unit)? = null
+
     /** Level of the last ~100 ms in dBFS (-100 while the mic is off). */
     @Volatile var levelDbfs = -100f
         private set
@@ -69,6 +72,7 @@ object SwitcherMic {
             while (running.get()) {
                 val n = rec.read(pcm, 0, pcm.size)
                 if (n <= 0) continue
+                tap?.invoke(pcm, n, ch, System.nanoTime())
                 val out = sink
                 var i = 0
                 while (i + ch <= n) {
