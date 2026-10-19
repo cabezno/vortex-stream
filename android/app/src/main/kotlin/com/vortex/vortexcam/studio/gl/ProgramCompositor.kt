@@ -103,7 +103,7 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
         }
     }
 
-    private val identity = RendererCommon.identityMatrix()
+    private val identity = floatArrayOf(1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f)
 
     /** An upright RGBA copy (WebRtcSourceSink.gpuCopy): same fill/cover/fit rules as [drawCpu]. */
     private fun drawGpu(g: HeldFrame.Gpu, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
