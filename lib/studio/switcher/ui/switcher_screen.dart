@@ -849,14 +849,15 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
           final previewName = previewPeerId == null ? null
               : cameras.where((c) => c.id == previewPeerId).map((c) => c.name).firstOrNull;
 
-          return Column(
-            children: [
-              if (!wide) _buildToolbar(),
-              // 1. Program monitor
-              Expanded(
-                flex: 4,
-                child: Container(
-                  margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+          // The program monitor is exactly 16:9, what goes out: in whatever box was left it showed the program cropped
+          // (in landscape a thin strip, 2026-10-19). Landscape: the monitor uses the full height and the cameras go in
+          // a column beside it.
+          final landscape = MediaQuery.sizeOf(context).aspectRatio > 1.2;
+          Widget monitor169(Widget m) => Padding(padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: AspectRatio(aspectRatio: 16 / 9, child: m));
+
+          // 1. Program monitor
+          final Widget monitor = Container(
                   clipBehavior: Clip.antiAlias,
                   decoration: BoxDecoration(
                     color: Sd.void_,
@@ -964,9 +965,10 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                       ),
                     ],
                   ),
-                ),
-              ),
+                )
+          ;
 
+          final List<Widget> multiviewHead = [
               // 2. Multiview header
               Padding(
                 padding: const EdgeInsets.fromLTRB(18, 2, 18, 0),
@@ -1017,11 +1019,10 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                       )),
                   ],
                 )),
+          ];
 
-              // 3. Multiview cards
-              Expanded(
-                flex: 3,
-                child: cameras.isEmpty
+          // 3. Multiview cards
+          final Widget cards = cameras.isEmpty
                     ? Center(
                         child: SingleChildScrollView(
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
@@ -1066,8 +1067,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                       )
                     : GridView.builder(
                         padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.6,
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: landscape ? 1 : 2, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.6,
                         ),
                         itemCount: cameras.length,
                         itemBuilder: (context, idx) {
@@ -1182,11 +1183,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                             ),
                           );
                         },
-                      ),
-              ),
+                      )
+          ;
 
-              // 4. Last switch
-              Container(
+          // 4. Last switch
+          final Widget lastSwitch = Container(
                 height: 40,
                 padding: const EdgeInsets.symmetric(horizontal: 18),
                 decoration: const BoxDecoration(
@@ -1205,7 +1206,25 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                     ]);
                   },
                 ),
-              ),
+              )
+          ;
+
+          if (landscape) {
+            return Column(children: [
+              Expanded(child: Row(children: [
+                Expanded(flex: 3, child: Center(child: monitor169(monitor))),
+                Expanded(flex: 2, child: Column(children: [...multiviewHead, Expanded(child: cards)])),
+              ])),
+              lastSwitch,
+            ]);
+          }
+          return Column(
+            children: [
+              if (!wide) _buildToolbar(),
+              monitor169(monitor),
+              ...multiviewHead,
+              Expanded(child: cards),
+              lastSwitch,
             ],
           );
         },
