@@ -681,8 +681,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     super.dispose();
   }
 
-  /// Switcher tools. They lived in the app bar and on an upright phone did not fit: buttons piled up and the last
-  /// ones were cut off (2026-10-15). In a Wrap they take a second line instead of disappearing.
+  /// Switcher tools. In the app bar they did not fit an upright phone: buttons piled up and the last ones were cut
+  /// off (2026-10-15). Upright they go in their own row (a Wrap: a second line instead of disappearing); on a wide
+  /// screen they replace the app bar's title, since a row of their own took height from the program monitor.
+  static const double _wideToolbar = 640;
+
   Widget _buildToolbar() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(8, 0, 8, 2),
@@ -690,7 +693,13 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
         crossAxisAlignment: WrapCrossAlignment.center,
         spacing: 2,
         runSpacing: 2,
-        children: [
+        children: _toolItems(),
+      ),
+    );
+  }
+
+  List<Widget> _toolItems() {
+    return [
           // Local camera (this phone's own camera as a source)
           ListenableBuilder(
             listenable: _localCam,
@@ -766,19 +775,22 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             tooltip: 'Grabaciones',
             onPressed: () => RecordingsSheet.show(context),
           ),
-        ],
-      ),
-    );
+    ];
   }
 
   @override
   Widget build(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= _wideToolbar;
     return Scaffold(
       backgroundColor: Sd.void_,
       appBar: AppBar(
         backgroundColor: Sd.void_,
         titleSpacing: 4,
-        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        // Wide screen: the tools take the title's place (title + tools + Grabar + Emitir did not fit ~780 dp).
+        title: wide
+            ? SingleChildScrollView(scrollDirection: Axis.horizontal,
+                child: Row(mainAxisSize: MainAxisSize.min, children: _toolItems()))
+            : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('SWITCHER', style: SdText.overline.copyWith(color: Sd.magenta, letterSpacing: 1.6)),
           const SizedBox(height: 2),
           Row(children: [
@@ -839,7 +851,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
 
           return Column(
             children: [
-              _buildToolbar(),
+              if (!wide) _buildToolbar(),
               // 1. Program monitor
               Expanded(
                 flex: 4,
