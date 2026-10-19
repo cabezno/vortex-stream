@@ -50,9 +50,14 @@ class ProgramEncoder extends ChangeNotifier {
   /// the next start; the native side still steps down if the video hardware refuses (it is shared with the decoders).
   int programHeight = 1080;
   bool get is4k => programHeight >= 2160;
-  int get defaultKbps => is4k ? 20000 : 6000;
+  /// «Alta» quality (Calidad dialog): twice the bitrate, for recordings that will be edited or a fast uplink.
+  bool highBitrate = false;
+  int get defaultKbps => (is4k ? 20000 : 6000) * (highBitrate ? 2 : 1);
   /// Ceiling for the adaptive bitrate.
-  int get maxKbps => is4k ? 25000 : 8000;
+  int get maxKbps => defaultKbps * 5 ~/ 4;
+  /// Size the program will have at the next start (what the quality pill shows while not encoding).
+  int get plannedWidth => is4k ? 3840 : 1920;
+  int get plannedHeight => is4k ? 2160 : 1080;
 
   bool get isEncoding => _isEncoding;
   int get width => _width;

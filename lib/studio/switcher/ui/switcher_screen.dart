@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show mapEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:samba_protocol/samba_protocol.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../../theme/sd_icons.dart';
@@ -87,6 +88,123 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     }
   }
 
+  // ── Program quality (Calidad dialog, 2026-10-19) ─────────────────────────────────────────────────────────
+  // Recording only used to be 1080p at 6 Mbps: 4K could be chosen only in «Emitir» and only for going live.
+  static const _kQ4k = 'switcher_quality_4k', _kQHigh = 'switcher_quality_high';
+
+  Future<void> _loadQuality() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final want4k = p.getBool(_kQ4k) ?? false;
+      await DeviceCapabilities.instance.ensure(cameraGranted: false);
+      final h = want4k && DeviceCapabilities.instance.maxProgramHeight >= 2160 ? 2160 : 1080;
+      if (!mounted || _encoder.isEncoding) return;
+      setState(() {
+        _encoder.programHeight = h;
+        _roomHost.programHeight = h;
+        _encoder.highBitrate = p.getBool(_kQHigh) ?? false;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _saveQuality() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_kQ4k, _encoder.is4k);
+      await p.setBool(_kQHigh, _encoder.highBitrate);
+    } catch (_) {}
+  }
+
+  void _showQualityDialog() {
+    final can4k = DeviceCapabilities.instance.maxProgramHeight >= 2160;
+    bool want4k = (_pendingQuality4k ?? _encoder.is4k) && can4k;
+    bool high = _encoder.highBitrate;
+    String mbps(bool k4, bool hi) => '${(k4 ? 20 : 6) * (hi ? 2 : 1)} Mbps';
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModal) => AlertDialog(
+          scrollable: true,
+          title: const Text('Calidad del programa'),
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Vale para grabar y para emitir.', style: SdText.caption),
+            const SizedBox(height: 12),
+            Text('RESOLUCIÓN', style: SdText.overline),
+            const SizedBox(height: 6),
+            SegmentedButton<bool>(
+              segments: [
+                const ButtonSegment(value: false, label: Text('1080p')),
+                ButtonSegment(value: true, label: const Text('4K'), enabled: can4k),
+              ],
+              selected: {want4k},
+              onSelectionChanged: (v) => setModal(() => want4k = v.first),
+              showSelectedIcon: false,
+            ),
+            if (!can4k) ...[
+              const SizedBox(height: 4),
+              Text('Este celular codifica hasta ${DeviceCapabilities.instance.maxH264 ?? '1920x1080'}: 4K no disponible.',
+                  style: SdText.caption),
+            ],
+            const SizedBox(height: 12),
+            Text('CALIDAD', style: SdText.overline),
+            const SizedBox(height: 6),
+            SegmentedButton<bool>(
+              segments: [
+                ButtonSegment(value: false, label: Text('Normal · ${mbps(want4k, false)}')),
+                ButtonSegment(value: true, label: Text('Alta · ${mbps(want4k, true)}')),
+              ],
+              selected: {high},
+              onSelectionChanged: (v) => setModal(() => high = v.first),
+              showSelectedIcon: false,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              [
+                if (want4k) '4K: la cámara al aire manda 4K si su celular puede (las demás, 1080p).',
+                if (high) 'Alta: archivos el doble de pesados (~${((want4k ? 40 : 12) * 60 / 8).round()} MB por minuto); '
+                    'para emitir hace falta esa subida.',
+                if (_encoder.isEncoding && want4k != _encoder.is4k)
+                  'La resolución nueva se aplica la próxima vez que empieces a grabar o emitir.',
+              ].join(' '),
+              style: SdText.caption),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancelar', style: TextStyle(color: Sd.t2))),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  // The size is fixed while encoding (applied when it stops); the bitrate changes live.
+                  if (!_encoder.isEncoding) {
+                    _encoder.programHeight = want4k ? 2160 : 1080;
+                    _roomHost.programHeight = _encoder.programHeight;
+                  }
+                  _pendingQuality4k = _encoder.isEncoding && want4k != _encoder.is4k ? want4k : null;
+                  _encoder.highBitrate = high;
+                });
+                if (_encoder.isEncoding) _encoder.updateBitrate(_encoder.defaultKbps);
+                _saveQuality();
+              },
+              child: const Text('Listo'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Resolution chosen while encoding: applied once it stops (the next start uses it).
+  bool? _pendingQuality4k;
+  void _applyPendingQuality() {
+    final q = _pendingQuality4k;
+    if (q == null || _encoder.isEncoding) return;
+    _pendingQuality4k = null;
+    _encoder.programHeight = q ? 2160 : 1080;
+    _roomHost.programHeight = _encoder.programHeight;
+    _saveQuality();
+  }
+
   /// A camera touching this phone (NFC) gets the same as the QR: room address and own network.
   void _advertiseNfc() => NfcPairing.advertise(_pairingJson);
 
@@ -111,6 +229,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _localCam = LocalCameraSource(roomHost: _roomHost);
     _sync = SourceSync(roomHost: _roomHost, subscriber: _subscriber, encoder: _encoder, localPeerId: _localCam.peerId);
 
+    _encoder.addListener(_applyPendingQuality);
     _mixer.addListener(_syncNativeCameraSources);
     _sync.addListener(_syncNativeCameraSources);
     _roomHost.addListener(_syncNativeCameraSources);
@@ -119,6 +238,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _subscriber.addListener(_syncNativeCameraSources);
 
     _detectLocalIp();
+    _loadQuality();
     // What this phone can encode (4K program): measured once per Android build / app version.
     DeviceCapabilities.instance.ensure(cameraGranted: false).then((_) { if (mounted) setState(() {}); });
     _roomHost.start().then((_) {
@@ -567,6 +687,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 }
                 _encoder.programHeight = h;
                 _roomHost.programHeight = h;   // the on-air camera is asked for it
+                _pendingQuality4k = null;
+                _saveQuality();
                 if (_encoder.isEncoding) {
                   await _encoder.setAudioSources(camera: audioCam, mic: audioMic);
                 } else {
@@ -662,6 +784,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   void dispose() {
     if (_hotspot != null) _native.invokeMethod('stopHotspot').catchError((_) => null);
     NfcPairing.advertise(null);
+    _encoder.removeListener(_applyPendingQuality);
     _mixer.removeListener(_syncNativeCameraSources);
     _director.removeListener(_syncNativeCameraSources);
     _subscriber.removeListener(_syncNativeCameraSources);
@@ -899,9 +1022,17 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                 icon: SdIcons.record),
                           ])),
                           const SizedBox(width: 6),
-                          // What the program is encoded at — the recording and the live stream share it.
-                          SdPill('${_encoder.width}×${_encoder.height} · ${_encoder.fps} fps · '
-                              '${(_encoder.bitrateKbps / 1000).toStringAsFixed(1)} Mbps', color: Sd.t2),
+                          // What the program is encoded at — the recording and the live stream share it. While not
+                          // encoding, what it will be. Tap: the Calidad dialog.
+                          GestureDetector(
+                            onTap: _showQualityDialog,
+                            child: SdPill(_encoder.isEncoding
+                                ? '${_encoder.width}×${_encoder.height} · ${_encoder.fps} fps · '
+                                  '${(_encoder.bitrateKbps / 1000).toStringAsFixed(1)} Mbps'
+                                : '${_encoder.plannedWidth}×${_encoder.plannedHeight} · '
+                                  '${(_encoder.defaultKbps / 1000).toStringAsFixed(0)} Mbps',
+                                color: Sd.t2, icon: SdIcons.slidersHorizontal),
+                          ),
                         ]),
                       ),
                       // Layout selector + second camera
