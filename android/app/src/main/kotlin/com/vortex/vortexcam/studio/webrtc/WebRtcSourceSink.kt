@@ -27,8 +27,8 @@ class WebRtcSourceSink : VideoSink {
     override fun onFrame(frame: VideoFrame) {
         val copy = try {
             val cropped = coverBox?.let { cropFor(frame.buffer, frame.rotation, it) }
-            val i420 = try { (cropped ?: frame.buffer).toI420() } finally { cropped?.release() } ?: return
-            VideoFrame(i420, frame.rotation, frame.timestampNs)
+            val i420 = try { (cropped ?: frame.buffer).toI420() } finally { cropped?.release() }
+            VideoFrame(i420 ?: return, frame.rotation, frame.timestampNs)
         } catch (e: Exception) {
             return
         }
