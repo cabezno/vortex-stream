@@ -7,7 +7,6 @@ import com.vortex.vortexcam.studio.webrtc.HeldFrame
 import com.vortex.vortexcam.studio.webrtc.WebRtcSourceSink
 import org.webrtc.RendererCommon
 import org.webrtc.GlRectDrawer
-import org.webrtc.GradeDrawer
 import org.webrtc.VideoFrame
 import org.webrtc.VideoFrameDrawer
 
@@ -33,12 +32,12 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
     private val secondaryDrawer = VideoFrameDrawer()
     private val rectDrawer = GlRectDrawer()
     // Colour correction (ColorMatch): one per slot, so each keeps the shader of its own texture type compiled.
-    private val primaryGrade = GradeDrawer()
-    private val secondaryGrade = GradeDrawer()
+    private val primaryGrade = GradeDrawer.create()
+    private val secondaryGrade = GradeDrawer.create()
 
     /** The drawer for a source: plain, or the slot's grade drawer set to [grade]. */
-    private fun glDrawer(slot: GradeDrawer, grade: com.vortex.vortexcam.studio.webrtc.ColorGrade?): RendererCommon.GlDrawer {
-        if (grade == null || grade.isIdentity) return rectDrawer
+    private fun glDrawer(slot: GradeDrawer?, grade: com.vortex.vortexcam.studio.webrtc.ColorGrade?): RendererCommon.GlDrawer {
+        if (slot == null || grade == null || grade.isIdentity) return rectDrawer
         slot.set(grade.r, grade.g, grade.b, grade.sat)
         return slot
     }
@@ -172,8 +171,8 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
             primaryDrawer.release()
             secondaryDrawer.release()
             rectDrawer.release()
-            primaryGrade.release()
-            secondaryGrade.release()
+            primaryGrade?.release()
+            secondaryGrade?.release()
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing drawers: ${e.message}")
         }
