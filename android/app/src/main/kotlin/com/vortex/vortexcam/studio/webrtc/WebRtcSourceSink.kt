@@ -26,7 +26,8 @@ class WebRtcSourceSink : VideoSink {
     // context is current) and the original is released by the caller right after onFrame returns.
     override fun onFrame(frame: VideoFrame) {
         val copy = try {
-            val i420 = frame.buffer.toI420() ?: return
+            val cropped = coverBox?.let { cropFor(frame.buffer, frame.rotation, it) }
+            val i420 = try { (cropped ?: frame.buffer).toI420() } finally { cropped?.release() } ?: return
             VideoFrame(i420, frame.rotation, frame.timestampNs)
         } catch (e: Exception) {
             return
@@ -54,6 +55,38 @@ class WebRtcSourceSink : VideoSink {
                 frames.removeFirst().second.release()
             }
         }
+    }
+
+    /**
+     * The box this source fills in the program by cropping (split halves, PiP inset), or null (shown whole).
+     * Split screen stuttered on a Mi A3 (2026-10-19): the switcher's own camera took ~31 ms per frame to read back from
+     * the GPU and the compositor uploaded two full 1080p pictures per frame, though each half shows less than half of
+     * one. Cropping here — and, for a camera texture, scaling down to the box, free in the readback — copies and
+     * uploads only what is shown.
+     */
+    @Volatile var coverBox: android.util.Size? = null
+
+    /** [buf] cropped (centre) to the box's aspect, and scaled down to it if it is a texture; null = use it as is. */
+    private fun cropFor(buf: VideoFrame.Buffer, rotation: Int, box: android.util.Size): VideoFrame.Buffer? {
+        val bw = buf.width; val bh = buf.height
+        // The box is in screen orientation; the buffer is not rotated yet.
+        val tw = if (rotation % 180 != 0) box.height else box.width
+        val th = if (rotation % 180 != 0) box.width else box.height
+        if (bw <= 0 || bh <= 0 || tw <= 0 || th <= 0) return null
+        val target = tw.toFloat() / th; val aspect = bw.toFloat() / bh
+        var cw = bw; var ch = bh
+        if (kotlin.math.abs(aspect - target) / target > 0.02f) {
+            if (aspect > target) cw = ((bh * target).toInt() and 1.inv()).coerceIn(2, bw)
+            else ch = ((bw / target).toInt() and 1.inv()).coerceIn(2, bh)
+        }
+        var sw = cw; var sh = ch
+        // An I420 buffer cropped without scaling is a view (no copy); scaling it would be a CPU resize, so only
+        // textures (read back by the GPU at whatever size) are scaled.
+        if (buf is VideoFrame.TextureBuffer && tw < cw) {
+            sw = tw and 1.inv(); sh = ((ch.toLong() * tw / cw).toInt() and 1.inv()).coerceAtLeast(2)
+        }
+        if (cw == bw && ch == bh && sw == bw && sh == bh) return null
+        return buf.cropAndScale(((bw - cw) / 2) and 1.inv(), ((bh - ch) / 2) and 1.inv(), cw, ch, sw, sh)
     }
 
     // Smallest (arrival − timestamp) seen: the transit of an on-time frame. Written on the decoder thread only.

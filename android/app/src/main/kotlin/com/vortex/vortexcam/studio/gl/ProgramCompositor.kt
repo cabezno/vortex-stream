@@ -23,7 +23,10 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
         private const val TAG = "ProgramCompositor"
     }
 
-    private val frameDrawer = VideoFrameDrawer()
+    // One drawer per slot: a VideoFrameDrawer keeps the textures of the LAST frame it uploaded, so with a single one
+    // the two cameras of a split evicted each other and both full pictures were uploaded again on every frame.
+    private val primaryDrawer = VideoFrameDrawer()
+    private val secondaryDrawer = VideoFrameDrawer()
     private val rectDrawer = GlRectDrawer()
 
     /**
@@ -38,27 +41,37 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
         GLES20.glClearColor(0.05f, 0.05f, 0.07f, 1.0f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
+        // What each source fills by cropping, so its sink copies only that (see WebRtcSourceSink.coverBox).
+        val halfBox = android.util.Size(width / 2 - 2, height)
+        val pipBox = android.util.Size((width * 0.32).toInt(), (height * 0.32).toInt())
+        primarySink?.coverBox = if (layoutMode == LayoutMode.SPLIT_SCREEN) halfBox else null
+        secondarySink?.coverBox = when (layoutMode) {
+            LayoutMode.SPLIT_SCREEN -> halfBox
+            LayoutMode.PIP -> pipBox
+            LayoutMode.SINGLE -> null
+        }
+
         val primaryFrame = primarySink?.getFrame()
         val secondaryFrame = secondarySink?.getFrame()
 
         try {
             when (layoutMode) {
                 LayoutMode.SINGLE -> {
-                    if (primaryFrame != null) draw(primaryFrame, 0, 0, width, height, cover = false)
+                    if (primaryFrame != null) draw(primaryDrawer, primaryFrame, 0, 0, width, height, cover = false)
                 }
                 LayoutMode.SPLIT_SCREEN -> {
                     // Each half is ~8:9: a 16:9 camera is cropped to its centre (as a TV split does), not squeezed.
                     val halfW = width / 2
-                    if (primaryFrame != null) draw(primaryFrame, 0, 0, halfW - 2, height, cover = true)
-                    if (secondaryFrame != null) draw(secondaryFrame, halfW + 2, 0, halfW - 2, height, cover = true)
+                    if (primaryFrame != null) draw(primaryDrawer, primaryFrame, 0, 0, halfW - 2, height, cover = true)
+                    if (secondaryFrame != null) draw(secondaryDrawer, secondaryFrame, halfW + 2, 0, halfW - 2, height, cover = true)
                 }
                 LayoutMode.PIP -> {
-                    if (primaryFrame != null) draw(primaryFrame, 0, 0, width, height, cover = false)
+                    if (primaryFrame != null) draw(primaryDrawer, primaryFrame, 0, 0, width, height, cover = false)
                     // Inset secondary camera (bottom-right 32% size)
                     if (secondaryFrame != null) {
                         val pipW = (width * 0.32).toInt()
                         val pipH = (height * 0.32).toInt()
-                        draw(secondaryFrame, width - pipW - 24, 24, pipW, pipH, cover = true)
+                        draw(secondaryDrawer, secondaryFrame, width - pipW - 24, 24, pipW, pipH, cover = true)
                     }
                 }
             }
@@ -79,7 +92,7 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
      * otherwise fill it when the aspect is close (a 16:9 camera in a 16:9 program) and fit with bars when it is not
      * (a phone held upright: cropping a 9:16 picture to 16:9 would cut most of the person).
      */
-    private fun draw(frame: VideoFrame, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+    private fun draw(frameDrawer: VideoFrameDrawer, frame: VideoFrame, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
         val fw = frame.rotatedWidth.toFloat(); val fh = frame.rotatedHeight.toFloat()
         if (fw <= 0f || fh <= 0f || w <= 0 || h <= 0) return
         val frameAspect = fw / fh; val boxAspect = w.toFloat() / h
@@ -103,7 +116,8 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
 
     fun release() {
         try {
-            frameDrawer.release()
+            primaryDrawer.release()
+            secondaryDrawer.release()
             rectDrawer.release()
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing drawers: ${e.message}")
