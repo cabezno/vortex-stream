@@ -4,6 +4,7 @@ import '../../../theme/samba_theme.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:samba_protocol/samba_protocol.dart';
 import '../mixer/program_mixer.dart';
+import '../color/color_match.dart';
 import '../transport/subscriber.dart';
 
 /// Renders the composed Program view based on ProgramMixer layout (Single, Split-Screen, PiP).
@@ -15,6 +16,8 @@ class ProgramLayoutView extends StatelessWidget {
   // local), así que se resuelve aparte.
   final RTCVideoRenderer? localRenderer;
   final String? localPeerId;
+  /// The colour correction of each camera (the program gets it on the GPU; here a matching filter).
+  final ColorMatch? color;
 
   const ProgramLayoutView({
     super.key,
@@ -23,7 +26,15 @@ class ProgramLayoutView extends StatelessWidget {
     required this.cameras,
     this.localRenderer,
     this.localPeerId,
+    this.color,
   });
+
+  /// A camera's view, with its colour correction.
+  Widget _view(String? id, RTCVideoRenderer r) {
+    final v = RTCVideoView(r, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover);
+    final f = color?.filterOf(id);
+    return f == null ? v : ColorFiltered(colorFilter: f, child: v);
+  }
 
   RTCVideoRenderer? _resolveRenderer(String? id) {
     if (id == null) return null;
@@ -34,7 +45,7 @@ class ProgramLayoutView extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: mixer,
+      listenable: color == null ? mixer : Listenable.merge([mixer, color]),
       builder: (context, _) {
         final primaryId = mixer.primaryPeerId;
         final secondaryId = mixer.secondaryPeerId;
@@ -81,10 +92,7 @@ class ProgramLayoutView extends StatelessWidget {
 
   Widget _buildSingleView(Peer? cam, RTCVideoRenderer? renderer, bool hasVideo) {
     if (hasVideo && renderer != null) {
-      return RTCVideoView(
-        renderer,
-        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-      );
+      return _view(cam?.id, renderer);
     }
     return _buildPlaceholder(cam?.name ?? 'Sin cámara', 'Tocá una cámara del multiview para ponerla al aire');
   }
@@ -105,10 +113,7 @@ class ProgramLayoutView extends StatelessWidget {
           child: Container(
             color: Sd.void_,
             child: pHasVideo && pRenderer != null
-                ? RTCVideoView(
-                    pRenderer,
-                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                  )
+                ? _view(pCam?.id, pRenderer)
                 : _buildPlaceholder(pCam?.name ?? 'Principal', 'Mitad izquierda'),
           ),
         ),
@@ -122,10 +127,7 @@ class ProgramLayoutView extends StatelessWidget {
           child: Container(
             color: Sd.void_,
             child: sHasVideo && sRenderer != null
-                ? RTCVideoView(
-                    sRenderer,
-                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                  )
+                ? _view(sCam?.id, sRenderer)
                 : _buildPlaceholder(sCam?.name ?? 'Segunda cámara', 'Mitad derecha'),
           ),
         ),
@@ -146,10 +148,7 @@ class ProgramLayoutView extends StatelessWidget {
         // Background: Full Primary Camera
         Positioned.fill(
           child: pHasVideo && pRenderer != null
-              ? RTCVideoView(
-                  pRenderer,
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                )
+              ? _view(pCam?.id, pRenderer)
               : _buildPlaceholder(pCam?.name ?? 'Principal', 'Pantalla completa'),
         ),
 
@@ -204,10 +203,7 @@ class ProgramLayoutView extends StatelessWidget {
         ),
         clipBehavior: Clip.antiAlias,
         child: sHasVideo && sRenderer != null
-            ? RTCVideoView(
-                sRenderer,
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-              )
+            ? _view(sCam?.id, sRenderer)
             : Center(
                 child: Text(
                   sCam?.name ?? 'PiP: elegir cámara',

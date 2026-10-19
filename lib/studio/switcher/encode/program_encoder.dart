@@ -159,6 +159,29 @@ class ProgramEncoder extends ChangeNotifier {
     try { if (!kIsWeb) await _channel.invokeMethod('setMicTracks', {'tracks': tracks}); } catch (_) {}
   }
 
+  /// Colour matching (ColorMatch): measure the average colour of these cameras (peerId → renderer texture id).
+  Future<void> setColorMeters(Map<String, int> cams) async {
+    try { if (!kIsWeb) await _channel.invokeMethod('setColorMeters', {'cams': cams}); } catch (_) {}
+  }
+
+  /// peerId → (Y, U, V) mean, 0–255.
+  Future<Map<String, List<double>>> getColorStats() async {
+    try {
+      final r = await _channel.invokeMapMethod<String, dynamic>('getColorStats');
+      return {
+        for (final e in (r ?? const {}).entries)
+          e.key: [for (final v in (e.value as List)) (v as num).toDouble()],
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// peerId → [r, g, b, saturation]: the colour correction of each camera in the program.
+  Future<void> setColorGrades(Map<String, List<double>> grades) async {
+    try { if (!kIsWeb) await _channel.invokeMethod('setColorGrades', {'grades': grades}); } catch (_) {}
+  }
+
   /// Sync clapperboard (SourceSync.measure): attaches the detectors. [audio]: peerId → received audio track id;
   /// [video]: peerId → renderer texture id; [localPeer]: the switcher's own camera (timed by its capture clock).
   Future<bool> syncProbeStart(Map<String, String> audio, Map<String, int> video, String localPeer) async {

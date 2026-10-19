@@ -7,6 +7,7 @@ import com.vortex.vortexcam.studio.webrtc.HeldFrame
 import com.vortex.vortexcam.studio.webrtc.WebRtcSourceSink
 import org.webrtc.RendererCommon
 import org.webrtc.GlRectDrawer
+import org.webrtc.GradeDrawer
 import org.webrtc.VideoFrame
 import org.webrtc.VideoFrameDrawer
 
@@ -31,6 +32,16 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
     private val primaryDrawer = VideoFrameDrawer()
     private val secondaryDrawer = VideoFrameDrawer()
     private val rectDrawer = GlRectDrawer()
+    // Colour correction (ColorMatch): one per slot, so each keeps the shader of its own texture type compiled.
+    private val primaryGrade = GradeDrawer()
+    private val secondaryGrade = GradeDrawer()
+
+    /** The drawer for a source: plain, or the slot's grade drawer set to [grade]. */
+    private fun glDrawer(slot: GradeDrawer, grade: com.vortex.vortexcam.studio.webrtc.ColorGrade?): RendererCommon.GlDrawer {
+        if (grade == null || grade.isIdentity) return rectDrawer
+        slot.set(grade.r, grade.g, grade.b, grade.sat)
+        return slot
+    }
 
     /**
      * Draws the composed layout using the latest VideoFrames from active sinks.
@@ -57,25 +68,27 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
 
         val primaryFrame = primarySink?.getFrame()
         val secondaryFrame = secondarySink?.getFrame()
+        val pg = glDrawer(primaryGrade, primarySink?.grade)
+        val sg = glDrawer(secondaryGrade, secondarySink?.grade)
 
         try {
             when (layoutMode) {
                 LayoutMode.SINGLE -> {
-                    if (primaryFrame != null) draw(primaryDrawer, primaryFrame, 0, 0, width, height, cover = false)
+                    if (primaryFrame != null) draw(primaryDrawer, pg, primaryFrame, 0, 0, width, height, cover = false)
                 }
                 LayoutMode.SPLIT_SCREEN -> {
                     // Each half is ~8:9: a 16:9 camera is cropped to its centre (as a TV split does), not squeezed.
                     val halfW = width / 2
-                    if (primaryFrame != null) draw(primaryDrawer, primaryFrame, 0, 0, halfW - 2, height, cover = true)
-                    if (secondaryFrame != null) draw(secondaryDrawer, secondaryFrame, halfW + 2, 0, halfW - 2, height, cover = true)
+                    if (primaryFrame != null) draw(primaryDrawer, pg, primaryFrame, 0, 0, halfW - 2, height, cover = true)
+                    if (secondaryFrame != null) draw(secondaryDrawer, sg, secondaryFrame, halfW + 2, 0, halfW - 2, height, cover = true)
                 }
                 LayoutMode.PIP -> {
-                    if (primaryFrame != null) draw(primaryDrawer, primaryFrame, 0, 0, width, height, cover = false)
+                    if (primaryFrame != null) draw(primaryDrawer, pg, primaryFrame, 0, 0, width, height, cover = false)
                     // Inset secondary camera (bottom-right 32% size)
                     if (secondaryFrame != null) {
                         val pipW = (width * 0.32).toInt()
                         val pipH = (height * 0.32).toInt()
-                        draw(secondaryDrawer, secondaryFrame, width - pipW - 24, 24, pipW, pipH, cover = true)
+                        draw(secondaryDrawer, sg, secondaryFrame, width - pipW - 24, 24, pipW, pipH, cover = true)
                     }
                 }
             }
@@ -96,17 +109,18 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
      * otherwise fill it when the aspect is close (a 16:9 camera in a 16:9 program) and fit with bars when it is not
      * (a phone held upright: cropping a 9:16 picture to 16:9 would cut most of the person).
      */
-    private fun draw(frameDrawer: VideoFrameDrawer, held: HeldFrame, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+    private fun draw(frameDrawer: VideoFrameDrawer, gl: RendererCommon.GlDrawer, held: HeldFrame,
+                     x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
         when (held) {
-            is HeldFrame.Cpu -> drawCpu(frameDrawer, held.frame, x, y, w, h, cover)
-            is HeldFrame.Gpu -> drawGpu(held, x, y, w, h, cover)
+            is HeldFrame.Cpu -> drawCpu(frameDrawer, gl, held.frame, x, y, w, h, cover)
+            is HeldFrame.Gpu -> drawGpu(gl, held, x, y, w, h, cover)
         }
     }
 
     private val identity = floatArrayOf(1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f)
 
     /** An upright RGBA copy (WebRtcSourceSink.gpuCopy): same fill/cover/fit rules as [drawCpu]. */
-    private fun drawGpu(g: HeldFrame.Gpu, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+    private fun drawGpu(rectDrawer: RendererCommon.GlDrawer, g: HeldFrame.Gpu, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
         val fw = g.width.toFloat(); val fh = g.height.toFloat()
         if (fw <= 0f || fh <= 0f || w <= 0 || h <= 0) return
         val frameAspect = fw / fh; val boxAspect = w.toFloat() / h
@@ -131,7 +145,7 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
         }
     }
 
-    private fun drawCpu(frameDrawer: VideoFrameDrawer, frame: VideoFrame, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+    private fun drawCpu(frameDrawer: VideoFrameDrawer, rectDrawer: RendererCommon.GlDrawer, frame: VideoFrame, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
         val fw = frame.rotatedWidth.toFloat(); val fh = frame.rotatedHeight.toFloat()
         if (fw <= 0f || fh <= 0f || w <= 0 || h <= 0) return
         val frameAspect = fw / fh; val boxAspect = w.toFloat() / h
@@ -158,6 +172,8 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
             primaryDrawer.release()
             secondaryDrawer.release()
             rectDrawer.release()
+            primaryGrade.release()
+            secondaryGrade.release()
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing drawers: ${e.message}")
         }

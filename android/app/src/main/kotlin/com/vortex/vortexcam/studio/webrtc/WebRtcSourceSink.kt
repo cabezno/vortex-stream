@@ -24,6 +24,9 @@ class WebRtcSourceSink : VideoSink {
     /** Hold the program picture of this source by this much (0 = live). */
     @Volatile var delayMs: Int = 0
 
+    /** Colour correction of this source in the program (ColorMatch); null = as it comes. */
+    @Volatile var grade: ColorGrade? = null
+
     // Keep a COPY, never the decoder's own frame. A decoded WebRTC frame is usually a texture of the decoder's
     // SurfaceTextureHelper, which has only ONE frame in flight: holding it until the next onFrame() starves the
     // decoder — it froze after ~1 frame (framesReceived kept growing, framesDecoded stuck; diagnosed 2026-09-29 and

@@ -23,6 +23,7 @@ import '../output/rtmp_out.dart';
 import '../room/room_host.dart';
 import '../switch/director.dart';
 import '../sync/source_sync.dart';
+import '../color/color_match.dart';
 import '../transport/subscriber.dart';
 import 'program_layout_view.dart';
 
@@ -43,6 +44,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   late final ProgramMixer _mixer;
   late final LocalCameraSource _localCam;
   late final SourceSync _sync;
+  late final ColorMatch _color;
   String _localIp = '127.0.0.1';
 
   // The switcher's own Wi-Fi network for its cameras (plan §1): one hop instead of two through a router, no foreign
@@ -232,6 +234,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             ? (_localCam.isActive ? _localCam.renderer.textureId : null)
             : _subscriber.getRenderer(id)?.textureId);
 
+    _color = ColorMatch(encoder: _encoder, roomHost: _roomHost, textureOf: _sync.textureOf);
     _encoder.addListener(_applyPendingQuality);
     _mixer.addListener(_syncNativeCameraSources);
     _sync.addListener(_syncNativeCameraSources);
@@ -509,6 +512,92 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
           );
         },
+      ),
+    );
+  }
+
+  /// Colour of the cameras (ColorMatch): by hand per camera, or matched automatically to a reference camera.
+  void _showColorDialog() {
+    String? sel;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModal) => ListenableBuilder(
+          listenable: _color,
+          builder: (ctx, _) {
+            final cams = _roomHost.cameras;
+            if (sel == null || !cams.any((c) => c.id == sel)) sel = cams.isEmpty ? null : cams.first.id;
+            final id = sel;
+            final ref = _color.reference;
+            String nameOf(String? i) => cams.where((c) => c.id == i).firstOrNull?.name ?? '-';
+            Widget slider(String label, double value, String lo, String hi, void Function(double) set) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Expanded(child: Text(label, style: SdText.label)),
+                  Text(value == 0 ? '0' : '${value > 0 ? '+' : ''}${(value * 100).round()}',
+                      style: SdText.label.copyWith(color: Sd.t1)),
+                ]),
+                Slider(value: value, min: -1, max: 1, divisions: 40, onChanged: (v) { set(v); _color.changed(); }),
+                Row(children: [
+                  Text(lo, style: SdText.caption), const Spacer(), Text(hi, style: SdText.caption),
+                ]),
+                const SizedBox(height: 6),
+              ],
+            );
+            return AlertDialog(
+              scrollable: true,
+              title: const Row(children: [
+                Icon(SdIcons.eye, color: Sd.cyan, size: 22),
+                SizedBox(width: 10),
+                Expanded(child: Text('Color de cámaras')),
+              ]),
+              content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Para que todas las cámaras se vean parecidas al cortar. Se aplica al programa (grabación '
+                    'y emisión) y al monitor.', style: SdText.caption),
+                const SizedBox(height: 12),
+                if (cams.isEmpty) const Text('Sin cámaras.', style: SdText.caption),
+                Wrap(spacing: 6, runSpacing: 6, children: [
+                  for (final c in cams)
+                    ChoiceChip(
+                      label: Text(c.id == ref ? '${c.name} · ref.' : c.name),
+                      selected: c.id == id,
+                      onSelected: (_) => setModal(() => sel = c.id),
+                    ),
+                ]),
+                if (id != null) ...[
+                  const SizedBox(height: 12),
+                  if (id == ref)
+                    const Text('Es la referencia: las cámaras en automático se igualan a esta.', style: SdText.caption)
+                  else ...[
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero, dense: true,
+                      title: Text('Igualar a ${nameOf(ref)}', style: SdText.bodyHi),
+                      subtitle: const Text('Ajusta solo el balance de blancos y el brillo para parecerse a la '
+                          'referencia. Funciona mejor si las dos ven una escena parecida.', style: SdText.caption),
+                      value: _color.of(id).auto,
+                      onChanged: (v) { _color.of(id).auto = v; _color.changed(); },
+                    ),
+                    Align(alignment: Alignment.centerLeft, child: TextButton(
+                      onPressed: () => _color.reference = id,
+                      child: const Text('Usar esta como referencia'),
+                    )),
+                  ],
+                  const SizedBox(height: 8),
+                  slider('Exposición', _color.of(id).exposure, 'más oscura', 'más clara', (v) => _color.of(id).exposure = v),
+                  slider('Temperatura', _color.of(id).temperature, 'más fría', 'más cálida', (v) => _color.of(id).temperature = v),
+                  slider('Tinte', _color.of(id).tint, 'verde', 'magenta', (v) => _color.of(id).tint = v),
+                  slider('Saturación', _color.of(id).saturation, 'menos color', 'más color', (v) => _color.of(id).saturation = v),
+                  Align(alignment: Alignment.centerLeft, child: TextButton(
+                    onPressed: () { _color.of(id).reset(); _color.changed(); },
+                    child: const Text('Restablecer esta cámara'),
+                  )),
+                ],
+              ]),
+              actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
+            );
+          },
+        ),
       ),
     );
   }
@@ -808,6 +897,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _roomHost.removeListener(_syncNativeCameraSources);
     _localCam.removeListener(_localCamChanged);
     _sync.dispose();
+    _color.dispose();
 
     _localCam.dispose();
     _mixer.dispose();
@@ -883,6 +973,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             icon: const Icon(SdIcons.timer),
             tooltip: 'Sincronía de cámaras',
             onPressed: _showSyncDialog,
+          ),
+          IconButton(
+            icon: const Icon(SdIcons.eye),
+            tooltip: 'Color de cámaras',
+            onPressed: _showColorDialog,
           ),
           // Auto / manual switching
           ListenableBuilder(
@@ -1016,6 +1111,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                           cameras: cameras,
                           localRenderer: _localCam.isActive ? _localCam.renderer : null,
                           localPeerId: _localCam.peerId,
+                          color: _color,
                         ),
                       ),
                       // Status pills

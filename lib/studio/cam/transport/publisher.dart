@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:samba_protocol/samba_protocol.dart';
+import '../../common/capture_tuner.dart';
 
 enum CameraFacing { front, back }
 
@@ -91,6 +92,7 @@ class WebRtcPublisher {
 
     _localStream = await navigator.mediaDevices.getUserMedia(constraints);
     if (audioOnly) return _localStream!;
+    CaptureTuner.tune(_localStream);   // the camera processor's best noise reduction / sharpening
     // The size the camera really gave (the low layer is a fraction of it).
     try {
       final st = _localStream!.getVideoTracks().first.getSettings();

@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:samba_protocol/samba_protocol.dart';
 import '../room/room_host.dart';
+import '../../common/capture_tuner.dart';
 
 /// Cámara LOCAL del propio switcher, integrada como una fuente de video más.
 ///
@@ -103,6 +104,7 @@ class LocalCameraSource extends ChangeNotifier {
     };
     _stream = await navigator.mediaDevices.getUserMedia(constraints);
     renderer.srcObject = _stream;
+    CaptureTuner.tune(_stream);   // the camera processor's best noise reduction / sharpening
   }
 
   /// Alterna cámara frontal/trasera re-abriendo el capturer. (El giro in-place

@@ -8,6 +8,8 @@ import com.vortex.vortexcam.studio.encoder.HardwareProgramEncoder
 import com.vortex.vortexcam.studio.encoder.SwitcherMic
 import com.vortex.vortexcam.studio.gl.LayoutMode
 import com.vortex.vortexcam.studio.rtmp.RtmpStreamer
+import com.vortex.vortexcam.studio.webrtc.ColorGrade
+import com.vortex.vortexcam.studio.webrtc.ColorMeter
 import com.vortex.vortexcam.studio.webrtc.WebRtcSourceSink
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -43,9 +45,17 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private var secondaryTrack: VideoTrack? = null
     private val micMeterOwner = Any()
     private var syncProbe: SyncProbe? = null
+    // Colour matching (ColorMatch, 2026-10-19): a meter on every camera, a grade per camera applied to its sink.
+    private val colorMeters = HashMap<String, Pair<VideoTrack, ColorMeter>>()   // peerId → (track, meter)
+    private val gradeByTrack = HashMap<String, ColorGrade>()                     // track id → grade
+
+    private fun applyGrades() {
+        for ((t, sk) in sinks) sk.grade = try { gradeByTrack[t.id()] } catch (_: Exception) { null }   // a disposed track throws
+    }
 
     private fun register() {
         RecordingsStore.registerWith(engine, appContext)   // its own channel: recordings in the gallery
+        CaptureTuner.registerWith(engine)                  // its own channel: best image processing of the cameras
         MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "startEncoder" -> {
@@ -106,6 +116,41 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                         .mapNotNull { (peer, tex) -> getVideoTrackForTextureId(tex)?.let { peer to it } }.toMap()
                     syncProbe = SyncProbe().also { it.start(a, v, call.argument<String>("localPeer")) }
                     result.success(a.size + v.size)
+                }
+                // {cams: {peerId: textureId}}: the cameras whose colour is measured (meters on the others removed).
+                "setColorMeters" -> {
+                    val cams = call.argument<Map<String, Int>>("cams") ?: emptyMap()
+                    for (peer in colorMeters.keys.toList()) {
+                        val tex = cams[peer]
+                        val track = tex?.let { getVideoTrackForTextureId(it) }
+                        val same = try { track != null && track.id() == colorMeters[peer]!!.first.id() } catch (_: Exception) { false }
+                        if (!same) {
+                            val (t, m) = colorMeters.remove(peer)!!
+                            try { t.removeSink(m) } catch (_: Exception) {}
+                        }
+                    }
+                    for ((peer, tex) in cams) if (peer !in colorMeters) {
+                        val t = getVideoTrackForTextureId(tex) ?: continue
+                        val m = ColorMeter()
+                        try { t.addSink(m); colorMeters[peer] = t to m } catch (e: Exception) { Log.w(TAG, "meter: ${e.message}") }
+                    }
+                    result.success(colorMeters.size)
+                }
+                // peerId → [Y, U, V] mean (0–255) of the cameras measured so far.
+                "getColorStats" -> result.success(colorMeters.mapNotNull { (peer, tm) ->
+                    val m = tm.second
+                    if (m.y < 0) null else peer to listOf(m.y.toDouble(), m.u.toDouble(), m.v.toDouble())
+                }.toMap())
+                // {grades: {peerId: [r, g, b, sat]}}: colour correction of each camera in the program.
+                "setColorGrades" -> {
+                    val g = call.argument<Map<String, List<Double>>>("grades") ?: emptyMap()
+                    gradeByTrack.clear()
+                    for ((peer, v) in g) {
+                        val t = colorMeters[peer]?.first ?: continue
+                        if (v.size >= 4) gradeByTrack[try { t.id() } catch (_: Exception) { continue }] = ColorGrade(v[0].toFloat(), v[1].toFloat(), v[2].toFloat(), v[3].toFloat())
+                    }
+                    applyGrades()
+                    result.success(true)
                 }
                 "syncProbeMark" -> { syncProbe?.mark(); result.success(true) }
                 "syncProbeFinish" -> {
@@ -294,6 +339,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
         secondarySink = sec?.let { sinks[it] }
         programEncoder?.primarySink = primarySink
         programEncoder?.secondarySink = secondarySink
+        applyGrades()
     }
 
     private fun stopHardwareEncoder() {
@@ -308,6 +354,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
 
     fun dispose() {
         syncProbe?.finish(); syncProbe = null
+        for ((_, tm) in colorMeters) { try { tm.first.removeSink(tm.second) } catch (_: Exception) {} }
+        colorMeters.clear(); gradeByTrack.clear()
         for ((t, sk) in sinks) { try { t.removeSink(sk) } catch (_: Exception) {}; sk.release() }
         sinks.clear()
         primarySink = null
