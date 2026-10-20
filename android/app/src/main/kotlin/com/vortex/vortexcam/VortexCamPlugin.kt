@@ -319,6 +319,12 @@ class VortexCamPlugin(
             // the MediaCodec/AudioTrack — reopening those on every toggle would add an
             // audible gap and risks fighting the Camera2 session (see the freeze-fix
             // comment on encoder surface dimensions elsewhere in this file).
+            // SAMBA's tally for this phone (SBL, and SRT once SAMBA sends it back): known = heard in the last 6 s.
+            "getTally" -> {
+                val fresh = tallyAtMs > 0 && System.currentTimeMillis() - tallyAtMs < 6000
+                result.success(mapOf("known" to fresh, "pgm" to (fresh && tallyPgm), "prv" to (fresh && tallyPrv)))
+            }
+
             "setTalkbackMuted" -> {
                 talkbackMuted.set(call.argument<Boolean>("muted") ?: false)
                 result.success(null)
@@ -728,6 +734,7 @@ class VortexCamPlugin(
 
     private fun stopStream() {
         if (!streaming.getAndSet(false)) return
+        tallyAtMs = 0L; tallyPgm = false; tallyPrv = false
         encodeThread?.join(2000); encodeThread = null
         audioInThread?.join(1000);  audioInThread  = null
         audioOutThread?.join(1000); audioOutThread = null
@@ -1681,11 +1688,28 @@ class VortexCamPlugin(
                 s.connect(ip, port)
                 srt = s; mode = "SRT"; linkUp = true
                 Log.i(TAG, "SRT (UDP, libsrt) connected → $ip:$port, latency $latencyMs ms")
+                startReceive(s)
                 true
             } catch (e: Exception) {
                 Log.w(TAG, "SRT connect to $ip:$port failed: $e")
                 try { s.close() } catch (_: Exception) {}
                 false
+            }
+        }
+
+        /** What SAMBA sends back on this SRT connection (tally, return audio): see [processSrtReturn]. */
+        private fun startReceive(s: LibSrtSocket) {
+            thread(name = "SrtReceive", isDaemon = true) {
+                val buf = ByteArray(1500)
+                while (!closed && srt === s) {
+                    try {
+                        val n = s.recv(buf, 0, buf.size)
+                        if (n > 0) processSrtReturn(buf, n)
+                    } catch (e: Exception) {
+                        if (closed || srt !== s) break
+                        try { Thread.sleep(50) } catch (_: InterruptedException) { break }
+                    }
+                }
             }
         }
 
@@ -1866,6 +1890,7 @@ class VortexCamPlugin(
     }
 
     private fun stopReturnAudio() {
+        srtReturnInit = false
         returnRunning.set(false)
         returnThread?.join(1000); returnThread = null
         returnDecoder?.stop(); returnDecoder?.release(); returnDecoder = null
@@ -1929,6 +1954,7 @@ class VortexCamPlugin(
         }
 
         val streamId = buf[5].toInt() and 0xFF
+        if ((buf[4].toInt() and 0xFF) == 0 && streamId == 4) { handleTallyFrame(buf, len); return }
         if (streamId != 3) return   // only AudioReturn (streamID=3)
         // SblPacketHeaderV3 is big-endian on the wire, like the rest of SBL v3.
         //
@@ -1944,6 +1970,69 @@ class VortexCamPlugin(
         val payloadLen = ((buf[24].toInt() and 0xFF) shl 8) or (buf[25].toInt() and 0xFF)
         if (payloadLen <= 0 || 32 + payloadLen > len) return
         decodeAndPlay(buf, 32, payloadLen)
+    }
+
+    // ---- Tally from SAMBA (2026-10-20) --------------------------------------------------------------------------
+    // SblSource::setTally sends it every 2 s and on every change: a Metadata FRAME (packetType 0 Data, streamID 4),
+    // one fragment; payload = SblFrameHeader (32 B, codec 0xFF Raw) + MessagePack {"tally":{"pgm":bool,"prv":bool}}.
+    // pgm = this camera is in the scene on air; prv = in the studio-mode preview. It used to be dropped here (only
+    // streamID 3 went through), so the phone never showed it was on air.
+    @Volatile private var tallyPgm = false
+    @Volatile private var tallyPrv = false
+    @Volatile private var tallyAtMs = 0L
+
+    private fun handleTallyFrame(buf: ByteArray, len: Int) {
+        val payloadLen = ((buf[24].toInt() and 0xFF) shl 8) or (buf[25].toInt() and 0xFF)
+        val end = 32 + payloadLen
+        if (payloadLen <= 32 || end > len) return
+        val pgm = msgpackBool(buf, 64, end, "pgm") ?: return
+        val prv = msgpackBool(buf, 64, end, "prv") ?: false
+        if (tallyAtMs == 0L || pgm != tallyPgm || prv != tallyPrv) {
+            val msg = "[tally] SAMBA: ${if (pgm) "AL AIRE" else if (prv) "en vista previa" else "fuera del aire"}\n"
+            Log.i(TAG, msg.trim())
+            Thread { sendLogBytes(msg, "tally") }.start()
+        }
+        tallyPgm = pgm; tallyPrv = prv; tallyAtMs = System.currentTimeMillis()
+    }
+
+    /** The bool after the MessagePack key [key] (a fixstr) in buf[from, to), or null if it is not there. */
+    private fun msgpackBool(buf: ByteArray, from: Int, to: Int, key: String): Boolean? {
+        val k = key.toByteArray(Charsets.US_ASCII)
+        var i = from
+        while (i + 1 + k.size < to) {
+            if ((buf[i].toInt() and 0xFF) == 0xA0 + k.size &&
+                (k.indices).all { buf[i + 1 + it] == k[it] }) {
+                return when (buf[i + 1 + k.size].toInt() and 0xFF) { 0xC3 -> true; 0xC2 -> false; else -> null }
+            }
+            i++
+        }
+        return null
+    }
+
+    // ---- SAMBA → phone over the SRT connection -------------------------------------------------------------------
+    // SRT is two-way: SAMBA sends back, on the connection it accepted, the SAME SBL v3 packets it sends an SBL phone
+    // over UDP, one per SRT message - the tally (above) and the return audio (streamID 3, Opus), and maybe a keyframe
+    // request. Agreed with SAMBA 2026-10-20 (it lands there after several SRT callers per port); until then nothing
+    // arrives and nothing changes.
+    private var srtReturnInit = false
+    private fun processSrtReturn(buf: ByteArray, len: Int) {
+        if (len < 32) return
+        if (buf[0] != 0x53.toByte() || buf[1] != 0x42.toByte() || buf[2] != 0x4C.toByte()) return
+        val type = buf[4].toInt() and 0xFF
+        val streamId = buf[5].toInt() and 0xFF
+        when {
+            type == 0 && streamId == 4 -> handleTallyFrame(buf, len)
+            type == 7 -> {
+                val now = System.currentTimeMillis()
+                if (now - lastForcedIdrMs >= 1000) { lastForcedIdrMs = now; requestIdr() }
+            }
+            streamId == 3 -> {
+                val payloadLen = ((buf[24].toInt() and 0xFF) shl 8) or (buf[25].toInt() and 0xFF)
+                if (payloadLen <= 0 || 32 + payloadLen > len) return
+                if (!srtReturnInit) { srtReturnInit = true; initReturnAudio() }
+                decodeAndPlay(buf, 32, payloadLen)
+            }
+        }
     }
 
     private var returnFormat: android.media.MediaFormat? = null
