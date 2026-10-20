@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'device_capabilities.dart';
+import '../studio/common/camera_audio.dart';
 
 enum CameraFacing { back, front }
 
@@ -127,11 +128,7 @@ class CameraService extends ChangeNotifier {
     // timeout this await never returns and the whole "connecting" flow freezes,
     // forcing the user to kill the app. Fail loudly instead so the UI recovers.
     _stream = await navigator.mediaDevices.getUserMedia({
-      'audio': {
-        'echoCancellation': true,
-        'noiseSuppression': true,
-        'autoGainControl':  true,
-      },
+      'audio': CameraAudio.constraints(),   // the same «Sonido» setting as the switcher camera
       'video': videoConstraints,
     }).timeout(
       const Duration(seconds: 12),

@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:samba_protocol/samba_protocol.dart';
 import '../../common/capture_tuner.dart';
+import '../../common/camera_audio.dart';
 
 enum CameraFacing { front, back }
 
@@ -72,11 +73,7 @@ class WebRtcPublisher {
     _localStream?.getTracks().forEach((t) => t.stop());
 
     final constraints = <String, dynamic>{
-      'audio': {
-        'echoCancellation': true,
-        'noiseSuppression': true,
-        'autoGainControl': true,
-      },
+      'audio': CameraAudio.constraints(),   // natural sound or call processing (the camera's «Sonido»)
       'video': audioOnly ? false : {
         if (deviceId != null) 'deviceId': deviceId
         else 'facingMode': facing == CameraFacing.back ? 'environment' : 'user',
