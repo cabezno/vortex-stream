@@ -33,6 +33,7 @@ import 'services/device_capabilities.dart';
 import 'theme/samba_theme.dart';
 import 'services/log_service.dart';
 import 'screens/mode_picker.dart';
+import 'studio/common/camera_audio.dart';
 
 void main() {
   // runZonedGuarded + FlutterError.onError capture BOTH framework errors and any
@@ -41,6 +42,8 @@ void main() {
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
     await LogService.instance.init();
+    // Before anything touches WebRTC: the camera's sound mode picks the phone's audio engine (once per run).
+    await CameraAudio.initEngine();
 
     final prev = FlutterError.onError;
     FlutterError.onError = (details) {

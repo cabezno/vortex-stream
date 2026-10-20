@@ -13,6 +13,8 @@ import '../transport/publisher.dart';
 import '../../common/camera_picker.dart';
 import 'mic_picker.dart';
 import 'qr_scanner_sheet.dart';
+import '../../common/camera_audio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
@@ -46,6 +48,38 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
   }
   bool _btSeen = false;
 
+  /// «Sonido»: natural (default) or voice processing. Re-opens the capture so it applies now (WebRTC's part; the
+  /// phone's own part when the app is opened again — CameraAudio.needsRestart).
+  Future<void> _setAudioMode(CameraAudioMode m) async {
+    if (_control.isConnected || m == CameraAudio.mode) return;
+    await CameraAudio.set(m);
+    setState(() => _isRendererReady = false);
+    final stream = await _publisher.initMediaStream(facing: _facing);
+    _localRenderer.srcObject = _micOnly ? null : stream;
+    if (mounted) setState(() => _isRendererReady = true);
+  }
+
+  // The switcher's address and this camera's name are remembered (the IP field always came back as 192.168.1.100).
+  static const _ipKey = 'cam.switcherIp', _nameKey = 'cam.name';
+  Future<void> _loadJoinFields() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final ip = p.getString(_ipKey), name = p.getString(_nameKey);
+      if (!mounted) return;
+      setState(() {
+        if (ip != null && ip.isNotEmpty) _ipController.text = ip;
+        if (name != null && name.isNotEmpty) { _nameController.text = name; _control.name = name; }
+      });
+    } catch (_) {}
+  }
+  Future<void> _saveJoinFields() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString(_ipKey, _ipController.text.trim());
+      await p.setString(_nameKey, _nameController.text.trim());
+    } catch (_) {}
+  }
+
   @override
   void initState() {
     super.initState();
@@ -66,6 +100,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
       onAudioLevel: (dbfs) => _control.updateAudioLevel(dbfs),
     );
 
+    _loadJoinFields();
     _initCamera();
     _setupControlListeners();
     _control.addListener(_onControlChanged);
@@ -295,6 +330,7 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
     await _control.connect(_ipController.text.trim());
 
     if (_control.isConnected) {
+      _saveJoinFields();
       await _publisher.createPeerConnectionSession();
       final offer = await _publisher.createOffer();
       _control.sendMessage(OfferMessage(
@@ -550,6 +586,30 @@ class _CameraScreenState extends State<CameraScreen> with WidgetsBindingObserver
         value: _micOnly,
         onChanged: _setMicOnly,
       ),
+      const SizedBox(height: 4),
+      Row(children: [
+        const Text('Sonido', style: SdText.bodyHi),
+        const SizedBox(width: 12),
+        Expanded(child: SegmentedButton<CameraAudioMode>(
+          segments: const [
+            ButtonSegment(value: CameraAudioMode.natural, label: Text('Natural')),
+            ButtonSegment(value: CameraAudioMode.voice, label: Text('Voz')),
+          ],
+          selected: {CameraAudio.mode},
+          showSelectedIcon: false,
+          onSelectionChanged: (s) => _setAudioMode(s.first),
+        )),
+      ]),
+      const SizedBox(height: 4),
+      Text(
+        CameraAudio.mode == CameraAudioMode.natural
+            ? 'El sonido del lugar tal cual, sin filtros. Lo recomendado para una cámara.'
+            : 'Reduce ruido y eco, como en una llamada: para alguien que habla cerca del celular. Algunos celulares '
+              'cortan el sonido en las pausas.',
+        style: SdText.caption),
+      if (CameraAudio.needsRestart)
+        Text('Para que se aplique del todo, cerrá y volvé a abrir la app.',
+            style: SdText.caption.copyWith(color: Sd.amber)),
       const SizedBox(height: 8),
       Row(children: [
         Expanded(
