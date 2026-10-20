@@ -337,13 +337,30 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
         programEncoder?.setCameraAudioTrack(primaryAudioTrack, primaryAudioDelayMs)
     }
 
-    /** A remote audio track by its flutter_webrtc id (MethodCallHandlerImpl.getTrackForId). */
+    /**
+     * A remote audio track by its flutter_webrtc id, read ONLY from each connection's registry of remote tracks
+     * (PeerConnectionObserver.getRemoteTrack, a map). Not getTrackForId: when the id is not in a connection's map it
+     * walks that connection's transceivers (PeerConnection.getTransceivers), which disposes the list handed out before.
+     * A camera joining runs the same call on the signaling thread (onAddTrack) while this ran on the main thread —
+     * the camera's switch of sources fires right then — and one disposed what the other was disposing:
+     * «RtpTransceiver has been disposed» inside a JNI callback → SIGABRT (jvm.cc:81) of the whole switcher
+     * (2026-10-20, Mi A3 and Redmi Note 14 Pro as switchers, when the second camera joined).
+     */
     private fun audioTrackById(id: String): org.webrtc.AudioTrack? = try {
         val plugin = engine.plugins.get(FlutterWebRTCPlugin::class.java) as? FlutterWebRTCPlugin
         val hf = FlutterWebRTCPlugin::class.java.getDeclaredField("methodCallHandler").apply { isAccessible = true }
         val handler = plugin?.let { hf.get(it) }
-        handler?.javaClass?.getMethod("getTrackForId", String::class.java, String::class.java)
-            ?.invoke(handler, id, null) as? org.webrtc.AudioTrack
+        val of = handler?.javaClass?.getDeclaredField("mPeerConnectionObservers")?.apply { isAccessible = true }
+        val observers = (of?.get(handler) as? Map<*, *>)?.values?.toList() ?: emptyList()
+        var found: org.webrtc.AudioTrack? = null
+        for (pco in observers) {
+            if (pco == null) continue
+            val m = pco.javaClass.getDeclaredMethod("getRemoteTrack", String::class.java).apply { isAccessible = true }
+            found = m.invoke(pco, id) as? org.webrtc.AudioTrack
+            if (found != null) break
+        }
+        if (found == null) Log.w(TAG, "Audio track $id not (yet) registered")
+        found
     } catch (e: Exception) { Log.w(TAG, "Audio track $id not found: ${e.message}"); null }
 
     private fun setCameraSources(primaryTextureId: Int?, secondaryTextureId: Int?, previewTextureId: Int?,
