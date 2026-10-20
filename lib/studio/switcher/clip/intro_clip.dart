@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -10,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// texture for the monitor here.
 class IntroClip extends ChangeNotifier {
   static const MethodChannel _channel = MethodChannel('com.samba.studio/program_encoder');
+  static const MethodChannel _pick = MethodChannel('com.vortex.vortexcam/pick');   // MainActivity: picker + copy
 
   IntroClip() {
     _channel.setMethodCallHandler((call) async {
@@ -57,18 +57,11 @@ class IntroClip extends ChangeNotifier {
   Future<bool> pick() async {
     picking = true; notifyListeners();
     try {
-      final r = await FilePicker.platform.pickFiles(type: FileType.video);
-      final src = r?.files.single.path;
-      if (src == null) return false;
-      final dir = Directory('${(await getApplicationSupportDirectory()).path}/intro');
-      if (dir.existsSync()) dir.deleteSync(recursive: true);
-      dir.createSync(recursive: true);
-      final ext = src.contains('.') ? src.substring(src.lastIndexOf('.')) : '.mp4';
-      final dst = '${dir.path}/intro$ext';
-      await File(src).copy(dst);
-      try { await File(src).delete(); } catch (_) {}      // file_picker's temporary copy
-      path = dst;
-      name = r!.files.single.name;
+      final dir = '${(await getApplicationSupportDirectory()).path}/intro';
+      final r = await _pick.invokeMapMethod<String, dynamic>('pickVideo', {'dir': dir});
+      if (r == null) return false;
+      path = r['path'] as String;
+      name = r['name'] as String?;
       await save();
       return true;
     } finally {
