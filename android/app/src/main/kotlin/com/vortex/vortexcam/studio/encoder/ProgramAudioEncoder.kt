@@ -49,7 +49,7 @@ class ProgramAudioEncoder(
      * back (alignment with slower cameras, 2026-10-06): reading starts once that much more is queued, and the trim
      * keeps it — the level settles around PREBUFFER + delay.
      */
-    private class Ring {
+    class Ring {
         private val buf = FloatArray(SAMPLE_RATE * CHANNELS)              // 1 s
         private var w = 0; private var r = 0; private var level = 0       // level in frames
         private var primed = false
@@ -244,9 +244,15 @@ class ProgramAudioEncoder(
             val wait = due - System.nanoTime()
             if (wait > 0) try { Thread.sleep(wait / 1_000_000, (wait % 1_000_000).toInt()) } catch (_: InterruptedException) { break }
             java.util.Arrays.fill(mix, 0f)
-            if (useCamera) camRing.mixInto(mix, FRAME, 1f)
-            if (useMic && micRunning.get()) micRing.mixInto(mix, FRAME, 1f)
-            for (m in micTracks) m.ring.mixInto(mix, FRAME, 1f)
+            // A clip in the program (intro video) replaces the sources, crossfading back at its end. The others are
+            // still read (at gain 0) so their rings stay current.
+            val clip = com.vortex.vortexcam.studio.clip.ClipPlayer.current
+            val cg = clip?.alpha() ?: 0f
+            val g = 1f - cg
+            if (useCamera) camRing.mixInto(mix, FRAME, g)
+            if (useMic && micRunning.get()) micRing.mixInto(mix, FRAME, g)
+            for (m in micTracks) m.ring.mixInto(mix, FRAME, g)
+            if (clip != null && cg > 0f) clip.audio.mixInto(mix, FRAME, cg)
             for (i in mix.indices) {
                 val v = (mix[i].coerceIn(-1f, 1f) * 32767f).toInt()
                 pcm[i * 2] = v.toByte(); pcm[i * 2 + 1] = (v shr 8).toByte()

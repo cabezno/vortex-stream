@@ -31,6 +31,9 @@ dependencies:
   # Local log file (shipped to the PC for analysis)
   path_provider: ^2.1.3
 
+  # Switcher: choosing the intro video
+  file_picker: ^8.1.2
+
   # UI
   cupertino_icons: ^1.0.6
 

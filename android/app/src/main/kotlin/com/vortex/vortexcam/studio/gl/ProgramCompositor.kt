@@ -2,6 +2,7 @@ package com.vortex.vortexcam.studio.gl
 
 import android.opengl.GLES20
 import android.util.Log
+import com.vortex.vortexcam.studio.clip.ClipPlayer
 import com.vortex.vortexcam.studio.webrtc.GpuFramePool
 import com.vortex.vortexcam.studio.webrtc.HeldFrame
 import com.vortex.vortexcam.studio.webrtc.WebRtcSourceSink
@@ -65,13 +66,21 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
             LayoutMode.SINGLE -> null
         }
 
-        val primaryFrame = primarySink?.getFrame()
-        val secondaryFrame = secondarySink?.getFrame()
+        // A clip (intro video) covers the cameras; black until its first frame, then fading out at its end.
+        val clip = ClipPlayer.current
+        val clipAlpha = clip?.alpha() ?: 0f
+        if (clipAlpha >= 1f) {
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        }
+
+        val primaryFrame = if (clipAlpha < 1f) primarySink?.getFrame() else null
+        val secondaryFrame = if (clipAlpha < 1f) secondarySink?.getFrame() else null
         val pg = glDrawer(primaryGrade, primarySink?.grade)
         val sg = glDrawer(secondaryGrade, secondarySink?.grade)
 
         try {
-            when (layoutMode) {
+            if (clipAlpha < 1f) when (layoutMode) {
                 LayoutMode.SINGLE -> {
                     if (primaryFrame != null) draw(primaryDrawer, pg, primaryFrame, 0, 0, width, height, cover = false)
                 }
@@ -96,6 +105,27 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
         } finally {
             primaryFrame?.release()
             secondaryFrame?.release()
+        }
+        if (clip != null && clipAlpha > 0f) drawClip(clip, clipAlpha)
+    }
+
+    private val clipDrawer = VideoFrameDrawer()
+
+    /** The clip over the whole program, blended at [alpha] (constant alpha: its pixels are opaque). */
+    private fun drawClip(clip: ClipPlayer, alpha: Float) {
+        val f = clip.sink.getFrame() ?: return
+        try {
+            if (alpha < 1f) {
+                GLES20.glEnable(GLES20.GL_BLEND)
+                GLES20.glBlendColor(0f, 0f, 0f, alpha)
+                GLES20.glBlendFunc(GLES20.GL_CONSTANT_ALPHA, GLES20.GL_ONE_MINUS_CONSTANT_ALPHA)
+            }
+            draw(clipDrawer, rectDrawer, f, 0, 0, width, height, cover = clip.fill)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error drawing clip: ${e.message}")
+        } finally {
+            GLES20.glDisable(GLES20.GL_BLEND)
+            f.release()
         }
     }
 
@@ -170,6 +200,7 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
         try {
             primaryDrawer.release()
             secondaryDrawer.release()
+            clipDrawer.release()
             rectDrawer.release()
             primaryGrade?.release()
             secondaryGrade?.release()

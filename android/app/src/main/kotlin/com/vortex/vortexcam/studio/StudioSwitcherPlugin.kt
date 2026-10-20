@@ -45,6 +45,9 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private var secondaryTrack: VideoTrack? = null
     private val micMeterOwner = Any()
     private var syncProbe: SyncProbe? = null
+    private var channel: MethodChannel? = null
+    // Intro video (ClipPlayer, 2026-10-20).
+    private var clip: com.vortex.vortexcam.studio.clip.ClipPlayer? = null
     // Colour matching (ColorMatch, 2026-10-19): a meter on every camera, a grade per camera applied to its sink.
     private val colorMeters = HashMap<String, Pair<VideoTrack, ColorMeter>>()   // peerId → (track, meter)
     private val gradeByTrack = HashMap<String, ColorGrade>()                     // track id → grade
@@ -56,8 +59,36 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private fun register() {
         RecordingsStore.registerWith(engine, appContext)   // its own channel: recordings in the gallery
         CaptureTuner.registerWith(engine)                  // its own channel: best image processing of the cameras
-        MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        val ch = MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
+        channel = ch
+        ch.setMethodCallHandler { call, result ->
             when (call.method) {
+                // Intro video: prepare (black + silence in the program) → play → it ends or is skipped (fade to the
+                // cameras); «clipEnded» goes back to Dart when the fade starts.
+                "clipPrepare" -> {
+                    clip?.release(); clip = null
+                    val path = call.argument<String>("path")
+                    if (path == null) { result.error("CLIP", "sin archivo", null); return@setMethodCallHandler }
+                    try {
+                        lateinit var c: com.vortex.vortexcam.studio.clip.ClipPlayer
+                        c = com.vortex.vortexcam.studio.clip.ClipPlayer(path, call.argument<Boolean>("fill") ?: false,
+                            engine.renderer) {
+                            if (clip === c) clip = null
+                            channel?.invokeMethod("clipEnded", null)
+                        }
+                        clip = c
+                        c.prepare()
+                        result.success(mapOf("textureId" to c.textureId, "width" to c.width, "height" to c.height,
+                            "durationMs" to c.durationMs))
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Clip: ${e.message}", e)
+                        clip?.release(); clip = null
+                        result.error("CLIP", e.message ?: e.toString(), null)
+                    }
+                }
+                "clipPlay" -> { clip?.play(); result.success(clip != null) }
+                "clipSkip" -> { clip?.end(); result.success(true) }
+                "clipStop" -> { clip?.release(); clip = null; result.success(true) }
                 "startEncoder" -> {
                     val width = call.argument<Int>("width") ?: 1920
                     val height = call.argument<Int>("height") ?: 1080
@@ -353,6 +384,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     }
 
     fun dispose() {
+        clip?.release(); clip = null
         syncProbe?.finish(); syncProbe = null
         for ((_, tm) in colorMeters) { try { tm.first.removeSink(tm.second) } catch (_: Exception) {} }
         colorMeters.clear(); gradeByTrack.clear()

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart' show ValueListenable, mapEquals;
@@ -24,6 +25,7 @@ import '../room/room_host.dart';
 import '../switch/director.dart';
 import '../sync/source_sync.dart';
 import '../color/color_match.dart';
+import '../clip/intro_clip.dart';
 import '../transport/subscriber.dart';
 import 'program_layout_view.dart';
 
@@ -44,6 +46,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   late final ProgramMixer _mixer;
   late final LocalCameraSource _localCam;
   late final SourceSync _sync;
+  final IntroClip _intro = IntroClip();
   late final ColorMatch _color;
   String _localIp = '127.0.0.1';
 
@@ -242,6 +245,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _localCam.addListener(_localCamChanged);
     _director.addListener(_syncNativeCameraSources);
     _subscriber.addListener(_syncNativeCameraSources);
+    _recorder.addListener(_introGuard);
+    _rtmpOut.addListener(_introGuard);
 
     _detectLocalIp();
     _loadQuality();
@@ -699,6 +704,79 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     );
   }
 
+  /// Intro video: a clip from this phone that opens the live stream / the recording, then fades to the cameras.
+  void _showIntroDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => ListenableBuilder(
+        listenable: _intro,
+        builder: (ctx, _) {
+          final has = _intro.hasClip;
+          Widget sw(String t, String sub, bool v, void Function(bool) set) => SwitchListTile(
+                contentPadding: EdgeInsets.zero, dense: true,
+                title: Text(t, style: SdText.bodyHi),
+                subtitle: Text(sub, style: SdText.caption),
+                value: v,
+                onChanged: has ? (x) { set(x); _intro.save(); } : null,
+              );
+          return AlertDialog(
+            scrollable: true,
+            title: const Row(children: [
+              Icon(Icons.movie_outlined, color: Sd.cyan, size: 22),
+              SizedBox(width: 10),
+              Expanded(child: Text('Video de entrada')),
+            ]),
+            content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Un video de este celular que abre la transmisión o la grabación, con su sonido. Al terminar '
+                  'pasa solo a las cámaras con un fundido. Mientras corre se puede saltar desde el monitor.',
+                  style: SdText.caption),
+              const SizedBox(height: 12),
+              Row(children: [
+                const Icon(Icons.movie_outlined, size: 18, color: Sd.t2),
+                const SizedBox(width: 8),
+                Expanded(child: Text(has ? (_intro.name ?? 'Video elegido') : 'Ningún video elegido',
+                    style: SdText.bodyHi, overflow: TextOverflow.ellipsis)),
+              ]),
+              const SizedBox(height: 6),
+              Wrap(spacing: 8, children: [
+                FilledButton.tonal(
+                  onPressed: _intro.picking || _intro.isOn ? null : () async {
+                    try {
+                      await _intro.pick();
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo usar ese video: $e')));
+                      }
+                    }
+                  },
+                  child: Text(_intro.picking ? 'Copiando…' : has ? 'Cambiar video' : 'Elegir video'),
+                ),
+                if (has)
+                  TextButton(onPressed: _intro.isOn ? null : _intro.clear, child: const Text('Quitar')),
+              ]),
+              const SizedBox(height: 8),
+              sw('Al salir en vivo', 'Abre la transmisión', _intro.onStream, (v) => _intro.onStream = v),
+              sw('Al empezar a grabar', 'Abre la grabación (si no estás en vivo)', _intro.onRecord, (v) => _intro.onRecord = v),
+              const SizedBox(height: 8),
+              const Text('Si el video tiene otra forma (vertical):', style: SdText.label),
+              const SizedBox(height: 6),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('Entero, con barras')),
+                  ButtonSegment(value: true, label: Text('Recortado')),
+                ],
+                selected: {_intro.fill},
+                showSelectedIcon: false,
+                onSelectionChanged: has ? (s) { _intro.fill = s.first; _intro.save(); } : null,
+              ),
+            ]),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
+          );
+        },
+      ),
+    );
+  }
+
   void _showRtmpConfigDialog() {
     final urlCtrl = TextEditingController(text: _rtmpOut.rtmpUrl);
     final keyCtrl = TextEditingController(text: _rtmpOut.streamKey);
@@ -800,7 +878,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                   _encoder.audioCamera = audioCam;
                   _encoder.audioMic = audioMic;
                 }
+                final intro = !_recorder.isRecording && _intro.wants(stream: true) && await _prepareIntro();
                 await _rtmpOut.startStream();
+                if (intro) {
+                  if (_rtmpOut.isStreaming) { _intro.play(); } else { _intro.stop(); }
+                }
                 if (!mounted) return;
                 if (_rtmpOut.state == RtmpState.error) {
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -843,8 +925,27 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
           : const SnackBar(content: Text('Grabación guardada, pero no se pudo pasar a la Galería. '
               'Se reintenta al volver a abrir el switcher.')));
     } else {
+      final intro = !_rtmpOut.isStreaming && _intro.wants(stream: false) && await _prepareIntro();
       await _recorder.startRecording();
+      if (intro) {
+        if (_recorder.isRecording) { _intro.play(); } else { _intro.stop(); }
+      }
     }
+  }
+
+  /// The intro clip into the program before an output starts (black until it plays). False = not used.
+  Future<bool> _prepareIntro() async {
+    final ok = await _intro.prepare();
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('No se pudo reproducir el video de entrada (${_intro.lastError ?? 'error'}): se empieza con las cámaras.')));
+    }
+    return ok;
+  }
+
+  /// The program stopped going out while the intro was playing: take it out.
+  void _introGuard() {
+    if (_intro.isOn && _intro.startedAt != null && !_recorder.isRecording && !_rtmpOut.isStreaming) _intro.stop();
   }
 
   Future<void> _toggleLocalCamera() async {
@@ -898,6 +999,9 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _localCam.removeListener(_localCamChanged);
     _sync.dispose();
     _color.dispose();
+    _recorder.removeListener(_introGuard);
+    _rtmpOut.removeListener(_introGuard);
+    _intro.dispose();
 
     _localCam.dispose();
     _mixer.dispose();
@@ -978,6 +1082,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             icon: const Icon(SdIcons.eye),
             tooltip: 'Color de cámaras',
             onPressed: _showColorDialog,
+          ),
+          IconButton(
+            icon: const Icon(Icons.movie_outlined),
+            tooltip: 'Video de entrada',
+            onPressed: _showIntroDialog,
           ),
           // Auto / manual switching
           ListenableBuilder(
@@ -1075,7 +1184,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
         ],
       ),
       body: SafeArea(top: false, child: ListenableBuilder(
-        listenable: Listenable.merge([_roomHost, _subscriber, _rtmpOut, _recorder, _encoder, _mixer, _localCam, _director, _sync]),
+        listenable: Listenable.merge([_roomHost, _subscriber, _rtmpOut, _recorder, _encoder, _mixer, _localCam, _director, _sync, _intro]),
         builder: (context, _) {
           final cameras = _roomHost.cameras;
           final activePeerId = _roomHost.activePeerId;
@@ -1114,6 +1223,13 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                           color: _color,
                         ),
                       ),
+                      // The intro clip while it is in the program.
+                      if (_intro.isOn)
+                        Positioned.fill(child: AnimatedOpacity(
+                          opacity: _intro.ending ? 0 : 1,
+                          duration: const Duration(milliseconds: 500),
+                          child: _IntroMonitor(intro: _intro),
+                        )),
                       // Status pills
                       Positioned(
                         top: 10, left: 10, right: 10,
@@ -1477,6 +1593,66 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
 }
 
 /// The clapperboard's screen: black, white while [flash] is on. The cameras film it (SourceSync.measure).
+/// The intro clip on the program monitor: its picture, what is left of it and «Saltar».
+class _IntroMonitor extends StatefulWidget {
+  final IntroClip intro;
+  const _IntroMonitor({required this.intro});
+  @override
+  State<_IntroMonitor> createState() => _IntroMonitorState();
+}
+
+class _IntroMonitorState extends State<_IntroMonitor> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(milliseconds: 500), (_) { if (mounted) setState(() {}); });
+  }
+
+  @override
+  void dispose() { _tick?.cancel(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    final i = widget.intro;
+    final tex = i.textureId ?? -1;
+    String left() {
+      final s = i.startedAt;
+      final rem = s == null ? i.duration : i.duration - DateTime.now().difference(s);
+      final secs = rem.isNegative ? 0 : (rem.inMilliseconds / 1000).ceil();
+      return '${secs ~/ 60}:${(secs % 60).toString().padLeft(2, '0')}';
+    }
+    return Container(
+      color: Colors.black,
+      child: Stack(children: [
+        if (tex >= 0)
+          Positioned.fill(child: FittedBox(
+            fit: i.fill ? BoxFit.cover : BoxFit.contain,
+            clipBehavior: Clip.hardEdge,
+            child: SizedBox(width: 160 * i.aspect, height: 160, child: Texture(textureId: tex)),
+          )),
+        Positioned(
+          left: 10, right: 10, bottom: 56,
+          child: Row(children: [
+            SdPill(i.startedAt == null ? 'VIDEO DE ENTRADA' : 'VIDEO DE ENTRADA · ${left()}',
+                color: Sd.cyan, icon: SdIcons.record),
+            const Spacer(),
+            if (i.startedAt != null && !i.ending)
+              FilledButton.icon(
+                style: FilledButton.styleFrom(backgroundColor: Sd.cyan, foregroundColor: Colors.black,
+                    visualDensity: VisualDensity.compact),
+                onPressed: i.skip,
+                icon: const Icon(Icons.skip_next, size: 18),
+                label: const Text('Saltar'),
+              ),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
 class _ClapperboardPage extends StatelessWidget {
   final ValueListenable<bool> flash;
   const _ClapperboardPage({required this.flash});
