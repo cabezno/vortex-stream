@@ -762,7 +762,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
               const SizedBox(height: 6),
               SegmentedButton<bool>(
                 segments: const [
-                  ButtonSegment(value: false, label: Text('Entero, con barras')),
+                  ButtonSegment(value: false, label: Text('Con barras')),
                   ButtonSegment(value: true, label: Text('Recortado')),
                 ],
                 selected: {_intro.fill},
@@ -1263,8 +1263,9 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                           ),
                         ]),
                       ),
-                      // Layout selector + second camera
-                      Positioned(
+                      // Layout selector + second camera (hidden while the intro clip covers the program: its own
+                      // controls go there)
+                      if (!_intro.isOn) Positioned(
                         bottom: 10, left: 10, right: 10,
                         // Wrap: the layout chips + CORTE / second-camera menu did not fit side by side upright.
                         child: Wrap(
@@ -1633,7 +1634,7 @@ class _IntroMonitorState extends State<_IntroMonitor> {
             child: SizedBox(width: 160 * i.aspect, height: 160, child: Texture(textureId: tex)),
           )),
         Positioned(
-          left: 10, right: 10, bottom: 56,
+          left: 10, right: 10, bottom: 10,
           child: Row(children: [
             SdPill(i.startedAt == null ? 'VIDEO DE ENTRADA' : 'VIDEO DE ENTRADA · ${left()}',
                 color: Sd.cyan, icon: SdIcons.record),
