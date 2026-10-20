@@ -83,6 +83,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
         }
     }
 
+    private var lastOrientationLog = ""
+
     private fun displayRotation(): Int = try {
         @Suppress("DEPRECATION")
         val d = (appContext.getSystemService(android.content.Context.WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay
@@ -99,7 +101,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
         val corr = if (p < 0) 0 else ((if (localFront) p - d else d - p) % 360 + 360) % 360
         val track = getVideoTrackForTextureId(tex)
         for ((t, sk) in sinks) sk.extraRotation = if (t == track) corr else 0
-        Log.i(TAG, "Local camera orientation: physical $p, screen $d, front $localFront -> +$corr")
+        val state = "physical $p, screen $d, front $localFront -> +$corr"
+        if (state != lastOrientationLog) { lastOrientationLog = state; Log.i(TAG, "Local camera orientation: $state") }
     }
 
     private fun applyGrades() {

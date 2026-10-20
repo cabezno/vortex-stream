@@ -36,6 +36,12 @@ class WebRtcPublisher {
   CameraFacing _facing = CameraFacing.back;
   bool _encoderKickChecked = false;
 
+  /// The switcher's ICE candidates that arrived before its answer: added once the answer is set. Added straight
+  /// away they failed (no remote description yet) and were lost - with a busy switcher its candidates can beat
+  /// the answer, and the connection never formed (2026-10-20).
+  final List<RTCIceCandidate> _earlyCandidates = [];
+  bool _answerSet = false;
+
   /// H.264 (the phone's HARDWARE encoder) is tried first: VP8 is software and a phone's CPU tops out around 720p30
   /// (Xiaomi measured 2026-10-04: qualityLimitationReason=cpu, 1080p capture sent as 720p). If the H.264 encoder does
   /// not start (framesEncoded=0 after connecting — the Galaxy A10 / Exynos case that made VP8 the default on
@@ -108,6 +114,8 @@ class WebRtcPublisher {
     _statsTimer?.cancel();
     _statsTimer = null;
     _encoderKickChecked = false;
+    _earlyCandidates.clear();
+    _answerSet = false;
     if (_peerConnection != null) {
       await _peerConnection!.close();
       _peerConnection = null;
@@ -276,6 +284,13 @@ class WebRtcPublisher {
     await _peerConnection!.setRemoteDescription(
       RTCSessionDescription(sdp, 'answer'),
     );
+    _answerSet = true;
+    final early = List.of(_earlyCandidates);
+    _earlyCandidates.clear();
+    for (final c in early) {
+      try { await _peerConnection?.addCandidate(c); } catch (e) { debugPrint('[WebRtcPublisher] candidate: $e'); }
+    }
+    if (early.isNotEmpty) debugPrint('[WebRtcPublisher] ${early.length} early candidates added');
     await _dumpSendState('post-answer');
   }
 
@@ -303,7 +318,8 @@ class WebRtcPublisher {
   /// Add remote ICE candidate
   Future<void> addCandidate(RTCIceCandidate candidate) async {
     if (_peerConnection == null) return;
-    await _peerConnection!.addCandidate(candidate);
+    if (!_answerSet) { _earlyCandidates.add(candidate); return; }
+    try { await _peerConnection!.addCandidate(candidate); } catch (e) { debugPrint('[WebRtcPublisher] candidate: $e'); }
   }
 
   /// Switcher's order: high or low quality, and for high the wanted height (see the class comment).
