@@ -243,6 +243,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _sync.addListener(_syncNativeCameraSources);
     _roomHost.addListener(_syncNativeCameraSources);
     _localCam.addListener(_localCamChanged);
+    _encoder.setMonitorAudio(false);   // speaker off: no echo loop with the cameras' microphones
     _director.addListener(_syncNativeCameraSources);
     _subscriber.addListener(_syncNativeCameraSources);
     _recorder.addListener(_introGuard);
@@ -308,6 +309,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     }
     // The switcher's own camera has no audio track: on air, its audio is this phone's mic.
     _encoder.setLocalCameraOnAir(_localCam.isActive && primaryPeerId == _localCam.peerId);
+    final local = (t: _localCam.isActive ? _localCam.renderer.textureId : null, f: _localCam.facingFront);
+    if (local != _lastLocal) { _lastLocal = local; _encoder.setLocalCamera(local.t, local.f); }
     if (args == _lastSources) return;   // the room/subscriber notify often: only send changes
     _lastSources = args;
     _encoder.setCameraSources(
@@ -316,6 +319,19 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     );
   }
   Object? _lastSources;
+  Object? _lastLocal;
+  /// This phone's speaker plays the on-air camera (off by default: with the speaker the cameras' microphones pick it
+  /// up again - echo between the phones).
+  bool _monitorAudio = false;
+  Future<void> _toggleMonitorAudio() async {
+    setState(() => _monitorAudio = !_monitorAudio);
+    await _encoder.setMonitorAudio(_monitorAudio);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_monitorAudio
+        ? 'Escuchás la cámara al aire en este celular. Usá auriculares: con el parlante los micrófonos de las cámaras '
+          'lo vuelven a captar y hace eco.'
+        : 'Este celular ya no reproduce el sonido de las cámaras (la grabación y la emisión lo siguen llevando).')));
+  }
   Map<String, int>? _lastMicTracks;
 
   /// The local camera re-opened (flip / another camera): same renderer, NEW track — resend even if ids look equal.
@@ -1072,6 +1088,12 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             icon: const Icon(SdIcons.slidersHorizontal),
             tooltip: 'Ajustes Audio Switcher',
             onPressed: _showAudioSettingsDialog,
+          ),
+          IconButton(
+            icon: Icon(_monitorAudio ? SdIcons.speakerHigh : SdIcons.speakerSlash,
+                color: _monitorAudio ? Sd.amber : null),
+            tooltip: _monitorAudio ? 'Dejar de escuchar el programa aquí' : 'Escuchar la cámara al aire en este celular',
+            onPressed: _toggleMonitorAudio,
           ),
           IconButton(
             icon: const Icon(SdIcons.timer),

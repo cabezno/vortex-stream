@@ -52,6 +52,56 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private val colorMeters = HashMap<String, Pair<VideoTrack, ColorMeter>>()   // peerId → (track, meter)
     private val gradeByTrack = HashMap<String, ColorGrade>()                     // track id → grade
 
+    // -- Switcher speaker ------------------------------------------------------------------------------------------
+    private fun setSpeakerMute(mute: Boolean): Boolean = try {
+        val plugin = engine.plugins.get(FlutterWebRTCPlugin::class.java) as? FlutterWebRTCPlugin
+        val hf = FlutterWebRTCPlugin::class.java.getDeclaredField("methodCallHandler").apply { isAccessible = true }
+        val handler = plugin?.let { hf.get(it) }
+        val af = handler?.javaClass?.getDeclaredField("audioDeviceModule")?.apply { isAccessible = true }
+        val adm = af?.get(handler) as? org.webrtc.audio.JavaAudioDeviceModule
+        adm?.setSpeakerMute(mute)
+        Log.i(TAG, "Switcher speaker ${if (mute) "muted" else "on"} (adm=${adm != null})")
+        adm != null
+    } catch (e: Exception) { Log.w(TAG, "speaker mute: ${e.message}"); false }
+
+    // -- The switcher's own camera follows the phone's physical orientation --------------------------------------
+    // WebRTC rotates a camera frame by the SCREEN's orientation: a switcher held upright to use it, with the phone's
+    // camera lying sideways on a stand, put that camera in the program upright (a vertical strip with bars,
+    // 2026-10-20). The accelerometer says how the phone is held; the difference is added to the frame's rotation.
+    private var localTextureId: Int? = null
+    private var localFront = false
+    @Volatile private var physicalRotation = -1                          // 0/90/180/270 like Display.getRotation, -1 unknown
+    private val orientation = object : android.view.OrientationEventListener(appContext) {
+        override fun onOrientationChanged(o: Int) {
+            if (o == ORIENTATION_UNKNOWN) return
+            val q = ((o + 45) / 90 % 4) * 90
+            val p = (360 - q) % 360
+            if (p != physicalRotation) {
+                physicalRotation = p
+                android.os.Handler(android.os.Looper.getMainLooper()).post { updateLocalOrientation() }
+            }
+        }
+    }
+
+    private fun displayRotation(): Int = try {
+        @Suppress("DEPRECATION")
+        val d = (appContext.getSystemService(android.content.Context.WINDOW_SERVICE) as android.view.WindowManager).defaultDisplay
+        d.rotation * 90
+    } catch (_: Exception) { 0 }
+
+    private fun updateLocalOrientation() {
+        val tex = localTextureId
+        if (tex == null || tex < 0) { for (sk in sinks.values) sk.extraRotation = 0; orientation.disable(); return }
+        if (orientation.canDetectOrientation()) orientation.enable()
+        val p = physicalRotation
+        val d = displayRotation()
+        // Camera2Session: frame rotation = sensor + (front ? d : 360 - d). We want it with p instead of d.
+        val corr = if (p < 0) 0 else ((if (localFront) p - d else d - p) % 360 + 360) % 360
+        val track = getVideoTrackForTextureId(tex)
+        for ((t, sk) in sinks) sk.extraRotation = if (t == track) corr else 0
+        Log.i(TAG, "Local camera orientation: physical $p, screen $d, front $localFront -> +$corr")
+    }
+
     private fun applyGrades() {
         for ((t, sk) in sinks) sk.grade = try { gradeByTrack[t.id()] } catch (_: Exception) { null }   // a disposed track throws
     }
@@ -85,6 +135,18 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                         clip?.release(); clip = null
                         result.error("CLIP", e.message ?: e.toString(), null)
                     }
+                }
+                // The switcher's speaker: off by default. It played the on-air camera, and every camera's microphone
+                // picked it up again - an echo loop between the phones (2026-10-20). Muting the playout (not the
+                // tracks) keeps the program audio: its sinks are fed when WebRTC pulls the audio either way.
+                "setMonitorAudio" -> { result.success(setSpeakerMute(!(call.argument<Boolean>("on") ?: false))) }
+                // The switcher's own camera (its renderer) and which way it faces: its picture in the program follows
+                // how the phone is physically held, not the screen's orientation.
+                "setLocalCamera" -> {
+                    localTextureId = call.argument<Int>("textureId")
+                    localFront = call.argument<Boolean>("front") ?: false
+                    updateLocalOrientation()
+                    result.success(true)
                 }
                 "clipPlay" -> { clip?.play(); result.success(clip != null) }
                 "clipSkip" -> { clip?.end(); result.success(true) }
@@ -378,6 +440,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
             val sk = WebRtcSourceSink()
             try { t.addSink(sk); sinks[t] = sk } catch (e: Exception) { Log.w(TAG, "addSink: ${e.message}") }
         }
+        updateLocalOrientation()
         p?.let { sinks[it]?.delayMs = primaryDelayMs }
         sec?.let { sinks[it]?.delayMs = secondaryDelayMs }
         pvw?.let { if (it != p && it != sec) sinks[it]?.delayMs = previewDelayMs }
@@ -401,6 +464,8 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     }
 
     fun dispose() {
+        orientation.disable()
+        setSpeakerMute(false)
         clip?.release(); clip = null
         syncProbe?.finish(); syncProbe = null
         for ((_, tm) in colorMeters) { try { tm.first.removeSink(tm.second) } catch (_: Exception) {} }

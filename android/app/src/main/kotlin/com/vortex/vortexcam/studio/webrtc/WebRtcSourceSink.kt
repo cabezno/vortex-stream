@@ -27,12 +27,26 @@ class WebRtcSourceSink : VideoSink {
     /** Colour correction of this source in the program (ColorMatch); null = as it comes. */
     @Volatile var grade: ColorGrade? = null
 
+    /** Added to every frame's rotation (the switcher's own camera follows the phone's physical orientation). */
+    @Volatile var extraRotation: Int = 0
+
     // Keep a COPY, never the decoder's own frame. A decoded WebRTC frame is usually a texture of the decoder's
     // SurfaceTextureHelper, which has only ONE frame in flight: holding it until the next onFrame() starves the
     // decoder — it froze after ~1 frame (framesReceived kept growing, framesDecoded stuck; diagnosed 2026-09-29 and
     // again 2026-10-04 on a Galaxy A10). toI420() copies it (GPU readback, on the decoder thread where its EGL
     // context is current) and the original is released by the caller right after onFrame returns.
     override fun onFrame(frame: VideoFrame) {
+        val extra = extraRotation
+        if (extra != 0) {
+            frame.buffer.retain()
+            val f = VideoFrame(frame.buffer, (frame.rotation + extra) % 360, frame.timestampNs)
+            try { onFrameRotated(f) } finally { f.release() }
+            return
+        }
+        onFrameRotated(frame)
+    }
+
+    private fun onFrameRotated(frame: VideoFrame) {
         val copy: HeldFrame = gpuCopy(frame) ?: try {
             val cropped = coverBox?.let { cropFor(frame.buffer, frame.rotation, it) }
             val i420 = try { (cropped ?: frame.buffer).toI420() } finally { cropped?.release() }
