@@ -53,9 +53,24 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import com.vortex.vortexcam.studio.rtmp.RtmpStreamer
+import io.github.thibaultbee.srtdroid.core.Srt
+import io.github.thibaultbee.srtdroid.core.enums.SockOpt
+import io.github.thibaultbee.srtdroid.core.enums.SockStatus
+import io.github.thibaultbee.srtdroid.core.enums.Transtype
+import io.github.thibaultbee.srtdroid.core.models.SrtSocket as LibSrtSocket
 
 private const val TAG     = "VortexCam"
 private const val CHANNEL = "com.vortex.vortexcam/native"
+
+/** SRT payload: 7 MPEG-TS packets of 188 bytes, the size every SRT receiver expects. */
+private const val SRT_PAYLOAD = 1316
+
+/** libsrt (srtdroid), started once. Not ready (library missing on this ABI, startup failed) = TCP only. */
+private object SrtLib {
+    val ready: Boolean by lazy {
+        try { Srt.startUp(); true } catch (t: Throwable) { Log.w("VortexCam", "libsrt unavailable, TCP only: $t"); false }
+    }
+}
 
 class VortexCamPlugin(
     private val context:         Context,
@@ -286,6 +301,7 @@ class VortexCamPlugin(
                                   // false while SRT/RTMP is reconnecting by itself (the UI can say so)
                                   "linkUp" to (srtSocket?.linkUp ?: (rtmpClient?.isConnected ?: true)),
                                   "reconnects" to ((srtSocket?.reconnects ?: 0) + (rtmpClient?.reconnects ?: 0)),
+                                  "transport" to (srtSocket?.mode ?: ""),
                                   "targetMbps" to ((abr?.currentBps ?: encBitrate) / 1e6)))
 
             "startSbl"         -> startSbl(call, result)
@@ -827,6 +843,7 @@ class VortexCamPlugin(
         val keyframeMs  = call.argument<Int>("keyframeMs")    ?: 2000
         val latencyMs   = call.argument<Int>("srtLatencyMs")  ?: 80
         val codec       = call.argument<String>("codec")      ?: "h264"
+        val sourceName  = call.argument<String>("sourceName") ?: ""
 
         thread(name = "SrtStart") {
             try {
@@ -836,10 +853,10 @@ class VortexCamPlugin(
                 }
                 setupAudio()
 
-                srtSocket = SrtSocket(ip, port, latencyMs).also { sk ->
+                srtSocket = SrtSocket(ip, port, latencyMs, sourceName).also { sk ->
                     sk.onReconnected = { downMs ->
                         requestIdr()   // the receiver must not wait for the next GOP
-                        Thread { sendLogBytes("[srt] reconectado a $ip:$port tras ${downMs} ms\n", "reconnect") }.start()
+                        Thread { sendLogBytes("[srt] reconectado a $ip:$port por ${sk.mode} tras ${downMs} ms\n", "reconnect") }.start()
                     }
                 }
                 if (!srtSocket!!.connect()) throw Exception("SRT connect to $ip:$port failed")
@@ -859,7 +876,9 @@ class VortexCamPlugin(
                 }
 
                 result.success(null)
-                Log.i(TAG, "SRT streaming → $ip:$port ${width}x$height @${bitrate/1000}kbps $codec")
+                val how = srtSocket?.mode ?: "?"
+                Log.i(TAG, "SRT streaming → $ip:$port ${width}x$height @${bitrate/1000}kbps $codec por $how")
+                Thread { sendLogBytes("[srt] transporte: $how → $ip:$port (latencia $latencyMs ms)\n", "transport") }.start()
             } catch (e: Exception) {
                 Log.e(TAG, "startSrt failed: $e")
                 stopStream()
@@ -1618,22 +1637,27 @@ class VortexCamPlugin(
     }
 
     // ====================================================================
-    // SrtSocket — plain TCP MPEG-TS transport.
-    // VortexEngine listens on TCP + UDP (SRT) on the same port.
-    // When libsrt.so is available it will be preferred (true SRT with FEC/CC).
-    // Until then, TCP delivers reliable MPEG-TS on LAN with ~1ms extra latency.
+    // SrtSocket — MPEG-TS to SAMBA over real SRT (libsrt through srtdroid: UDP, live mode), TCP as the fallback.
     // ====================================================================
-    // SRT over TCP that HEALS ITSELF. A dead link used to go unnoticed: send() swallowed every error and a write
-    // into a dead Wi-Fi could block for a minute (SAMBA cut the phone after 5 s; the phone noticed > 60 s later,
-    // 2026-10-03). Now:
-    //   - a failed write (receiver closed / reset) or a write blocked > 3 s marks the link DOWN at once;
-    //   - while down, packets are dropped (the camera and the encoder keep running) and a watchdog reconnects
-    //     every second; on success onReconnected asks the encoder for an IDR (PAT/PMT ride along with it).
-    private inner class SrtSocket(val ip: String, val port: Int, val latencyMs: Int) {
+    // Until 2026-10-20 this was plain TCP («SRT» in name only). On a lossy Wi-Fi TCP stalls every later byte until a
+    // lost one is resent (head-of-line): a Galaxy A10 on 2.4 GHz sending 15 Mbps averaged 30 fps in SAMBA but paused
+    // 260-390 ms every few seconds. SRT resends only what was lost, inside a fixed latency window, and drops what is
+    // too late instead of stalling the stream.
+    //   - SRT caller, live mode, latency = srtLatencyMs, 1316-byte messages (7 TS packets), 25 % overhead for resends.
+    //   - When the SRT handshake does not complete (~2 s: an older SAMBA, a busy listener) it falls back to TCP on the
+    //     same port, as before. The mode in use is in [mode] («SRT» / «SRT (TCP)»), on screen and in the logs.
+    // It HEALS ITSELF (2026-10-03): a failed write or one blocked > 3 s marks the link DOWN at once; while down,
+    // packets are dropped (camera and encoder keep running) and a watchdog reconnects every second, trying the mode
+    // that last worked first; on success onReconnected asks the encoder for an IDR.
+    private inner class SrtSocket(val ip: String, val port: Int, val latencyMs: Int, val streamId: String) {
+        @Volatile private var srt: LibSrtSocket? = null
         @Volatile private var tcpSocket: Socket? = null
         @Volatile private var out: OutputStream? = null
         @Volatile var linkUp = false; private set
         @Volatile var reconnects = 0; private set
+        /** «SRT» (UDP) or «SRT (TCP)» (fallback); empty before the first connection. */
+        @Volatile var mode = ""; private set
+        @Volatile private var rttMs = 0
         @Volatile private var writeStartMs = 0L        // > 0 while a write is in progress
         @Volatile private var maxWriteMs = 0L          // longest write since the last bitrate sample
         @Volatile private var closed = false
@@ -1641,17 +1665,45 @@ class VortexCamPlugin(
         private var watchdog: Thread? = null
         var onReconnected: ((downMs: Long) -> Unit)? = null
 
-        private fun open(): Boolean = try {
+        private fun openSrt(): Boolean {
+            if (!SrtLib.ready) return false
+            val s = try { LibSrtSocket() } catch (t: Throwable) { Log.w(TAG, "SRT socket: $t"); return false }
+            fun opt(o: SockOpt, v: Any) = try { s.setSockFlag(o, v) } catch (e: Exception) { Log.w(TAG, "SRT $o=$v: $e") }
+            return try {
+                s.setSockFlag(SockOpt.TRANSTYPE, Transtype.LIVE)
+                s.setSockFlag(SockOpt.LATENCY, latencyMs)
+                opt(SockOpt.PAYLOADSIZE, SRT_PAYLOAD)
+                opt(SockOpt.MAXBW, 0L)                 // 0 = input rate + OHEADBW (room for the resends)
+                opt(SockOpt.OHEADBW, 25)
+                opt(SockOpt.CONNTIMEO, 2000)
+                opt(SockOpt.PEERIDLETIMEO, 3000)       // SAMBA silent 3 s = link down (the default is 5 s)
+                if (streamId.isNotEmpty()) opt(SockOpt.STREAMID, streamId)
+                s.connect(ip, port)
+                srt = s; mode = "SRT"; linkUp = true
+                Log.i(TAG, "SRT (UDP, libsrt) connected → $ip:$port, latency $latencyMs ms")
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "SRT connect to $ip:$port failed: $e")
+                try { s.close() } catch (_: Exception) {}
+                false
+            }
+        }
+
+        private fun openTcp(): Boolean = try {
             val sk = Socket()
             sk.tcpNoDelay = true; sk.keepAlive = true; sk.soTimeout = 0
             sk.connect(java.net.InetSocketAddress(ip, port), 2000)
-            tcpSocket = sk; out = sk.getOutputStream(); linkUp = true
-            Log.i(TAG, "SRT/TCP connected → $ip:$port")
+            tcpSocket = sk; out = sk.getOutputStream(); mode = "SRT (TCP)"; linkUp = true
+            Log.i(TAG, "SRT/TCP (fallback) connected → $ip:$port")
             true
         } catch (e: Exception) {
             Log.w(TAG, "SRT/TCP connect to $ip:$port failed: $e")
             false
         }
+
+        /** The mode that worked last goes first; SRT first on the first connection. */
+        private fun open(): Boolean =
+            if (mode == "SRT (TCP)") openTcp() || openSrt() else openSrt() || openTcp()
 
         fun connect(): Boolean {
             val ok = open()
@@ -1659,12 +1711,24 @@ class VortexCamPlugin(
             return ok
         }
 
+        /** [data] is whole 188-byte TS packets. SRT carries them as messages of up to 7 (1316 bytes). */
         fun send(data: ByteArray) {
-            val o = out ?: return
             if (!linkUp) return
             val t0 = System.currentTimeMillis()
             writeStartMs = t0
-            try { o.write(data) } catch (e: Exception) { markDown("write failed: $e") }
+            try {
+                val s = srt
+                if (s != null) {
+                    var off = 0
+                    while (off < data.size) {
+                        val n = minOf(SRT_PAYLOAD, data.size - off)
+                        s.send(data, off, n)
+                        off += n
+                    }
+                } else {
+                    (out ?: return).write(data)
+                }
+            } catch (e: Exception) { markDown("write failed: $e") }
             finally {
                 writeStartMs = 0L
                 val dt = System.currentTimeMillis() - t0
@@ -1676,9 +1740,31 @@ class VortexCamPlugin(
             if (!linkUp || closed) return
             linkUp = false
             downSinceMs = System.currentTimeMillis()
-            Log.w(TAG, "SRT/TCP link DOWN ($why) — reconnecting every 1 s")
-            try { tcpSocket?.close() } catch (_: Exception) {}   // unblocks a writer stuck in write()
-            tcpSocket = null; out = null
+            Log.w(TAG, "$mode link DOWN ($why) — reconnecting every 1 s")
+            dropTransport()   // unblocks a writer stuck in a write
+        }
+
+        private fun dropTransport() {
+            try { srt?.close() } catch (_: Exception) {}
+            try { tcpSocket?.close() } catch (_: Exception) {}
+            srt = null; tcpSocket = null; out = null
+        }
+
+        private var lastStatsMs = 0L
+        private fun srtSample(s: LibSrtSocket, now: Long) {
+            if (now - lastStatsMs < 1000) return
+            lastStatsMs = now
+            val st = try { s.bstats(true) } catch (e: Exception) { return }
+            rttMs = st.msRTT.toInt()
+            val sent = st.pktSent
+            val lossPct = if (sent > 0) st.pktSndLoss * 100.0 / sent else 0.0
+            // Lost and resent packets are SRT's normal work; the rate is too high when the losses grow (> 5 %), when
+            // packets arrive too late and are dropped, or when the send buffer holds more than the latency window.
+            val lossy = lossPct > 5.0 || st.pktSndDrop > 0 || st.msSndBuf > latencyMs
+            abr?.report(lossy, "SRT pérdida ${"%.1f".format(lossPct)} %, descartados ${st.pktSndDrop}, " +
+                "buffer ${st.msSndBuf} ms, RTT ${st.msRTT.toInt()} ms")
+            if (lossy) Log.i(TAG, "SRT stats: sent $sent, lost ${st.pktSndLoss}, retrans ${st.pktRetrans}, " +
+                "dropped ${st.pktSndDrop}, sndBuf ${st.msSndBuf} ms, RTT ${st.msRTT} ms, bw ${"%.1f".format(st.mbpsBandwidth)} Mbps")
         }
 
         private fun startWatchdog() {
@@ -1689,17 +1775,26 @@ class VortexCamPlugin(
                     val now = System.currentTimeMillis()
                     if (linkUp) {
                         val ws = writeStartMs
-                        if (ws > 0 && now - ws > 3000) markDown("write blocked ${now - ws} ms")
-                        // A write that waits > 150 ms = the TCP send buffer is full: the Wi-Fi does not carry this rate.
-                        val mw = maxOf(maxWriteMs, if (ws > 0) now - ws else 0L)
-                        maxWriteMs = 0L
-                        abr?.report(mw > 150, "escritura TCP trabada $mw ms")
+                        if (ws > 0 && now - ws > 3000) { markDown("write blocked ${now - ws} ms"); continue }
+                        val s = srt
+                        if (s != null) {
+                            val st = try { s.sockState } catch (_: Exception) { null }
+                            if (st == SockStatus.BROKEN || st == SockStatus.CLOSED || st == SockStatus.NONEXIST) {
+                                markDown("SRT $st"); continue
+                            }
+                            srtSample(s, now)
+                        } else {
+                            // A write that waits > 150 ms = the TCP send buffer is full: the Wi-Fi does not carry this rate.
+                            val mw = maxOf(maxWriteMs, if (ws > 0) now - ws else 0L)
+                            maxWriteMs = 0L
+                            abr?.report(mw > 150, "escritura TCP trabada $mw ms")
+                        }
                     } else if (!closed && now - lastTry >= 1000) {
                         lastTry = now
                         if (open()) {
                             reconnects++
                             val down = now - downSinceMs
-                            Log.i(TAG, "SRT/TCP reconnected after $down ms (#$reconnects)")
+                            Log.i(TAG, "$mode reconnected after $down ms (#$reconnects)")
                             onReconnected?.invoke(down)
                         }
                     }
@@ -1707,12 +1802,11 @@ class VortexCamPlugin(
             }
         }
 
-        fun getRttMs(): Int = 0  // TCP doesn't expose RTT; use 0
+        fun getRttMs(): Int = rttMs  // SRT measures it; TCP does not (0)
 
         fun close() {
             closed = true
-            try { tcpSocket?.close() } catch (_: Exception) {}
-            tcpSocket = null; out = null; linkUp = false
+            dropTransport(); linkUp = false
             watchdog?.interrupt(); watchdog = null
         }
     }

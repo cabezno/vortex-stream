@@ -160,6 +160,12 @@ jobs:
                       "    }\n"
                   )
                   t = t.replace("android {", "android {" + cmake_block, 1)
+              # Real SRT for Cámara → SAMBA (VortexCamPlugin.SrtSocket): libsrt 1.5 + Kotlin bindings, Apache-2.0
+              # (libsrt MPL-2.0), with .so for arm64-v8a AND armeabi-v7a (the Galaxy A10 is 32-bit only).
+              if "srtdroid" not in t:
+                  t += ("\ndependencies {\n"
+                        "    implementation(\"io.github.thibaultbee.srtdroid:srtdroid-core:1.9.1\")\n"
+                        "}\n")
               open(g, "w", encoding="utf-8").write(t)
               print("patched", g)
 

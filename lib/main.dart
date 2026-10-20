@@ -11,6 +11,7 @@
 // Preview: RTCVideoView (WHIP) o Texture nativa (SRT/RTMP/SBL).
 // Tally:   pantalla pulsa roja cuando la fuente está al aire (ON AIR).
 // =============================================================================
+import 'services/third_party_licenses.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -41,6 +42,7 @@ void main() {
   // the PC — so a crash that closes the app still leaves its trail for analysis.
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    registerNativeLicenses();
     await LogService.instance.init();
     // Before anything touches WebRTC: the camera's sound mode picks the phone's audio engine (once per run).
     await CameraAudio.initEngine();
@@ -567,7 +569,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   }
 
   // -----------------------------------------------------------------------
-  // SRT — CameraX + MediaCodec H.265 → MPEG-TS → libsrt
+  // SRT — Camera2 + MediaCodec → MPEG-TS → SRT (libsrt, UDP; TCP when the SRT handshake fails)
   // -----------------------------------------------------------------------
   Future<void> _connectSrt(ConnectionConfig cfg) async {
     final srtCfg = cfg.srt;
@@ -588,10 +590,10 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       _nativeTexId = srt.textureId;
 
       _log('SRT: conectando a ${srtCfg.host}:${srtCfg.port}...');
-      await srt.connectTo(srtCfg.host, port: srtCfg.port);
+      await srt.connectTo(srtCfg.host, port: srtCfg.port, name: _deviceCtrl.text.trim());
       setState(() { _live = true; });
       _setKeepAlive(true);
-      _log('SRT conectado → ${srtCfg.host}:${srtCfg.port}');
+      _log('SRT conectado → ${srtCfg.host}:${srtCfg.port}${srt.link.isEmpty ? '' : ' por ${srt.link}'}');
 
       // Poll stats
       Timer.periodic(const Duration(seconds: 2), (t) {
@@ -1000,7 +1002,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       Text('PROTOCOLOS', style: SdText.overline),
       const SizedBox(height: 8),
       _LegendRow(color: colorFor(Transport.sbl),  label: 'SBL',  desc: 'LAN · H.264 · protocolo propio de SAMBA'),
-      _LegendRow(color: colorFor(Transport.srt),  label: 'SRT',  desc: 'LAN · H.265 · baja latencia'),
+      _LegendRow(color: colorFor(Transport.srt),  label: 'SRT',  desc: 'LAN · UDP, reenvía lo perdido · baja latencia'),
       _LegendRow(color: colorFor(Transport.whip), label: 'WHIP', desc: 'LAN e internet · H.264 · WebRTC, se adapta a la red'),
       _LegendRow(color: colorFor(Transport.rtmp), label: 'RTMP', desc: 'LAN e internet · H.264 · compatible'),
       _LegendRow(color: colorFor(Transport.omt),  label: 'OMT',  desc: 'LAN · VMX 4:2:2 · máxima calidad'),
@@ -1041,6 +1043,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     int    latency = 0;
     bool   onAir   = _onAir;
     bool   reconnecting = false;
+    String proto = _transportLabel;
 
     switch (_transport) {
       case Transport.whip:
@@ -1051,6 +1054,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
         final srt = context.watch<SrtConnectionService>();
         bitrate = srt.bitrateMbps;
         reconnecting = srt.reconnecting;
+        if (srt.link.isNotEmpty) proto = srt.link;   // «SRT» or «SRT (TCP)»
         latency = srt.latencyMs;
         onAir   = srt.isOnAir;
       case Transport.rtmp:
@@ -1139,7 +1143,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
           Positioned(
             top: 44,
             right: 16,
-            child: _statsBar(bitrate, latency, _transportLabel, _transportColor, reconnecting: reconnecting),
+            child: _statsBar(bitrate, latency, proto, _transportColor, reconnecting: reconnecting),
           ),
 
           // Log button

@@ -125,6 +125,14 @@ class _Chooser extends StatelessWidget {
             Text(subtitle, style: SdText.body),
             const SizedBox(height: 28),
             for (final o in options) _card(o),
+            if (!canPop)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(
+                  onPressed: () => showLicensePage(context: context, applicationName: 'Samba Air'),
+                  child: Text('Licencias', style: SdText.body.copyWith(fontSize: 12)),
+                ),
+              ),
           ],
         ),
       ),
