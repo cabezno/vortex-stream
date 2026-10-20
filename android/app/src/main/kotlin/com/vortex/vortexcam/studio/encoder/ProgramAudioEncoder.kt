@@ -1,12 +1,8 @@
 package com.vortex.vortexcam.studio.encoder
 
-import android.annotation.SuppressLint
-import android.media.AudioFormat
-import android.media.AudioRecord
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
-import android.media.MediaRecorder
 import android.util.Log
 import org.webrtc.AudioTrack
 import org.webrtc.AudioTrackSink
@@ -53,7 +49,7 @@ class ProgramAudioEncoder(
      * back (alignment with slower cameras, 2026-10-06): reading starts once that much more is queued, and the trim
      * keeps it — the level settles around PREBUFFER + delay.
      */
-    private class Ring {
+    class Ring {
         private val buf = FloatArray(SAMPLE_RATE * CHANNELS)              // 1 s
         private var w = 0; private var r = 0; private var level = 0       // level in frames
         private var primed = false
@@ -138,8 +134,6 @@ class ProgramAudioEncoder(
     private var camTrack: AudioTrack? = null
     private val camSink = AudioTrackSink { data, bits, rate, ch, frames, _ -> onCameraAudio(data, bits, rate, ch, frames) }
 
-    private var record: AudioRecord? = null
-    private var micThread: Thread? = null
     private var codec: MediaCodec? = null
     private var clockThread: Thread? = null
     private val running = AtomicBoolean(false)
@@ -221,46 +215,19 @@ class ProgramAudioEncoder(
 
     // ── Microphone ───────────────────────────────────────────────────────────────────────────────────────────────
 
-    @SuppressLint("MissingPermission")
+    // The mic is SwitcherMic, shared with the level meter of the switcher's own camera (one AudioRecord for both).
+    private val micSink: (Float, Float) -> Unit = { l, r -> micRing.write(l, r) }
+
     private fun startMic() {
-        // CAMCORDER = the source tuned for video (stereo where the phone has two mics); MIC = universal fallback.
-        var rec: AudioRecord? = null; var chans = 1
-        for ((src, ch) in listOf(MediaRecorder.AudioSource.CAMCORDER to 2, MediaRecorder.AudioSource.MIC to 1)) {
-            val mask = if (ch == 2) AudioFormat.CHANNEL_IN_STEREO else AudioFormat.CHANNEL_IN_MONO
-            val min = AudioRecord.getMinBufferSize(SAMPLE_RATE, mask, AudioFormat.ENCODING_PCM_16BIT)
-            if (min <= 0) continue
-            val r = try { AudioRecord(src, SAMPLE_RATE, mask, AudioFormat.ENCODING_PCM_16BIT, maxOf(min * 4, 48_000)) }
-                    catch (e: Exception) { Log.w(TAG, "AudioRecord src=$src: ${e.message}"); null }
-            if (r != null && r.state == AudioRecord.STATE_INITIALIZED) { rec = r; chans = ch; break }
-            r?.release()
-        }
-        if (rec == null) { Log.w(TAG, "No microphone (permission denied / busy)"); return }
-        try { rec.startRecording() } catch (e: Exception) { Log.w(TAG, "startRecording: ${e.message}"); rec.release(); return }
-        record = rec
+        if (!SwitcherMic.acquire(this)) { SwitcherMic.release(this); return }
+        SwitcherMic.sink = micSink
         micRunning.set(true)
-        val ch = chans
-        micThread = Thread({
-            val pcm = ShortArray(480 * ch)
-            while (micRunning.get()) {
-                val n = rec.read(pcm, 0, pcm.size)
-                if (n <= 0) continue
-                var i = 0
-                while (i + ch <= n) {
-                    val l = pcm[i] / 32768f
-                    micRing.write(l, if (ch > 1) pcm[i + 1] / 32768f else l)
-                    i += ch
-                }
-            }
-        }, "ProgramAudioMic").apply { start() }
-        Log.i(TAG, "Mic on (${if (ch == 2) "stereo" else "mono"})")
     }
 
     private fun stopMic() {
-        micRunning.set(false)
-        try { record?.stop() } catch (_: Exception) {}
-        try { micThread?.join(300) } catch (_: InterruptedException) {}
-        try { record?.release() } catch (_: Exception) {}
-        record = null; micThread = null
+        if (!micRunning.getAndSet(false)) return
+        if (SwitcherMic.sink === micSink) SwitcherMic.sink = null
+        SwitcherMic.release(this)
     }
 
     // ── Clock + encoder ──────────────────────────────────────────────────────────────────────────────────────────
@@ -277,9 +244,15 @@ class ProgramAudioEncoder(
             val wait = due - System.nanoTime()
             if (wait > 0) try { Thread.sleep(wait / 1_000_000, (wait % 1_000_000).toInt()) } catch (_: InterruptedException) { break }
             java.util.Arrays.fill(mix, 0f)
-            if (useCamera) camRing.mixInto(mix, FRAME, 1f)
-            if (useMic && micRunning.get()) micRing.mixInto(mix, FRAME, 1f)
-            for (m in micTracks) m.ring.mixInto(mix, FRAME, 1f)
+            // A clip in the program (intro video) replaces the sources, crossfading back at its end. The others are
+            // still read (at gain 0) so their rings stay current.
+            val clip = com.vortex.vortexcam.studio.clip.ClipPlayer.current
+            val cg = clip?.alpha() ?: 0f
+            val g = 1f - cg
+            if (useCamera) camRing.mixInto(mix, FRAME, g)
+            if (useMic && micRunning.get()) micRing.mixInto(mix, FRAME, g)
+            for (m in micTracks) m.ring.mixInto(mix, FRAME, g)
+            if (clip != null && cg > 0f) clip.audio.mixInto(mix, FRAME, cg)
             for (i in mix.indices) {
                 val v = (mix[i].coerceIn(-1f, 1f) * 32767f).toInt()
                 pcm[i * 2] = v.toByte(); pcm[i * 2 + 1] = (v shr 8).toByte()

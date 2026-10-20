@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <cstring>
 #include <cstdlib>
+#include <mutex>
 #include <android/log.h>
 
 #define LOG_TAG "VortexCam/VMX"
@@ -38,19 +39,25 @@ static FnSaveTo    sSaveTo      = nullptr;
 static FnSetQ      sSetQ        = nullptr;
 static FnSetThrd   sSetThrd     = nullptr;
 
+// Thread-safe: two threads loading at once (the capabilities probe ran twice in parallel) let one see sVmxLib set
+// while the functions were still null, and it jumped to address 0 (2026-10-20). sVmxLib is set last, under a lock.
+static std::mutex sLoadMx;
+
 static bool loadVmx() {
+    std::lock_guard<std::mutex> lock(sLoadMx);
     if (sVmxLib) return true;
-    sVmxLib = dlopen("libvmx.so", RTLD_LAZY);
-    if (!sVmxLib) { LOGE("dlopen libvmx.so failed: %s", dlerror()); return false; }
-    sCreate  = (FnCreate)  dlsym(sVmxLib, "VMX_Create");
-    sDestroy = (FnDestroy) dlsym(sVmxLib, "VMX_Destroy");
-    sEncNV12 = (FnEncNV12) dlsym(sVmxLib, "VMX_EncodeNV12");
-    sSaveTo  = (FnSaveTo)  dlsym(sVmxLib, "VMX_SaveTo");
-    sSetQ    = (FnSetQ)    dlsym(sVmxLib, "VMX_SetQuality");
-    sSetThrd = (FnSetThrd) dlsym(sVmxLib, "VMX_SetThreads");
+    void* lib = dlopen("libvmx.so", RTLD_LAZY);
+    if (!lib) { LOGE("dlopen libvmx.so failed: %s", dlerror()); return false; }
+    sCreate  = (FnCreate)  dlsym(lib, "VMX_Create");
+    sDestroy = (FnDestroy) dlsym(lib, "VMX_Destroy");
+    sEncNV12 = (FnEncNV12) dlsym(lib, "VMX_EncodeNV12");
+    sSaveTo  = (FnSaveTo)  dlsym(lib, "VMX_SaveTo");
+    sSetQ    = (FnSetQ)    dlsym(lib, "VMX_SetQuality");
+    sSetThrd = (FnSetThrd) dlsym(lib, "VMX_SetThreads");
     if (!sCreate || !sDestroy || !sEncNV12 || !sSaveTo) {
-        LOGE("libvmx.so missing required symbols"); dlclose(sVmxLib); sVmxLib = nullptr; return false;
+        LOGE("libvmx.so missing required symbols"); dlclose(lib); return false;
     }
+    sVmxLib = lib;
     LOGI("libvmx.so loaded OK");
     return true;
 }

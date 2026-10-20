@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import '../encode/program_encoder.dart';
+import 'recordings.dart';
 
 enum RecordingState { idle, recording, paused, error }
 
@@ -17,7 +18,10 @@ class ProgramRecorder extends ChangeNotifier {
   int _bytesWritten = 0;
   String _errorMessage = '';
 
-  ProgramRecorder({required this.encoder});
+  /// True while the program is also live (RTMP): the encoder is shared, so stopping the recording must not stop it.
+  final bool Function()? isLive;
+
+  ProgramRecorder({required this.encoder, this.isLive});
 
   RecordingState get state => _state;
   bool get isRecording => _state == RecordingState.recording;
@@ -126,18 +130,37 @@ class ProgramRecorder extends ChangeNotifier {
       } catch (_) {}
     }
 
-    await encoder.stop();
+    final kbps = encoder.bitrateKbps;
+    await encoder.stop();   // the MP4 is closed when this returns (HardwareProgramEncoder.stop)
+    // Recording and the live stream share one encoder: stopping it left RTMP connected but fed nothing, so ending a
+    // recording silently killed the broadcast (2026-10-15). Restart it without a file (RTMP re-attaches natively).
+    if (!_disposed && (isLive?.call() ?? false)) {
+      try { await encoder.start(bitrateKbps: kbps); } catch (e) { debugPrint('[ProgramRecorder] re-arranque: $e'); }
+    }
 
     _state = RecordingState.idle;
     _recordingStartTime = null;
-
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     debugPrint('[ProgramRecorder] Stopped recording: $finishedPath ($fileSizeMb MB on disk)');
-    return finishedPath;
+
+    // Into the gallery (Movies/Samba Air): the private folder is out of reach and dies with an uninstall. If the move
+    // fails the file stays private and rescueOrphans() retries next time.
+    if (finishedPath == null) return null;
+    final uri = await Recordings.publish(finishedPath);
+    _lastUri = uri;
+    if (!_disposed) notifyListeners();   // dispose() stops without waiting: the move can end after it
+    return uri ?? finishedPath;
   }
+
+  String? _lastUri;
+  /// Gallery uri of the last finished recording (null until it is moved there).
+  String? get lastUri => _lastUri;
+
+  bool _disposed = false;
 
   @override
   void dispose() {
+    _disposed = true;
     stopRecording();
     super.dispose();
   }

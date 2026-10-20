@@ -38,7 +38,19 @@ class DeviceCapabilities extends ChangeNotifier {
   /// Cached result if Android and the app did not change since; otherwise probes (a few seconds, once).
   /// Needs the camera permission for the WebRTC check (without it, WHIP is assumed possible and verified live).
   Future<void> ensure({bool cameraGranted = true}) async {
-    if (_probing) return;
+    // One at a time: the guard on _probing came after two awaits, so the start screen and the switcher (opened right
+    // after launch) both probed at once — two threads loading the OMT library together, and one called its encoder
+    // before it was resolved: a native crash on the first launch of every new version (2026-10-20). A later caller
+    // waits for the running one and then finds the cache.
+    while (_running != null) { await _running; }
+    final f = _ensure(cameraGranted);
+    _running = f;
+    try { await f; } finally { if (identical(_running, f)) _running = null; }
+  }
+
+  Future<void>? _running;
+
+  Future<void> _ensure(bool cameraGranted) async {
     String stamp = '';
     try { stamp = await _channel.invokeMethod<String>('capsStamp') ?? ''; } catch (_) {}
     try {

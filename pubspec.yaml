@@ -48,6 +48,12 @@ dev_dependencies:
   flutter_lints: ^3.0.0
   flutter_launcher_icons: ^0.14.1
 
+dependency_overrides:
+  # 2.5.0 (2026-10-19) talks to Android through JNI and ships no R8 keep rules: in the release APK its methods are
+  # stripped and every read failed with NoSuchMethodError (SharedPreferencesApiRegistrar.getAll) — saved settings
+  # were lost. The CI has no pubspec.lock, so it picked it up on its own. Lift this once the plugin is fixed.
+  shared_preferences_android: 2.4.28
+
 flutter_launcher_icons:
   android: true
   ios: false

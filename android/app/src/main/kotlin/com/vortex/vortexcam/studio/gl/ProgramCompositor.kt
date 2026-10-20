@@ -2,7 +2,11 @@ package com.vortex.vortexcam.studio.gl
 
 import android.opengl.GLES20
 import android.util.Log
+import com.vortex.vortexcam.studio.clip.ClipPlayer
+import com.vortex.vortexcam.studio.webrtc.GpuFramePool
+import com.vortex.vortexcam.studio.webrtc.HeldFrame
 import com.vortex.vortexcam.studio.webrtc.WebRtcSourceSink
+import org.webrtc.RendererCommon
 import org.webrtc.GlRectDrawer
 import org.webrtc.VideoFrame
 import org.webrtc.VideoFrameDrawer
@@ -23,8 +27,21 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
         private const val TAG = "ProgramCompositor"
     }
 
-    private val frameDrawer = VideoFrameDrawer()
+    // One drawer per slot: a VideoFrameDrawer keeps the textures of the LAST frame it uploaded, so with a single one
+    // the two cameras of a split evicted each other and both full pictures were uploaded again on every frame.
+    private val primaryDrawer = VideoFrameDrawer()
+    private val secondaryDrawer = VideoFrameDrawer()
     private val rectDrawer = GlRectDrawer()
+    // Colour correction (ColorMatch): one per slot, so each keeps the shader of its own texture type compiled.
+    private val primaryGrade = GradeDrawer.create()
+    private val secondaryGrade = GradeDrawer.create()
+
+    /** The drawer for a source: plain, or the slot's grade drawer set to [grade]. */
+    private fun glDrawer(slot: GradeDrawer?, grade: com.vortex.vortexcam.studio.webrtc.ColorGrade?): RendererCommon.GlDrawer {
+        if (slot == null || grade == null || grade.isIdentity) return rectDrawer
+        slot.set(grade.r, grade.g, grade.b, grade.sat)
+        return slot
+    }
 
     /**
      * Draws the composed layout using the latest VideoFrames from active sinks.
@@ -34,42 +51,52 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
         primarySink: WebRtcSourceSink?,
         secondarySink: WebRtcSourceSink?
     ) {
+        GpuFramePool.drainOrphans()                            // GPU copies of sinks that are gone
         // Clear background to studio dark grey
         GLES20.glClearColor(0.05f, 0.05f, 0.07f, 1.0f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
 
-        val primaryFrame = primarySink?.getFrame()
-        val secondaryFrame = secondarySink?.getFrame()
+        // What each source fills by cropping, so its sink copies only that (see WebRtcSourceSink.coverBox).
+        val halfBox = android.util.Size(width / 2 - 2, height)
+        val pipBox = android.util.Size((width * 0.32).toInt(), (height * 0.32).toInt())
+        primarySink?.coverBox = if (layoutMode == LayoutMode.SPLIT_SCREEN) halfBox else null
+        secondarySink?.coverBox = when (layoutMode) {
+            LayoutMode.SPLIT_SCREEN -> halfBox
+            LayoutMode.PIP -> pipBox
+            LayoutMode.SINGLE -> null
+        }
+
+        // A clip (intro video) covers the cameras; black until its first frame, then fading out at its end.
+        val clip = ClipPlayer.current
+        val clipAlpha = clip?.alpha() ?: 0f
+        if (clipAlpha >= 1f) {
+            GLES20.glClearColor(0f, 0f, 0f, 1f)
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+        }
+
+        val primaryFrame = if (clipAlpha < 1f) primarySink?.getFrame() else null
+        val secondaryFrame = if (clipAlpha < 1f) secondarySink?.getFrame() else null
+        val pg = glDrawer(primaryGrade, primarySink?.grade)
+        val sg = glDrawer(secondaryGrade, secondarySink?.grade)
 
         try {
-            when (layoutMode) {
+            if (clipAlpha < 1f) when (layoutMode) {
                 LayoutMode.SINGLE -> {
-                    if (primaryFrame != null) {
-                        frameDrawer.drawFrame(primaryFrame, rectDrawer, null, 0, 0, width, height)
-                    }
+                    if (primaryFrame != null) draw(primaryDrawer, pg, primaryFrame, 0, 0, width, height, cover = false)
                 }
                 LayoutMode.SPLIT_SCREEN -> {
+                    // Each half is ~8:9: a 16:9 camera is cropped to its centre (as a TV split does), not squeezed.
                     val halfW = width / 2
-                    if (primaryFrame != null) {
-                        frameDrawer.drawFrame(primaryFrame, rectDrawer, null, 0, 0, halfW - 2, height)
-                    }
-                    if (secondaryFrame != null) {
-                        frameDrawer.drawFrame(secondaryFrame, rectDrawer, null, halfW + 2, 0, halfW - 2, height)
-                    }
+                    if (primaryFrame != null) draw(primaryDrawer, pg, primaryFrame, 0, 0, halfW - 2, height, cover = true)
+                    if (secondaryFrame != null) draw(secondaryDrawer, sg, secondaryFrame, halfW + 2, 0, halfW - 2, height, cover = true)
                 }
                 LayoutMode.PIP -> {
-                    // 1. Fullscreen main camera
-                    if (primaryFrame != null) {
-                        frameDrawer.drawFrame(primaryFrame, rectDrawer, null, 0, 0, width, height)
-                    }
-
-                    // 2. Inset secondary camera (bottom-right 32% size)
+                    if (primaryFrame != null) draw(primaryDrawer, pg, primaryFrame, 0, 0, width, height, cover = false)
+                    // Inset secondary camera (bottom-right 32% size)
                     if (secondaryFrame != null) {
                         val pipW = (width * 0.32).toInt()
                         val pipH = (height * 0.32).toInt()
-                        val pipX = width - pipW - 24
-                        val pipY = 24
-                        frameDrawer.drawFrame(secondaryFrame, rectDrawer, null, pipX, pipY, pipW, pipH)
+                        draw(secondaryDrawer, sg, secondaryFrame, width - pipW - 24, 24, pipW, pipH, cover = true)
                     }
                 }
             }
@@ -79,12 +106,104 @@ class ProgramCompositor(private val width: Int, private val height: Int) {
             primaryFrame?.release()
             secondaryFrame?.release()
         }
+        if (clip != null && clipAlpha > 0f) drawClip(clip, clipAlpha)
+    }
+
+    private val clipDrawer = VideoFrameDrawer()
+
+    /** The clip over the whole program, blended at [alpha] (constant alpha: its pixels are opaque). */
+    private fun drawClip(clip: ClipPlayer, alpha: Float) {
+        val f = clip.sink.getFrame() ?: return
+        try {
+            if (alpha < 1f) {
+                GLES20.glEnable(GLES20.GL_BLEND)
+                GLES20.glBlendColor(0f, 0f, 0f, alpha)
+                GLES20.glBlendFunc(GLES20.GL_CONSTANT_ALPHA, GLES20.GL_ONE_MINUS_CONSTANT_ALPHA)
+            }
+            draw(clipDrawer, rectDrawer, f, 0, 0, width, height, cover = clip.fill)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error drawing clip: ${e.message}")
+        } finally {
+            GLES20.glDisable(GLES20.GL_BLEND)
+            f.release()
+        }
+    }
+
+    private val cropMatrix = android.graphics.Matrix()
+
+    /**
+     * Draws [frame] into the box keeping its proportions. Every frame used to be stretched to the box: a 16:9 camera
+     * in a split half came out squeezed to half its width (2026-10-15).
+     * cover = fill the box and crop the overflow from the centre (split halves, PiP inset);
+     * otherwise fill it when the aspect is close (a 16:9 camera in a 16:9 program) and fit with bars when it is not
+     * (a phone held upright: cropping a 9:16 picture to 16:9 would cut most of the person).
+     */
+    private fun draw(frameDrawer: VideoFrameDrawer, gl: RendererCommon.GlDrawer, held: HeldFrame,
+                     x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+        when (held) {
+            is HeldFrame.Cpu -> drawCpu(frameDrawer, gl, held.frame, x, y, w, h, cover)
+            is HeldFrame.Gpu -> drawGpu(gl, held, x, y, w, h, cover)
+        }
+    }
+
+    private val identity = floatArrayOf(1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f)
+
+    /** An upright RGBA copy (WebRtcSourceSink.gpuCopy): same fill/cover/fit rules as [drawCpu]. */
+    private fun drawGpu(rectDrawer: RendererCommon.GlDrawer, g: HeldFrame.Gpu, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+        val fw = g.width.toFloat(); val fh = g.height.toFloat()
+        if (fw <= 0f || fh <= 0f || w <= 0 || h <= 0) return
+        val frameAspect = fw / fh; val boxAspect = w.toFloat() / h
+        val close = kotlin.math.abs(frameAspect - boxAspect) / boxAspect < 0.05f
+        when {
+            close -> rectDrawer.drawRgb(g.fb.textureId, identity, g.width, g.height, x, y, w, h)
+            cover -> {
+                val sx = if (frameAspect > boxAspect) boxAspect / frameAspect else 1f
+                val sy = if (frameAspect > boxAspect) 1f else frameAspect / boxAspect
+                cropMatrix.reset()
+                cropMatrix.preTranslate(0.5f, 0.5f)
+                cropMatrix.preScale(sx, sy)
+                cropMatrix.preTranslate(-0.5f, -0.5f)
+                rectDrawer.drawRgb(g.fb.textureId, RendererCommon.convertMatrixFromAndroidGraphicsMatrix(cropMatrix),
+                    g.width, g.height, x, y, w, h)
+            }
+            else -> {
+                val dw: Int; val dh: Int
+                if (frameAspect > boxAspect) { dw = w; dh = (w / frameAspect).toInt() } else { dh = h; dw = (h * frameAspect).toInt() }
+                rectDrawer.drawRgb(g.fb.textureId, identity, g.width, g.height, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh)
+            }
+        }
+    }
+
+    private fun drawCpu(frameDrawer: VideoFrameDrawer, rectDrawer: RendererCommon.GlDrawer, frame: VideoFrame, x: Int, y: Int, w: Int, h: Int, cover: Boolean) {
+        val fw = frame.rotatedWidth.toFloat(); val fh = frame.rotatedHeight.toFloat()
+        if (fw <= 0f || fh <= 0f || w <= 0 || h <= 0) return
+        val frameAspect = fw / fh; val boxAspect = w.toFloat() / h
+        val close = kotlin.math.abs(frameAspect - boxAspect) / boxAspect < 0.05f
+        if (close) { frameDrawer.drawFrame(frame, rectDrawer, null, x, y, w, h); return }
+        if (cover) {
+            // Same crop EglRenderer uses: scale the texture coordinates about the centre.
+            val sx = if (frameAspect > boxAspect) boxAspect / frameAspect else 1f
+            val sy = if (frameAspect > boxAspect) 1f else frameAspect / boxAspect
+            cropMatrix.reset()
+            cropMatrix.preTranslate(0.5f, 0.5f)
+            cropMatrix.preScale(sx, sy)
+            cropMatrix.preTranslate(-0.5f, -0.5f)
+            frameDrawer.drawFrame(frame, rectDrawer, cropMatrix, x, y, w, h)
+        } else {
+            val dw: Int; val dh: Int
+            if (frameAspect > boxAspect) { dw = w; dh = (w / frameAspect).toInt() } else { dh = h; dw = (h * frameAspect).toInt() }
+            frameDrawer.drawFrame(frame, rectDrawer, null, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh)
+        }
     }
 
     fun release() {
         try {
-            frameDrawer.release()
+            primaryDrawer.release()
+            secondaryDrawer.release()
+            clipDrawer.release()
             rectDrawer.release()
+            primaryGrade?.release()
+            secondaryGrade?.release()
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing drawers: ${e.message}")
         }

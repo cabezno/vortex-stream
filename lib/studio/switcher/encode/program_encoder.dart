@@ -50,9 +50,14 @@ class ProgramEncoder extends ChangeNotifier {
   /// the next start; the native side still steps down if the video hardware refuses (it is shared with the decoders).
   int programHeight = 1080;
   bool get is4k => programHeight >= 2160;
-  int get defaultKbps => is4k ? 20000 : 6000;
+  /// «Alta» quality (Calidad dialog): twice the bitrate, for recordings that will be edited or a fast uplink.
+  bool highBitrate = false;
+  int get defaultKbps => (is4k ? 20000 : 6000) * (highBitrate ? 2 : 1);
   /// Ceiling for the adaptive bitrate.
-  int get maxKbps => is4k ? 25000 : 8000;
+  int get maxKbps => defaultKbps * 5 ~/ 4;
+  /// Size the program will have at the next start (what the quality pill shows while not encoding).
+  int get plannedWidth => is4k ? 3840 : 1920;
+  int get plannedHeight => is4k ? 2160 : 1080;
 
   bool get isEncoding => _isEncoding;
   int get width => _width;
@@ -91,7 +96,7 @@ class ProgramEncoder extends ChangeNotifier {
       if (!kIsWeb) {
         // The mic permission is asked only if the mic goes into the program (the switcher never needed it before).
         bool mic = false;
-        if (audioMic) {
+        if (audioMic || _micForLocalCam) {
           try { mic = (await Permission.microphone.request()).isGranted; } catch (_) {}
         }
         await _channel.invokeMethod('startEncoder', {
@@ -154,14 +159,56 @@ class ProgramEncoder extends ChangeNotifier {
     try { if (!kIsWeb) await _channel.invokeMethod('setMicTracks', {'tracks': tracks}); } catch (_) {}
   }
 
-  /// Plays beeps on this phone's loudspeaker and times them in each camera's audio: peerId → end-to-end latency in
-  /// ms (null = that camera did not hear them). [audioTrackIds]: peerId → its received audio track id.
-  Future<Map<String, int?>> measureLatency(Map<String, String> audioTrackIds) async {
+  /// Colour matching (ColorMatch): measure the average colour of these cameras (peerId → renderer texture id).
+  Future<void> setColorMeters(Map<String, int> cams) async {
+    try { if (!kIsWeb) await _channel.invokeMethod('setColorMeters', {'cams': cams}); } catch (_) {}
+  }
+
+  /// peerId → (Y, U, V) mean, 0–255.
+  Future<Map<String, List<double>>> getColorStats() async {
     try {
-      final r = await _channel.invokeMapMethod<String, dynamic>('measureLatency', {'tracks': audioTrackIds});
-      return {for (final e in (r ?? const {}).entries) e.key: (e.value as num?)?.toInt()};
+      final r = await _channel.invokeMapMethod<String, dynamic>('getColorStats');
+      return {
+        for (final e in (r ?? const {}).entries)
+          e.key: [for (final v in (e.value as List)) (v as num).toDouble()],
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// peerId → [r, g, b, saturation]: the colour correction of each camera in the program.
+  Future<void> setColorGrades(Map<String, List<double>> grades) async {
+    try { if (!kIsWeb) await _channel.invokeMethod('setColorGrades', {'grades': grades}); } catch (_) {}
+  }
+
+  /// Sync clapperboard (SourceSync.measure): attaches the detectors. [audio]: peerId → received audio track id;
+  /// [video]: peerId → renderer texture id; [localPeer]: the switcher's own camera (timed by its capture clock).
+  Future<bool> syncProbeStart(Map<String, String> audio, Map<String, int> video, String localPeer) async {
+    try {
+      return ((await _channel.invokeMethod<int>('syncProbeStart',
+          {'audio': audio, 'video': video, 'localPeer': localPeer})) ?? 0) > 0;
     } catch (e) {
-      debugPrint('[ProgramEncoder] measureLatency: $e');
+      debugPrint('[ProgramEncoder] syncProbeStart: $e');
+      return false;
+    }
+  }
+
+  /// A flash is on screen now: notes the time and beeps.
+  Future<void> syncProbeMark() async {
+    try { await _channel.invokeMethod('syncProbeMark'); } catch (_) {}
+  }
+
+  /// peerId → (video ms, audio ms), each null when not detected.
+  Future<Map<String, ({int? video, int? audio})>> syncProbeFinish() async {
+    try {
+      final r = await _channel.invokeMapMethod<String, dynamic>('syncProbeFinish');
+      return {
+        for (final e in (r ?? const {}).entries)
+          e.key: (video: ((e.value as Map?)?['video'] as num?)?.toInt(), audio: ((e.value as Map?)?['audio'] as num?)?.toInt()),
+      };
+    } catch (e) {
+      debugPrint('[ProgramEncoder] syncProbeFinish: $e');
       return {};
     }
   }
@@ -174,12 +221,32 @@ class ProgramEncoder extends ChangeNotifier {
       try { micOk = (await Permission.microphone.request()).isGranted; } catch (_) {}
     }
     audioMic = micOk;
+    await _sendAudioSources();
+    notifyListeners();
+  }
+
+  /// The switcher's own camera opens without audio (no feedback from the operator's side), so with it on air and
+  /// «audio of the camera on air» the program was silent (2026-10-15). Its audio is this phone's mic: switch the mic
+  /// in while it is on air, without touching the user's own «Micrófono del switcher» choice.
+  bool _micForLocalCam = false;
+  Future<void> setLocalCameraOnAir(bool onAir) async {
+    final want = onAir && audioCamera;
+    if (want == _micForLocalCam) return;
+    if (want) {
+      bool ok = false;
+      try { ok = (await Permission.microphone.request()).isGranted; } catch (_) {}
+      if (!ok) return;
+    }
+    _micForLocalCam = want;
+    await _sendAudioSources();
+  }
+
+  Future<void> _sendAudioSources() async {
     try {
       if (!kIsWeb && _isEncoding) {
-        await _channel.invokeMethod('setAudioSources', {'camera': camera, 'mic': micOk});
+        await _channel.invokeMethod('setAudioSources', {'camera': audioCamera, 'mic': audioMic || _micForLocalCam});
       }
     } catch (_) {}
-    notifyListeners();
   }
 
   /// Fetch real metrics from the hardware MediaCodec pipeline

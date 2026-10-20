@@ -5,8 +5,11 @@ import android.util.Log
 import android.util.LongSparseArray
 import com.cloudwebrtc.webrtc.FlutterWebRTCPlugin
 import com.vortex.vortexcam.studio.encoder.HardwareProgramEncoder
+import com.vortex.vortexcam.studio.encoder.SwitcherMic
 import com.vortex.vortexcam.studio.gl.LayoutMode
 import com.vortex.vortexcam.studio.rtmp.RtmpStreamer
+import com.vortex.vortexcam.studio.webrtc.ColorGrade
+import com.vortex.vortexcam.studio.webrtc.ColorMeter
 import com.vortex.vortexcam.studio.webrtc.WebRtcSourceSink
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -40,10 +43,52 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     private var micDelayMs = 0
     private var micTracks: List<Pair<org.webrtc.AudioTrack, Int>> = emptyList()
     private var secondaryTrack: VideoTrack? = null
+    private val micMeterOwner = Any()
+    private var syncProbe: SyncProbe? = null
+    private var channel: MethodChannel? = null
+    // Intro video (ClipPlayer, 2026-10-20).
+    private var clip: com.vortex.vortexcam.studio.clip.ClipPlayer? = null
+    // Colour matching (ColorMatch, 2026-10-19): a meter on every camera, a grade per camera applied to its sink.
+    private val colorMeters = HashMap<String, Pair<VideoTrack, ColorMeter>>()   // peerId → (track, meter)
+    private val gradeByTrack = HashMap<String, ColorGrade>()                     // track id → grade
+
+    private fun applyGrades() {
+        for ((t, sk) in sinks) sk.grade = try { gradeByTrack[t.id()] } catch (_: Exception) { null }   // a disposed track throws
+    }
 
     private fun register() {
-        MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        RecordingsStore.registerWith(engine, appContext)   // its own channel: recordings in the gallery
+        CaptureTuner.registerWith(engine)                  // its own channel: best image processing of the cameras
+        val ch = MethodChannel(engine.dartExecutor.binaryMessenger, CHANNEL)
+        channel = ch
+        ch.setMethodCallHandler { call, result ->
             when (call.method) {
+                // Intro video: prepare (black + silence in the program) → play → it ends or is skipped (fade to the
+                // cameras); «clipEnded» goes back to Dart when the fade starts.
+                "clipPrepare" -> {
+                    clip?.release(); clip = null
+                    val path = call.argument<String>("path")
+                    if (path == null) { result.error("CLIP", "sin archivo", null); return@setMethodCallHandler }
+                    try {
+                        lateinit var c: com.vortex.vortexcam.studio.clip.ClipPlayer
+                        c = com.vortex.vortexcam.studio.clip.ClipPlayer(path, call.argument<Boolean>("fill") ?: false,
+                            engine.renderer) {
+                            if (clip === c) clip = null
+                            channel?.invokeMethod("clipEnded", null)
+                        }
+                        clip = c
+                        c.prepare()
+                        result.success(mapOf("textureId" to c.textureId, "width" to c.width, "height" to c.height,
+                            "durationMs" to c.durationMs))
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Clip: ${e.message}", e)
+                        clip?.release(); clip = null
+                        result.error("CLIP", e.message ?: e.toString(), null)
+                    }
+                }
+                "clipPlay" -> { clip?.play(); result.success(clip != null) }
+                "clipSkip" -> { clip?.end(); result.success(true) }
+                "clipStop" -> { clip?.release(); clip = null; result.success(true) }
                 "startEncoder" -> {
                     val width = call.argument<Int>("width") ?: 1920
                     val height = call.argument<Int>("height") ?: 1080
@@ -92,12 +137,57 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                     setPrimaryAudio(call.argument<String>("primaryAudioTrackId"), pd)
                     result.success(true)
                 }
-                // Beeps on the loudspeaker, heard back through every camera: each one's end-to-end latency (SyncProbe).
-                "measureLatency" -> {
-                    val ids = call.argument<Map<String, String>>("tracks") ?: emptyMap()
-                    val tracks = ids.mapNotNull { (peer, id) -> audioTrackById(id)?.let { peer to it } }.toMap()
-                    if (tracks.isEmpty()) { result.success(emptyMap<String, Int?>()); return@setMethodCallHandler }
-                    SyncProbe { r -> result.success(r) }.run(tracks)
+                // Sync clapperboard (SyncProbe): this screen flashes and beeps, every camera is timed. Dart drives it:
+                // start → one mark per flash → finish (the results).
+                "syncProbeStart" -> {
+                    syncProbe?.finish()
+                    val a = (call.argument<Map<String, String>>("audio") ?: emptyMap())
+                        .mapNotNull { (peer, id) -> audioTrackById(id)?.let { peer to it } }.toMap()
+                    val v = (call.argument<Map<String, Int>>("video") ?: emptyMap())
+                        .mapNotNull { (peer, tex) -> getVideoTrackForTextureId(tex)?.let { peer to it } }.toMap()
+                    syncProbe = SyncProbe().also { it.start(a, v, call.argument<String>("localPeer")) }
+                    result.success(a.size + v.size)
+                }
+                // {cams: {peerId: textureId}}: the cameras whose colour is measured (meters on the others removed).
+                "setColorMeters" -> {
+                    val cams = call.argument<Map<String, Int>>("cams") ?: emptyMap()
+                    for (peer in colorMeters.keys.toList()) {
+                        val tex = cams[peer]
+                        val track = tex?.let { getVideoTrackForTextureId(it) }
+                        val same = try { track != null && track.id() == colorMeters[peer]!!.first.id() } catch (_: Exception) { false }
+                        if (!same) {
+                            val (t, m) = colorMeters.remove(peer)!!
+                            try { t.removeSink(m) } catch (_: Exception) {}
+                        }
+                    }
+                    for ((peer, tex) in cams) if (peer !in colorMeters) {
+                        val t = getVideoTrackForTextureId(tex) ?: continue
+                        val m = ColorMeter()
+                        try { t.addSink(m); colorMeters[peer] = t to m } catch (e: Exception) { Log.w(TAG, "meter: ${e.message}") }
+                    }
+                    result.success(colorMeters.size)
+                }
+                // peerId → [Y, U, V] mean (0–255) of the cameras measured so far.
+                "getColorStats" -> result.success(colorMeters.mapNotNull { (peer, tm) ->
+                    val m = tm.second
+                    if (m.y < 0) null else peer to listOf(m.y.toDouble(), m.u.toDouble(), m.v.toDouble())
+                }.toMap())
+                // {grades: {peerId: [r, g, b, sat]}}: colour correction of each camera in the program.
+                "setColorGrades" -> {
+                    val g = call.argument<Map<String, List<Double>>>("grades") ?: emptyMap()
+                    gradeByTrack.clear()
+                    for ((peer, v) in g) {
+                        val t = colorMeters[peer]?.first ?: continue
+                        if (v.size >= 4) gradeByTrack[try { t.id() } catch (_: Exception) { continue }] = ColorGrade(v[0].toFloat(), v[1].toFloat(), v[2].toFloat(), v[3].toFloat())
+                    }
+                    applyGrades()
+                    result.success(true)
+                }
+                "syncProbeMark" -> { syncProbe?.mark(); result.success(true) }
+                "syncProbeFinish" -> {
+                    val r = syncProbe?.finish() ?: emptyMap()
+                    syncProbe = null
+                    result.success(r)
                 }
                 // «Solo micrófono» phones: {trackId: delayMs}, always mixed into the program.
                 "setMicTracks" -> {
@@ -111,6 +201,12 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
                                                     call.argument<Boolean>("camera") ?: true)
                     result.success(true)
                 }
+                // Level meter of the switcher's own camera: keeps the mic open while that camera is on.
+                "setMicMeter" -> {
+                    val on = call.argument<Boolean>("on") ?: false
+                    result.success(if (on) SwitcherMic.acquire(micMeterOwner) else { SwitcherMic.release(micMeterOwner); false })
+                }
+                "getMicLevel" -> result.success(SwitcherMic.levelDbfs.toDouble())
                 "setLayoutMode" -> {
                     val modeStr = call.argument<String>("mode") ?: "single"
                     val layoutMode = when (modeStr.lowercase()) {
@@ -274,6 +370,7 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
         secondarySink = sec?.let { sinks[it] }
         programEncoder?.primarySink = primarySink
         programEncoder?.secondarySink = secondarySink
+        applyGrades()
     }
 
     private fun stopHardwareEncoder() {
@@ -287,6 +384,10 @@ class StudioSwitcherPlugin private constructor(private val engine: FlutterEngine
     }
 
     fun dispose() {
+        clip?.release(); clip = null
+        syncProbe?.finish(); syncProbe = null
+        for ((_, tm) in colorMeters) { try { tm.first.removeSink(tm.second) } catch (_: Exception) {} }
+        colorMeters.clear(); gradeByTrack.clear()
         for ((t, sk) in sinks) { try { t.removeSink(sk) } catch (_: Exception) {}; sk.release() }
         sinks.clear()
         primarySink = null

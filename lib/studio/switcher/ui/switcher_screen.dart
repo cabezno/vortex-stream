@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show mapEquals;
+import 'package:flutter/foundation.dart' show ValueListenable, mapEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:samba_protocol/samba_protocol.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../../theme/sd_icons.dart';
@@ -16,10 +18,14 @@ import '../encode/program_encoder.dart';
 import '../local/local_camera.dart';
 import '../mixer/program_mixer.dart';
 import '../output/recorder.dart';
+import '../output/recordings.dart';
+import 'recordings_sheet.dart';
 import '../output/rtmp_out.dart';
 import '../room/room_host.dart';
 import '../switch/director.dart';
 import '../sync/source_sync.dart';
+import '../color/color_match.dart';
+import '../clip/intro_clip.dart';
 import '../transport/subscriber.dart';
 import 'program_layout_view.dart';
 
@@ -40,6 +46,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   late final ProgramMixer _mixer;
   late final LocalCameraSource _localCam;
   late final SourceSync _sync;
+  final IntroClip _intro = IntroClip();
+  late final ColorMatch _color;
   String _localIp = '127.0.0.1';
 
   // The switcher's own Wi-Fi network for its cameras (plan §1): one hop instead of two through a router, no foreign
@@ -85,6 +93,123 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     }
   }
 
+  // ── Program quality (Calidad dialog, 2026-10-19) ─────────────────────────────────────────────────────────
+  // Recording only used to be 1080p at 6 Mbps: 4K could be chosen only in «Emitir» and only for going live.
+  static const _kQ4k = 'switcher_quality_4k', _kQHigh = 'switcher_quality_high';
+
+  Future<void> _loadQuality() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final want4k = p.getBool(_kQ4k) ?? false;
+      await DeviceCapabilities.instance.ensure(cameraGranted: false);
+      final h = want4k && DeviceCapabilities.instance.maxProgramHeight >= 2160 ? 2160 : 1080;
+      if (!mounted || _encoder.isEncoding) return;
+      setState(() {
+        _encoder.programHeight = h;
+        _roomHost.programHeight = h;
+        _encoder.highBitrate = p.getBool(_kQHigh) ?? false;
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _saveQuality() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setBool(_kQ4k, _encoder.is4k);
+      await p.setBool(_kQHigh, _encoder.highBitrate);
+    } catch (_) {}
+  }
+
+  void _showQualityDialog() {
+    final can4k = DeviceCapabilities.instance.maxProgramHeight >= 2160;
+    bool want4k = (_pendingQuality4k ?? _encoder.is4k) && can4k;
+    bool high = _encoder.highBitrate;
+    String mbps(bool k4, bool hi) => '${(k4 ? 20 : 6) * (hi ? 2 : 1)} Mbps';
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModal) => AlertDialog(
+          scrollable: true,
+          title: const Text('Calidad del programa'),
+          content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Vale para grabar y para emitir.', style: SdText.caption),
+            const SizedBox(height: 12),
+            Text('RESOLUCIÓN', style: SdText.overline),
+            const SizedBox(height: 6),
+            SegmentedButton<bool>(
+              segments: [
+                const ButtonSegment(value: false, label: Text('1080p')),
+                ButtonSegment(value: true, label: const Text('4K'), enabled: can4k),
+              ],
+              selected: {want4k},
+              onSelectionChanged: (v) => setModal(() => want4k = v.first),
+              showSelectedIcon: false,
+            ),
+            if (!can4k) ...[
+              const SizedBox(height: 4),
+              Text('Este celular codifica hasta ${DeviceCapabilities.instance.maxH264 ?? '1920x1080'}: 4K no disponible.',
+                  style: SdText.caption),
+            ],
+            const SizedBox(height: 12),
+            Text('CALIDAD', style: SdText.overline),
+            const SizedBox(height: 6),
+            SegmentedButton<bool>(
+              segments: [
+                ButtonSegment(value: false, label: Text('Normal · ${mbps(want4k, false)}')),
+                ButtonSegment(value: true, label: Text('Alta · ${mbps(want4k, true)}')),
+              ],
+              selected: {high},
+              onSelectionChanged: (v) => setModal(() => high = v.first),
+              showSelectedIcon: false,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              [
+                if (want4k) '4K: la cámara al aire manda 4K si su celular puede (las demás, 1080p).',
+                if (high) 'Alta: archivos el doble de pesados (~${((want4k ? 40 : 12) * 60 / 8).round()} MB por minuto); '
+                    'para emitir hace falta esa subida.',
+                if (_encoder.isEncoding && want4k != _encoder.is4k)
+                  'La resolución nueva se aplica la próxima vez que empieces a grabar o emitir.',
+              ].join(' '),
+              style: SdText.caption),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancelar', style: TextStyle(color: Sd.t2))),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  // The size is fixed while encoding (applied when it stops); the bitrate changes live.
+                  if (!_encoder.isEncoding) {
+                    _encoder.programHeight = want4k ? 2160 : 1080;
+                    _roomHost.programHeight = _encoder.programHeight;
+                  }
+                  _pendingQuality4k = _encoder.isEncoding && want4k != _encoder.is4k ? want4k : null;
+                  _encoder.highBitrate = high;
+                });
+                if (_encoder.isEncoding) _encoder.updateBitrate(_encoder.defaultKbps);
+                _saveQuality();
+              },
+              child: const Text('Listo'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Resolution chosen while encoding: applied once it stops (the next start uses it).
+  bool? _pendingQuality4k;
+  void _applyPendingQuality() {
+    final q = _pendingQuality4k;
+    if (q == null || _encoder.isEncoding) return;
+    _pendingQuality4k = null;
+    _encoder.programHeight = q ? 2160 : 1080;
+    _roomHost.programHeight = _encoder.programHeight;
+    _saveQuality();
+  }
+
   /// A camera touching this phone (NFC) gets the same as the QR: room address and own network.
   void _advertiseNfc() => NfcPairing.advertise(_pairingJson);
 
@@ -104,23 +229,41 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _director = Director(roomHost: _roomHost, subscriber: _subscriber);
     _encoder = ProgramEncoder();
     _rtmpOut = RtmpOut(encoder: _encoder);
-    _recorder = ProgramRecorder(encoder: _encoder);
+    _recorder = ProgramRecorder(encoder: _encoder, isLive: () => _rtmpOut.isStreaming);
     _mixer = ProgramMixer(roomHost: _roomHost, encoder: _encoder);
     _localCam = LocalCameraSource(roomHost: _roomHost);
-    _sync = SourceSync(roomHost: _roomHost, subscriber: _subscriber, encoder: _encoder, localPeerId: _localCam.peerId);
+    _sync = SourceSync(roomHost: _roomHost, subscriber: _subscriber, encoder: _encoder, localPeerId: _localCam.peerId,
+        textureOf: (id) => id == _localCam.peerId
+            ? (_localCam.isActive ? _localCam.renderer.textureId : null)
+            : _subscriber.getRenderer(id)?.textureId);
 
+    _color = ColorMatch(encoder: _encoder, roomHost: _roomHost, textureOf: _sync.textureOf);
+    _encoder.addListener(_applyPendingQuality);
     _mixer.addListener(_syncNativeCameraSources);
     _sync.addListener(_syncNativeCameraSources);
     _roomHost.addListener(_syncNativeCameraSources);
     _localCam.addListener(_localCamChanged);
     _director.addListener(_syncNativeCameraSources);
     _subscriber.addListener(_syncNativeCameraSources);
+    _recorder.addListener(_introGuard);
+    _rtmpOut.addListener(_introGuard);
 
     _detectLocalIp();
+    _loadQuality();
     // What this phone can encode (4K program): measured once per Android build / app version.
     DeviceCapabilities.instance.ensure(cameraGranted: false).then((_) { if (mounted) setState(() {}); });
     _roomHost.start().then((_) {
       setState(() {});
+    });
+    // Recordings made before they went to the gallery are still in the private folder: move them out once.
+    Recordings.rescueOrphans().then((n) {
+      if (n > 0 && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(n == 1 ? 'Pasé 1 grabación anterior a la Galería (Movies/Samba Air).'
+                               : 'Pasé $n grabaciones anteriores a la Galería (Movies/Samba Air).'),
+          action: SnackBarAction(label: 'Ver', onPressed: () => RecordingsSheet.show(context)),
+        ));
+      }
     });
   }
 
@@ -163,6 +306,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
       _lastMicTracks = micTracks;
       _encoder.setMicTracks(micTracks);
     }
+    // The switcher's own camera has no audio track: on air, its audio is this phone's mic.
+    _encoder.setLocalCameraOnAir(_localCam.isActive && primaryPeerId == _localCam.peerId);
     if (args == _lastSources) return;   // the room/subscriber notify often: only send changes
     _lastSources = args;
     _encoder.setCameraSources(
@@ -278,7 +423,19 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     );
   }
 
-  /// Alignment of the cameras in the program (SourceSync): latencies, the beep measurement, fine-tune.
+  /// The clapperboard: a full-screen page that flashes while SourceSync measures, closed when it is done.
+  Future<void> _runClapperboard() async {
+    final nav = Navigator.of(context);
+    final route = PageRouteBuilder<void>(
+      opaque: true,
+      pageBuilder: (_, __, ___) => _ClapperboardPage(flash: _sync.flash),
+    );
+    nav.push(route);
+    await _sync.measure();
+    if (route.isActive) nav.removeRoute(route);
+  }
+
+  /// Alignment of the cameras in the program (SourceSync): latencies, the clapperboard, fine-tune.
   void _showSyncDialog() {
     showDialog(
       context: context,
@@ -312,7 +469,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                     Builder(builder: (_) {
                       final lat = _sync.latencyOf(c.id);
                       final local = c.id == _localCam.peerId;
-                      final txt = local ? 'este celular'
+                      final txt = local ? 'este celular${lat?.measured == true ? ' · medido ${lat!.ms} ms' : ''}'
                           : lat == null ? 'midiendo…'
                           : '${lat.measured ? 'medido' : 'estimado'} ${lat.ms} ms';
                       return Text(txt, style: SdText.caption.copyWith(
@@ -334,12 +491,13 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 icon: _sync.measuring
                     ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 1.6))
                     : const Icon(SdIcons.speakerHigh, size: 18),
-                label: Text(_sync.measuring ? 'Escuchando…' : 'Medir con pitidos'),
-                onPressed: _sync.measuring ? null : _sync.measure,
+                label: Text(_sync.measuring ? 'Midiendo…' : 'Sincronizar con claqueta'),
+                onPressed: _sync.measuring ? null : _runClapperboard,
               )),
               const SizedBox(height: 6),
-              const Text('Este celular suena 3 pitidos; cada cámara los escucha y se mide cuánto tardan en volver '
-                  '(incluye auriculares Bluetooth). Con las cámaras a pocos metros y en silencio.', style: SdText.caption),
+              const Text('La pantalla de este celular destella y suena un pitido 5 veces. Poné el celular donde las '
+                  'cámaras vean la pantalla, a pocos metros y en silencio: cada una se mide por la imagen (el destello) '
+                  'y por el audio (el pitido).', style: SdText.caption),
               if (_sync.lastResult.isNotEmpty) ...[
                 const SizedBox(height: 8),
                 Text(_sync.lastResult, style: SdText.caption.copyWith(color: Sd.t1)),
@@ -350,15 +508,101 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                   const Expanded(child: Text('Cámara de este celular: ajuste fino', style: SdText.label)),
                   Text('${_sync.localAdjustMs} ms', style: SdText.label.copyWith(color: Sd.t1)),
                 ]),
-                Slider(value: _sync.localAdjustMs.toDouble(), min: 0, max: 300, divisions: 30,
+                Slider(value: _sync.localAdjustMs.clamp(-150, 150).toDouble(), min: -150, max: 150, divisions: 30,
                     onChanged: (v) => _sync.localAdjustMs = v.round()),
-                const Text('Subilo si la cámara de este celular se ve adelantada respecto a las otras.',
-                    style: SdText.caption),
+                const Text('La claqueta la mide sola. Subilo si igual se ve adelantada respecto a las otras; '
+                    'bajalo si se ve atrasada.', style: SdText.caption),
               ],
             ]),
             actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
           );
         },
+      ),
+    );
+  }
+
+  /// Colour of the cameras (ColorMatch): by hand per camera, or matched automatically to a reference camera.
+  void _showColorDialog() {
+    String? sel;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModal) => ListenableBuilder(
+          listenable: _color,
+          builder: (ctx, _) {
+            final cams = _roomHost.cameras;
+            if (sel == null || !cams.any((c) => c.id == sel)) sel = cams.isEmpty ? null : cams.first.id;
+            final id = sel;
+            final ref = _color.reference;
+            String nameOf(String? i) => cams.where((c) => c.id == i).firstOrNull?.name ?? '-';
+            Widget slider(String label, double value, String lo, String hi, void Function(double) set) => Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Expanded(child: Text(label, style: SdText.label)),
+                  Text(value == 0 ? '0' : '${value > 0 ? '+' : ''}${(value * 100).round()}',
+                      style: SdText.label.copyWith(color: Sd.t1)),
+                ]),
+                Slider(value: value, min: -1, max: 1, divisions: 40, onChanged: (v) { set(v); _color.changed(); }),
+                Row(children: [
+                  Text(lo, style: SdText.caption), const Spacer(), Text(hi, style: SdText.caption),
+                ]),
+                const SizedBox(height: 6),
+              ],
+            );
+            return AlertDialog(
+              scrollable: true,
+              title: const Row(children: [
+                Icon(SdIcons.eye, color: Sd.cyan, size: 22),
+                SizedBox(width: 10),
+                Expanded(child: Text('Color de cámaras')),
+              ]),
+              content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('Para que todas las cámaras se vean parecidas al cortar. Se aplica al programa (grabación '
+                    'y emisión) y al monitor.', style: SdText.caption),
+                const SizedBox(height: 12),
+                if (cams.isEmpty) const Text('Sin cámaras.', style: SdText.caption),
+                Wrap(spacing: 6, runSpacing: 6, children: [
+                  for (final c in cams)
+                    ChoiceChip(
+                      label: Text(c.id == ref ? '${c.name} · ref.' : c.name),
+                      selected: c.id == id,
+                      onSelected: (_) => setModal(() => sel = c.id),
+                    ),
+                ]),
+                if (id != null) ...[
+                  const SizedBox(height: 12),
+                  if (id == ref)
+                    const Text('Es la referencia: las cámaras en automático se igualan a esta.', style: SdText.caption)
+                  else ...[
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero, dense: true,
+                      title: Text('Igualar a ${nameOf(ref)}', style: SdText.bodyHi),
+                      subtitle: const Text('Ajusta solo el balance de blancos y el brillo para parecerse a la '
+                          'referencia. Funciona mejor si las dos ven una escena parecida.', style: SdText.caption),
+                      value: _color.of(id).auto,
+                      onChanged: (v) { _color.of(id).auto = v; _color.changed(); },
+                    ),
+                    Align(alignment: Alignment.centerLeft, child: TextButton(
+                      onPressed: () => _color.reference = id,
+                      child: const Text('Usar esta como referencia'),
+                    )),
+                  ],
+                  const SizedBox(height: 8),
+                  slider('Exposición', _color.of(id).exposure, 'más oscura', 'más clara', (v) => _color.of(id).exposure = v),
+                  slider('Temperatura', _color.of(id).temperature, 'más fría', 'más cálida', (v) => _color.of(id).temperature = v),
+                  slider('Tinte', _color.of(id).tint, 'verde', 'magenta', (v) => _color.of(id).tint = v),
+                  slider('Saturación', _color.of(id).saturation, 'menos color', 'más color', (v) => _color.of(id).saturation = v),
+                  Align(alignment: Alignment.centerLeft, child: TextButton(
+                    onPressed: () { _color.of(id).reset(); _color.changed(); },
+                    child: const Text('Restablecer esta cámara'),
+                  )),
+                ],
+              ]),
+              actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
+            );
+          },
+        ),
       ),
     );
   }
@@ -460,6 +704,79 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     );
   }
 
+  /// Intro video: a clip from this phone that opens the live stream / the recording, then fades to the cameras.
+  void _showIntroDialog() {
+    showDialog(
+      context: context,
+      builder: (ctx) => ListenableBuilder(
+        listenable: _intro,
+        builder: (ctx, _) {
+          final has = _intro.hasClip;
+          Widget sw(String t, String sub, bool v, void Function(bool) set) => SwitchListTile(
+                contentPadding: EdgeInsets.zero, dense: true,
+                title: Text(t, style: SdText.bodyHi),
+                subtitle: Text(sub, style: SdText.caption),
+                value: v,
+                onChanged: has ? (x) { set(x); _intro.save(); } : null,
+              );
+          return AlertDialog(
+            scrollable: true,
+            title: const Row(children: [
+              Icon(Icons.movie_outlined, color: Sd.cyan, size: 22),
+              SizedBox(width: 10),
+              Expanded(child: Text('Video de entrada')),
+            ]),
+            content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('Un video de este celular que abre la transmisión o la grabación, con su sonido. Al terminar '
+                  'pasa solo a las cámaras con un fundido. Mientras corre se puede saltar desde el monitor.',
+                  style: SdText.caption),
+              const SizedBox(height: 12),
+              Row(children: [
+                const Icon(Icons.movie_outlined, size: 18, color: Sd.t2),
+                const SizedBox(width: 8),
+                Expanded(child: Text(has ? (_intro.name ?? 'Video elegido') : 'Ningún video elegido',
+                    style: SdText.bodyHi, overflow: TextOverflow.ellipsis)),
+              ]),
+              const SizedBox(height: 6),
+              Wrap(spacing: 8, children: [
+                FilledButton.tonal(
+                  onPressed: _intro.picking || _intro.isOn ? null : () async {
+                    try {
+                      await _intro.pick();
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('No se pudo usar ese video: $e')));
+                      }
+                    }
+                  },
+                  child: Text(_intro.picking ? 'Copiando…' : has ? 'Cambiar video' : 'Elegir video'),
+                ),
+                if (has)
+                  TextButton(onPressed: _intro.isOn ? null : _intro.clear, child: const Text('Quitar')),
+              ]),
+              const SizedBox(height: 8),
+              sw('Al salir en vivo', 'Abre la transmisión', _intro.onStream, (v) => _intro.onStream = v),
+              sw('Al empezar a grabar', 'Abre la grabación (si no estás en vivo)', _intro.onRecord, (v) => _intro.onRecord = v),
+              const SizedBox(height: 8),
+              const Text('Si el video tiene otra forma (vertical):', style: SdText.label),
+              const SizedBox(height: 6),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(value: false, label: Text('Con barras')),
+                  ButtonSegment(value: true, label: Text('Recortado')),
+                ],
+                selected: {_intro.fill},
+                showSelectedIcon: false,
+                onSelectionChanged: has ? (s) { _intro.fill = s.first; _intro.save(); } : null,
+              ),
+            ]),
+            actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Listo'))],
+          );
+        },
+      ),
+    );
+  }
+
   void _showRtmpConfigDialog() {
     final urlCtrl = TextEditingController(text: _rtmpOut.rtmpUrl);
     final keyCtrl = TextEditingController(text: _rtmpOut.streamKey);
@@ -553,13 +870,19 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                 }
                 _encoder.programHeight = h;
                 _roomHost.programHeight = h;   // the on-air camera is asked for it
+                _pendingQuality4k = null;
+                _saveQuality();
                 if (_encoder.isEncoding) {
                   await _encoder.setAudioSources(camera: audioCam, mic: audioMic);
                 } else {
                   _encoder.audioCamera = audioCam;
                   _encoder.audioMic = audioMic;
                 }
+                final intro = !_recorder.isRecording && _intro.wants(stream: true) && await _prepareIntro();
                 await _rtmpOut.startStream();
+                if (intro) {
+                  if (_rtmpOut.isStreaming) { _intro.play(); } else { _intro.stop(); }
+                }
                 if (!mounted) return;
                 if (_rtmpOut.state == RtmpState.error) {
                   ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -588,15 +911,41 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
 
   Future<void> _toggleRecording() async {
     if (_recorder.isRecording) {
-      final path = await _recorder.stopRecording();
-      if (mounted && path != null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Grabación guardada en: $path')),
-        );
-      }
+      await _recorder.stopRecording();
+      if (!mounted) return;
+      final uri = _recorder.lastUri;
+      ScaffoldMessenger.of(context).showSnackBar(uri != null
+          ? SnackBar(
+              // With an action the SnackBar stayed until tapped (it covered the bottom bar).
+              persist: false,
+              duration: const Duration(seconds: 6),
+              content: const Text('Grabación guardada en la Galería (Movies/Samba Air).'),
+              action: SnackBarAction(label: 'Ver', onPressed: () => Recordings.open(uri)),
+            )
+          : const SnackBar(content: Text('Grabación guardada, pero no se pudo pasar a la Galería. '
+              'Se reintenta al volver a abrir el switcher.')));
     } else {
+      final intro = !_rtmpOut.isStreaming && _intro.wants(stream: false) && await _prepareIntro();
       await _recorder.startRecording();
+      if (intro) {
+        if (_recorder.isRecording) { _intro.play(); } else { _intro.stop(); }
+      }
     }
+  }
+
+  /// The intro clip into the program before an output starts (black until it plays). False = not used.
+  Future<bool> _prepareIntro() async {
+    final ok = await _intro.prepare();
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('No se pudo reproducir el video de entrada (${_intro.lastError ?? 'error'}): se empieza con las cámaras.')));
+    }
+    return ok;
+  }
+
+  /// The program stopped going out while the intro was playing: take it out.
+  void _introGuard() {
+    if (_intro.isOn && _intro.startedAt != null && !_recorder.isRecording && !_rtmpOut.isStreaming) _intro.stop();
   }
 
   Future<void> _toggleLocalCamera() async {
@@ -641,6 +990,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
   void dispose() {
     if (_hotspot != null) _native.invokeMethod('stopHotspot').catchError((_) => null);
     NfcPairing.advertise(null);
+    _encoder.removeListener(_applyPendingQuality);
     _mixer.removeListener(_syncNativeCameraSources);
     _director.removeListener(_syncNativeCameraSources);
     _subscriber.removeListener(_syncNativeCameraSources);
@@ -648,6 +998,10 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     _roomHost.removeListener(_syncNativeCameraSources);
     _localCam.removeListener(_localCamChanged);
     _sync.dispose();
+    _color.dispose();
+    _recorder.removeListener(_introGuard);
+    _rtmpOut.removeListener(_introGuard);
+    _intro.dispose();
 
     _localCam.dispose();
     _mixer.dispose();
@@ -660,23 +1014,25 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
     super.dispose();
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Sd.void_,
-      appBar: AppBar(
-        backgroundColor: Sd.void_,
-        titleSpacing: 4,
-        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('SWITCHER', style: SdText.overline.copyWith(color: Sd.magenta, letterSpacing: 1.6)),
-          const SizedBox(height: 2),
-          Row(children: [
-            const Flexible(child: Text('Samba Studio', overflow: TextOverflow.ellipsis)),
-            const SizedBox(width: 8),
-            Text(':8088', style: SdText.caption),
-          ]),
-        ]),
-        actions: [
+  /// Switcher tools. In the app bar they did not fit an upright phone: buttons piled up and the last ones were cut
+  /// off (2026-10-15). Upright they go in their own row (a Wrap: a second line instead of disappearing); on a wide
+  /// screen they replace the app bar's title, since a row of their own took height from the program monitor.
+  static const double _wideToolbar = 640;
+
+  Widget _buildToolbar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 2),
+      child: Wrap(
+        crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 2,
+        runSpacing: 2,
+        children: _toolItems(),
+      ),
+    );
+  }
+
+  List<Widget> _toolItems() {
+    return [
           // Local camera (this phone's own camera as a source)
           ListenableBuilder(
             listenable: _localCam,
@@ -722,6 +1078,16 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
             tooltip: 'Sincronía de cámaras',
             onPressed: _showSyncDialog,
           ),
+          IconButton(
+            icon: const Icon(SdIcons.eye),
+            tooltip: 'Color de cámaras',
+            onPressed: _showColorDialog,
+          ),
+          IconButton(
+            icon: const Icon(Icons.movie_outlined),
+            tooltip: 'Video de entrada',
+            onPressed: _showIntroDialog,
+          ),
           // Auto / manual switching
           ListenableBuilder(
             listenable: _director,
@@ -747,6 +1113,36 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
               );
             },
           ),
+          IconButton(
+            icon: const Icon(Icons.video_library_outlined, color: Sd.t2),
+            tooltip: 'Grabaciones',
+            onPressed: () => RecordingsSheet.show(context),
+          ),
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final wide = MediaQuery.sizeOf(context).width >= _wideToolbar;
+    return Scaffold(
+      backgroundColor: Sd.void_,
+      appBar: AppBar(
+        backgroundColor: Sd.void_,
+        titleSpacing: 4,
+        // Wide screen: the tools take the title's place (title + tools + Grabar + Emitir did not fit ~780 dp).
+        title: wide
+            ? SingleChildScrollView(scrollDirection: Axis.horizontal,
+                child: Row(mainAxisSize: MainAxisSize.min, children: _toolItems()))
+            : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('SWITCHER', style: SdText.overline.copyWith(color: Sd.magenta, letterSpacing: 1.6)),
+          const SizedBox(height: 2),
+          Row(children: [
+            const Flexible(child: Text('Samba Studio', overflow: TextOverflow.ellipsis)),
+            const SizedBox(width: 8),
+            Text(':8088', style: SdText.caption),
+          ]),
+        ]),
+        actions: [
           // Record
           ListenableBuilder(
             listenable: _recorder,
@@ -755,7 +1151,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
               return IconButton(
                 icon: Icon(isRec ? SdIcons.record : SdIcons.record,
                     color: isRec ? Sd.magenta : Sd.t2),
-                tooltip: isRec ? 'Detener Grabación SD' : 'Grabar a SD',
+                tooltip: isRec ? 'Detener la grabación' : 'Grabar en el celular',
                 onPressed: _toggleRecording,
               );
             },
@@ -788,7 +1184,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
         ],
       ),
       body: SafeArea(top: false, child: ListenableBuilder(
-        listenable: Listenable.merge([_roomHost, _subscriber, _rtmpOut, _recorder, _encoder, _mixer, _localCam, _director, _sync]),
+        listenable: Listenable.merge([_roomHost, _subscriber, _rtmpOut, _recorder, _encoder, _mixer, _localCam, _director, _sync, _intro]),
         builder: (context, _) {
           final cameras = _roomHost.cameras;
           final activePeerId = _roomHost.activePeerId;
@@ -796,13 +1192,15 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
           final previewName = previewPeerId == null ? null
               : cameras.where((c) => c.id == previewPeerId).map((c) => c.name).firstOrNull;
 
-          return Column(
-            children: [
-              // 1. Program monitor
-              Expanded(
-                flex: 4,
-                child: Container(
-                  margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+          // The program monitor is exactly 16:9, what goes out: in whatever box was left it showed the program cropped
+          // (in landscape a thin strip, 2026-10-19). Landscape: the monitor uses the full height and the cameras go in
+          // a column beside it.
+          final landscape = MediaQuery.sizeOf(context).aspectRatio > 1.2;
+          Widget monitor169(Widget m) => Padding(padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+              child: AspectRatio(aspectRatio: 16 / 9, child: m));
+
+          // 1. Program monitor
+          final Widget monitor = Container(
                   clipBehavior: Clip.antiAlias,
                   decoration: BoxDecoration(
                     color: Sd.void_,
@@ -822,38 +1220,59 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                           cameras: cameras,
                           localRenderer: _localCam.isActive ? _localCam.renderer : null,
                           localPeerId: _localCam.peerId,
+                          color: _color,
                         ),
                       ),
+                      // The intro clip while it is in the program.
+                      if (_intro.isOn)
+                        Positioned.fill(child: AnimatedOpacity(
+                          opacity: _intro.ending ? 0 : 1,
+                          duration: const Duration(milliseconds: 500),
+                          child: _IntroMonitor(intro: _intro),
+                        )),
                       // Status pills
                       Positioned(
                         top: 10, left: 10, right: 10,
-                        child: Row(children: [
+                        // Wrap: with REC + EN VIVO + SIN AUDIO + the quality pill the row overflowed on an upright phone.
+                        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          Expanded(child: Wrap(spacing: 6, runSpacing: 6, children: [
                           const SdPill('PROGRAMA', color: Sd.red, solid: true),
                           if (_rtmpOut.isStreaming) ...[
-                            const SizedBox(width: 6),
                             _rtmpOut.reconnecting
                                 ? const SdPill('RECONECTANDO…', color: Sd.amber, icon: SdIcons.arrowsClockwise)
                                 : SdPill('EN VIVO · ${_rtmpOut.currentBitrateKbps} kbps', color: Sd.red,
                                     icon: SdIcons.broadcast),
-                            if (!_rtmpOut.reconnecting && !_rtmpOut.hasAudio) ...[
-                              const SizedBox(width: 6),
+                            if (!_rtmpOut.reconnecting && !_rtmpOut.hasAudio)
                               const SdPill('SIN AUDIO', color: Sd.amber, icon: SdIcons.speakerSlash),
-                            ],
                           ],
-                          if (_recorder.isRecording) ...[
-                            const SizedBox(width: 6),
+                          if (_recorder.isRecording)
                             SdPill('REC · ${_recorder.fileSizeMb.toStringAsFixed(1)} MB', color: Sd.magenta,
                                 icon: SdIcons.record),
-                          ],
-                          const Spacer(),
-                          SdPill('${_encoder.width}×${_encoder.height} · ${_encoder.fps} fps', color: Sd.t2),
+                          ])),
+                          const SizedBox(width: 6),
+                          // What the program is encoded at — the recording and the live stream share it. While not
+                          // encoding, what it will be. Tap: the Calidad dialog.
+                          GestureDetector(
+                            onTap: _showQualityDialog,
+                            child: SdPill(_encoder.isEncoding
+                                ? '${_encoder.width}×${_encoder.height} · ${_encoder.fps} fps · '
+                                  '${(_encoder.bitrateKbps / 1000).toStringAsFixed(1)} Mbps'
+                                : '${_encoder.plannedWidth}×${_encoder.plannedHeight} · '
+                                  '${(_encoder.defaultKbps / 1000).toStringAsFixed(0)} Mbps',
+                                color: Sd.t2, icon: SdIcons.slidersHorizontal),
+                          ),
                         ]),
                       ),
-                      // Layout selector + second camera
-                      Positioned(
+                      // Layout selector + second camera (hidden while the intro clip covers the program: its own
+                      // controls go there)
+                      if (!_intro.isOn) Positioned(
                         bottom: 10, left: 10, right: 10,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        // Wrap: the layout chips + CORTE / second-camera menu did not fit side by side upright.
+                        child: Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          spacing: 6,
+                          runSpacing: 6,
                           children: [
                             Container(
                               padding: const EdgeInsets.all(3),
@@ -906,9 +1325,10 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                       ),
                     ],
                   ),
-                ),
-              ),
+                )
+          ;
 
+          final List<Widget> multiviewHead = [
               // 2. Multiview header
               Padding(
                 padding: const EdgeInsets.fromLTRB(18, 2, 18, 0),
@@ -959,11 +1379,10 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                       )),
                   ],
                 )),
+          ];
 
-              // 3. Multiview cards
-              Expanded(
-                flex: 3,
-                child: cameras.isEmpty
+          // 3. Multiview cards
+          final Widget cards = cameras.isEmpty
                     ? Center(
                         child: SingleChildScrollView(
                           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
@@ -1008,8 +1427,8 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                       )
                     : GridView.builder(
                         padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: 2, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.6,
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: landscape ? 1 : 2, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.6,
                         ),
                         itemCount: cameras.length,
                         itemBuilder: (context, idx) {
@@ -1075,6 +1494,22 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                       ]),
                                       if (!hasVideo)
                                         const Center(child: Icon(SdIcons.videoCameraSlash, color: Sd.t3, size: 22)),
+                                      // What really arrives and how late, on its own line: next to the meter it pushed the bar
+                                      // out and got cut off on an upright phone (2026-10-19).
+                                      // Latency: «180 ms» measured with the beeps, «≈150 ms» estimated; amber if over the
+                                      // alignment cap (that camera is not lined up). Resolution: high only on air / preview.
+                                      Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                                      Row(mainAxisSize: MainAxisSize.min, children: [
+                                        if (_sync.latencyOf(cam.id) case final lat? when cam.id != _localCam.peerId)
+                                          Text('${lat.measured ? '' : '≈'}${lat.ms} ms', style: SdText.caption.copyWith(
+                                              color: _sync.tooSlow(cam.id) ? Sd.amber : Sd.t3)),
+                                        if (rx != null && rx.height > 0) ...[
+                                          const SizedBox(width: 8),
+                                          Text('${rx.height}p · ${rx.fps}', style: SdText.caption.copyWith(
+                                              color: rx.height >= 720 ? Sd.cyan : Sd.t3)),
+                                        ],
+                                      ]),
+                                      const SizedBox(height: 2),
                                       // Audio level: a thin bar (green → amber when loud)
                                       Row(children: [
                                         // Which microphone the camera uses: a headset shows its icon and name.
@@ -1099,19 +1534,7 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                                         )),
                                         const SizedBox(width: 6),
                                         Text('${cam.lastAudioDbfs.toStringAsFixed(0)} dB', style: SdText.caption),
-                                        // What really arrives (check for PGM/PVW: high only for on air / preview).
-                                        // Latency: «180 ms» measured with the beeps, «≈150 ms» estimated; amber if
-                                        // over the alignment cap (that camera is not lined up).
-                                        if (_sync.latencyOf(cam.id) case final lat? when cam.id != _localCam.peerId) ...[
-                                          const SizedBox(width: 8),
-                                          Text('${lat.measured ? '' : '≈'}${lat.ms} ms', style: SdText.caption.copyWith(
-                                              color: _sync.tooSlow(cam.id) ? Sd.amber : Sd.t3)),
-                                        ],
-                                        if (rx != null && rx.height > 0) ...[
-                                          const SizedBox(width: 8),
-                                          Text('${rx.height}p · ${rx.fps}', style: SdText.caption.copyWith(
-                                              color: rx.height >= 720 ? Sd.cyan : Sd.t3)),
-                                        ],
+                                      ]),
                                       ]),
                                     ],
                                   ),
@@ -1120,11 +1543,11 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                             ),
                           );
                         },
-                      ),
-              ),
+                      )
+          ;
 
-              // 4. Last switch
-              Container(
+          // 4. Last switch
+          final Widget lastSwitch = Container(
                 height: 40,
                 padding: const EdgeInsets.symmetric(horizontal: 18),
                 decoration: const BoxDecoration(
@@ -1143,11 +1566,108 @@ class _SwitcherScreenState extends State<SwitcherScreen> {
                     ]);
                   },
                 ),
-              ),
+              )
+          ;
+
+          if (landscape) {
+            return Column(children: [
+              Expanded(child: Row(children: [
+                Expanded(flex: 3, child: Center(child: monitor169(monitor))),
+                Expanded(flex: 2, child: Column(children: [...multiviewHead, Expanded(child: cards)])),
+              ])),
+              lastSwitch,
+            ]);
+          }
+          return Column(
+            children: [
+              if (!wide) _buildToolbar(),
+              monitor169(monitor),
+              ...multiviewHead,
+              Expanded(child: cards),
+              lastSwitch,
             ],
           );
         },
       )),
     );
   }
+}
+
+/// The clapperboard's screen: black, white while [flash] is on. The cameras film it (SourceSync.measure).
+/// The intro clip on the program monitor: its picture, what is left of it and «Saltar».
+class _IntroMonitor extends StatefulWidget {
+  final IntroClip intro;
+  const _IntroMonitor({required this.intro});
+  @override
+  State<_IntroMonitor> createState() => _IntroMonitorState();
+}
+
+class _IntroMonitorState extends State<_IntroMonitor> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _tick = Timer.periodic(const Duration(milliseconds: 500), (_) { if (mounted) setState(() {}); });
+  }
+
+  @override
+  void dispose() { _tick?.cancel(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    final i = widget.intro;
+    final tex = i.textureId ?? -1;
+    String left() {
+      final s = i.startedAt;
+      final rem = s == null ? i.duration : i.duration - DateTime.now().difference(s);
+      final secs = rem.isNegative ? 0 : (rem.inMilliseconds / 1000).ceil();
+      return '${secs ~/ 60}:${(secs % 60).toString().padLeft(2, '0')}';
+    }
+    return Container(
+      color: Colors.black,
+      child: Stack(children: [
+        if (tex >= 0)
+          Positioned.fill(child: FittedBox(
+            fit: i.fill ? BoxFit.cover : BoxFit.contain,
+            clipBehavior: Clip.hardEdge,
+            child: SizedBox(width: 160 * i.aspect, height: 160, child: Texture(textureId: tex)),
+          )),
+        Positioned(
+          left: 10, right: 10, bottom: 10,
+          child: Row(children: [
+            SdPill(i.startedAt == null ? 'VIDEO DE ENTRADA' : 'VIDEO DE ENTRADA · ${left()}',
+                color: Sd.cyan, icon: SdIcons.record),
+            const Spacer(),
+            if (i.startedAt != null && !i.ending)
+              FilledButton.icon(
+                style: FilledButton.styleFrom(backgroundColor: Sd.cyan, foregroundColor: Colors.black,
+                    visualDensity: VisualDensity.compact),
+                onPressed: i.skip,
+                icon: const Icon(Icons.skip_next, size: 18),
+                label: const Text('Saltar'),
+              ),
+          ]),
+        ),
+      ]),
+    );
+  }
+}
+
+class _ClapperboardPage extends StatelessWidget {
+  final ValueListenable<bool> flash;
+  const _ClapperboardPage({required this.flash});
+
+  @override
+  Widget build(BuildContext context) => ValueListenableBuilder<bool>(
+        valueListenable: flash,
+        builder: (_, on, __) => ColoredBox(
+          color: on ? Colors.white : Colors.black,
+          child: on ? const SizedBox.expand() : const Center(child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Text('Que las cámaras vean esta pantalla.\nMidiendo…', textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white70, fontSize: 18, decoration: TextDecoration.none)),
+          )),
+        ),
+      );
 }
