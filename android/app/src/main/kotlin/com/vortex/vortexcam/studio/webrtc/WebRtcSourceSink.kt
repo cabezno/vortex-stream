@@ -199,11 +199,15 @@ class WebRtcSourceSink : VideoSink {
 
     companion object {
         /** ~0.6 s at 30 fps: the alignment is capped at 500 ms anyway. */
-        const val MAX_FRAMES = 18
+        const val MAX_FRAMES = 26
         const val MAX_BYTES = 64L * 1024 * 1024
-        const val MAX_GPU_BYTES = 128L * 1024 * 1024
-        /** Hold that absorbs Wi-Fi bursts (on top of the alignment delay). */
-        const val JITTER_MS = 60
+        const val MAX_GPU_BYTES = 160L * 1024 * 1024
+        /**
+         * Hold that absorbs Wi-Fi bursts and late frames (on top of the alignment delay). 60 ms until 2026-10-20: on a
+         * 2.4 GHz home network the cameras lost 2–4 % of packets and their retransmitted frames arrived 100–200 ms
+         * late — too late for the program, which stuttered. The program audio is held as much (ProgramAudioEncoder).
+         */
+        const val JITTER_MS = 180
         /** A frame this much later than the on-time transit = the stream restarted, not jitter. */
         const val RESYNC_NS = 1_000_000_000L
     }
