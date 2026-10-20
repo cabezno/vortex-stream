@@ -80,7 +80,12 @@ class CameraService extends ChangeNotifier {
 
   Future<void> _buildStream() async {
     _stream?.getTracks().forEach((t) => t.stop());
-    final (capW, capH) = _encoderCap();
+    var (capW, capH) = _encoderCap();
+    // Also cap to this camera's largest 16:9 size. flutter_webrtc ignores 'aspectRatio' and takes the format closest
+    // to the number asked: 3840x2160 on a front camera without 4K (Redmi Note 14) gave 1728x1296, 4:3, so WHIP
+    // arrived with wide bars. Asking its own 16:9 maximum (2592x1458) gets 16:9 — what the SRT relay does since d3d268b.
+    final cam = DeviceCapabilities.instance.camera169(front: _facing == CameraFacing.front);
+    if (cam != null && cam.$1 < capW) (capW, capH) = cam;
 
     // If the engine has requested a specific resolution, apply it with
     // min+ideal to lock it exactly. Otherwise use high ideal values

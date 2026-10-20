@@ -108,6 +108,14 @@ class DeviceCapabilities extends ChangeNotifier {
   String? get maxHevc => _enc('hevc')?['max30'] as String?;
   String? get cameraMax => (raw['cameraBack'] is Map) ? raw['cameraBack']['max'] as String? : null;
 
+  /// Largest 16:9 capture of the back or front camera as (w, h), null when not measured.
+  (int, int)? camera169({required bool front}) {
+    final c = raw[front ? 'cameraFront' : 'cameraBack'];
+    final m = RegExp(r'(\d+)x(\d+)').firstMatch(c is Map ? (c['max'] as String? ?? '') : '');
+    if (m == null) return null;
+    return (int.parse(m[1]!), int.parse(m[2]!));
+  }
+
   /// Shorter side of a "WxH" string (2160 for "3840x2160"), 0 if unknown.
   static int heightOf(String? wxh) {
     final m = RegExp(r'(\d+)x(\d+)').firstMatch(wxh ?? '');
