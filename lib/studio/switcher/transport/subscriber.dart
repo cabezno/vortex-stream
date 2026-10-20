@@ -98,7 +98,15 @@ class WebRtcSubscriber extends ChangeNotifier {
       );
     };
 
-    pc.onTrack = (RTCTrackEvent event) async {
+    // A camera's tracks are wired up (renderer, enabled, stream) only once its offer is applied. While the offer is
+    // being applied WebRTC announces each track from its signaling thread (flutter_webrtc's onAddTrack walks the
+    // connection's transceivers there), and wiring the first track right away made flutter_webrtc walk the same
+    // transceivers from the main thread (getTrackForId when the track is not registered yet): one disposed what the
+    // other was disposing — «RtpTransceiver has been disposed» in a JNI callback, SIGABRT of the whole switcher when a
+    // camera joined (2026-10-20).
+    final pendingTracks = <RTCTrackEvent>[];
+    var negotiating = true;
+    Future<void> handleTrack(RTCTrackEvent event) async {
       // Robusto: si el track llega SIN stream (típico del video por addTransceiver
       // con simulcast), igual lo montamos en un stream propio para poder renderizarlo.
       MediaStream stream;
@@ -125,6 +133,9 @@ class WebRtcSubscriber extends ChangeNotifier {
 
       debugPrint('[WebRtcSubscriber] Received track (${event.track.kind}, streams=${event.streams.length}) for $peerId');
       notifyListeners();
+    }
+    pc.onTrack = (RTCTrackEvent event) {
+      if (negotiating) { pendingTracks.add(event); } else { handleTrack(event); }
     };
 
     // Set Remote Description (the Camera's Offer)
@@ -134,6 +145,11 @@ class WebRtcSubscriber extends ChangeNotifier {
     // automáticamente al offer sendonly de la cámara).
     final answer = await pc.createAnswer({});
     await pc.setLocalDescription(answer);
+    negotiating = false;
+    for (final e in pendingTracks) {
+      await handleTrack(e);
+    }
+    pendingTracks.clear();
 
     // Send Answer back to Camera
     roomHost.sendToPeer(
