@@ -1749,8 +1749,27 @@ class VortexCamPlugin(
         var onReconnected: ((downMs: Long) -> Unit)? = null
 
         private fun openSrt(): Boolean {
-            if (!SrtLib.ready) return false
-            val s = try { LibSrtSocket() } catch (t: Throwable) { Log.w(TAG, "SRT socket: $t"); return false }
+            val s = connectSrt() ?: return false
+            adoptSrt(s)
+            return true
+        }
+
+        /** The latency SRT agreed with SAMBA (the larger of both sides'): what the send queue is measured against. */
+        @Volatile private var effLatencyMs = latencyMs
+
+        private fun adoptSrt(s: LibSrtSocket) {
+            effLatencyMs = try { (s.getSockFlag(SockOpt.PEERLATENCY) as Number).toInt() } catch (_: Exception) { latencyMs }
+                .coerceAtLeast(latencyMs)
+            srt = s; mode = "SRT"; linkUp = true
+            srtUpAtMs = System.currentTimeMillis(); severeStreak = 0
+            Log.i(TAG, "SRT (UDP, libsrt) connected → $ip:$port, latency $latencyMs ms (acordada $effLatencyMs ms)")
+            startReceive(s)
+        }
+
+        /** A connected SRT socket, or null. */
+        private fun connectSrt(): LibSrtSocket? {
+            if (!SrtLib.ready) return null
+            val s = try { LibSrtSocket() } catch (t: Throwable) { Log.w(TAG, "SRT socket: $t"); return null }
             fun opt(o: SockOpt, v: Any) = try { s.setSockFlag(o, v) } catch (e: Exception) { Log.w(TAG, "SRT $o=$v: $e") }
             return try {
                 s.setSockFlag(SockOpt.TRANSTYPE, Transtype.LIVE)
@@ -1762,16 +1781,33 @@ class VortexCamPlugin(
                 opt(SockOpt.PEERIDLETIMEO, 3000)       // SAMBA silent 3 s = link down (the default is 5 s)
                 if (streamId.isNotEmpty()) opt(SockOpt.STREAMID, streamId)
                 s.connect(ip, port)
-                srt = s; mode = "SRT"; linkUp = true
-                srtUpAtMs = System.currentTimeMillis(); severeStreak = 0
-                Log.i(TAG, "SRT (UDP, libsrt) connected → $ip:$port, latency $latencyMs ms")
-                startReceive(s)
-                true
+                s
             } catch (e: Exception) {
                 Log.w(TAG, "SRT connect to $ip:$port failed: $e")
                 try { s.close() } catch (_: Exception) {}
-                false
+                null
             }
+        }
+
+        /**
+         * Back from the TCP fallback to real SRT. A reconnect while SAMBA was restarting found SRT not answering yet
+         * and TCP answering, and the camera stayed on TCP for good (2026-10-21). Every 10 s on TCP: connect SRT on the
+         * side and, if it answers, swap under the send lock (no frame goes half on each) and drop TCP.
+         */
+        private var lastUpgradeTryMs = 0L
+        private fun tryUpgradeToSrt(now: Long) {
+            if (now - lastUpgradeTryMs < 10_000) return
+            lastUpgradeTryMs = now
+            val s = connectSrt() ?: return
+            synchronized(sendLock) {
+                if (closed || !linkUp || srt != null) { try { s.close() } catch (_: Exception) {}; return }
+                try { tcpSocket?.close() } catch (_: Exception) {}
+                tcpSocket = null; out = null
+                adoptSrt(s)
+            }
+            reconnects++
+            Log.i(TAG, "SRT: vuelve de TCP a SRT real")
+            onReconnected?.invoke(0)
         }
 
         /** What SAMBA sends back on this SRT connection (tally, return audio): see [processSrtReturn]. */
@@ -1900,15 +1936,16 @@ class VortexCamPlugin(
             val detail = "SRT pérdida ${"%.1f".format(lossPct)} %, descartados ${st.pktSndDrop}, " +
                 "buffer $q ms, RTT $rtt ms"
             val warmingUp = now - srtUpAtMs < 3000
-            severeStreak = if (q > 2 * latencyMs + rtt) severeStreak + 1 else 0
+            val lat = effLatencyMs
+            severeStreak = if (q > 2 * lat + rtt) severeStreak + 1 else 0
             val a = abr
             when {
                 st.pktSndDrop > 0 || (!warmingUp && severeStreak >= 2) -> a?.reportSevere(st.mbpsSendRate, detail)
                 warmingUp -> {}
-                lossPct > 5.0 || q > latencyMs + rtt -> a?.report(true, detail)
+                lossPct > 5.0 || q > lat + rtt -> a?.report(true, detail)
                 else -> a?.report(false, detail)
             }
-            val lossy = st.pktSndDrop > 0 || lossPct > 5.0 || q > latencyMs + rtt
+            val lossy = st.pktSndDrop > 0 || lossPct > 5.0 || q > lat + rtt
             if (lossy) Log.i(TAG, "SRT stats: sent $sent, lost ${st.pktSndLoss}, retrans ${st.pktRetrans}, " +
                 "dropped ${st.pktSndDrop}, sndBuf ${st.msSndBuf} ms, RTT ${st.msRTT} ms, bw ${"%.1f".format(st.mbpsBandwidth)} Mbps")
         }
@@ -1934,6 +1971,7 @@ class VortexCamPlugin(
                             val mw = maxOf(maxWriteMs, if (ws > 0) now - ws else 0L)
                             maxWriteMs = 0L
                             abr?.report(mw > 150, "escritura TCP trabada $mw ms")
+                            tryUpgradeToSrt(now)
                         }
                     } else if (!closed && now - lastTry >= 1000) {
                         lastTry = now
@@ -1996,7 +2034,10 @@ class VortexCamPlugin(
                 48000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             returnTrack = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    // MEDIA, not VOICE_COMMUNICATION: that one plays through the call earpiece, audible only with the
+                    // phone against the ear (measured 2026-10-21). MEDIA goes to the loudspeaker, or to headphones /
+                    // Bluetooth when connected. The «Retorno» button mutes it.
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build())
                 .setAudioFormat(AudioFormat.Builder()
