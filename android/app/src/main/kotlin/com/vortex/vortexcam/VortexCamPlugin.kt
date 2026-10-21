@@ -943,6 +943,11 @@ class VortexCamPlugin(
         var lastCvo = -1
         var lastCvoSentMs = 0L
         var lastCvoCheckMs = 0L
+        // Pacing, every 5 s (DT-293): to tell «the phone/encoder is late» from «the phone sends evenly and the network
+        // bunches it». Wall clock (nanoTime), video frames only; SAMBA measures the same on arrival.
+        var paceStartNs = System.nanoTime()
+        var lastOutNs = 0L; var lastSendNs = 0L; var lastPtsUs = -1L
+        var maxOutGapNs = 0L; var maxSendGapNs = 0L; var maxSendNs = 0L; var maxPtsGapUs = 0L; var paceFrames = 0
         resetCvo()
         while (streaming.get()) {
             // Orientation: a change is ARMED when the phone turns (checked every 250 ms) and sent with the first frame
@@ -967,7 +972,15 @@ class VortexCamPlugin(
             val buf = encoder!!.getOutputBuffer(idx) ?: run {
                 encoder!!.releaseOutputBuffer(idx, false); continue
             }
-            if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+            val isFrame = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+            if (isFrame) {
+                val tOut = System.nanoTime()
+                if (lastOutNs != 0L) maxOutGapNs = maxOf(maxOutGapNs, tOut - lastOutNs)
+                lastOutNs = tOut
+                if (lastPtsUs >= 0) maxPtsGapUs = maxOf(maxPtsGapUs, info.presentationTimeUs - lastPtsUs)
+                lastPtsUs = info.presentationTimeUs
+            }
+            if (isFrame) {
                 val cvo = cvoForFrame(info.presentationTimeUs)
                 if (cvo != lastCvo) {                    // right before the first frame shot with it
                     synchronized(sendLock) { for (p in muxer.muxRotation(cvo)) srtSocket?.send(p) }
@@ -984,8 +997,28 @@ class VortexCamPlugin(
             if (pkts.isNotEmpty()) {
                 val joined = ByteArray(pkts.size * 188)
                 for ((i, pkt) in pkts.withIndex()) pkt.copyInto(joined, i * 188)
+                val t0 = System.nanoTime()
                 synchronized(sendLock) { srtSocket?.send(joined) }
+                if (isFrame) {
+                    val t1 = System.nanoTime()
+                    if (lastSendNs != 0L) maxSendGapNs = maxOf(maxSendGapNs, t0 - lastSendNs)
+                    lastSendNs = t0
+                    maxSendNs = maxOf(maxSendNs, t1 - t0)
+                    paceFrames++
+                }
                 bytesSent.addAndGet(joined.size.toLong())
+            }
+            val nowNs = System.nanoTime()
+            if (nowNs - paceStartNs >= 5_000_000_000L) {
+                val sock = srtSocket
+                val msg = "[pace] ${sock?.mode ?: "-"} · $paceFrames cuadros en 5 s · codificador: mayor salto " +
+                    "${maxOutGapNs / 1_000_000} ms (PTS ${maxPtsGapUs / 1000} ms) · envío: mayor salto " +
+                    "${maxSendGapNs / 1_000_000} ms, más largo ${maxSendNs / 1_000_000} ms" +
+                    (sock?.takePaceStats()?.let { " · $it" } ?: "") + "\n"
+                Log.i(TAG, msg.trim())
+                Thread { sendLogBytes(msg, "pace") }.start()
+                paceStartNs = nowNs
+                maxOutGapNs = 0L; maxSendGapNs = 0L; maxSendNs = 0L; maxPtsGapUs = 0L; paceFrames = 0
             }
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
@@ -1775,11 +1808,35 @@ class VortexCamPlugin(
         }
 
         private var lastStatsMs = 0L
+        // Summed / maxed over the [pace] window (DT-293): what libsrt itself queued, resent and dropped.
+        private val paceLock = Any()
+        private var paceSndBufMaxMs = 0
+        private var paceRetrans = 0L
+        private var paceLost = 0L
+        private var paceDropped = 0L
+        private var paceRttMaxMs = 0
+
+        /** libsrt's side of the [pace] line since the last call (empty on the TCP fallback), then reset. */
+        fun takePaceStats(): String? = synchronized(paceLock) {
+            if (srt == null) return@synchronized null
+            val r = "SRT: colchón de envío máx $paceSndBufMaxMs ms, reenviados $paceRetrans, perdidos $paceLost, " +
+                "descartados $paceDropped, RTT máx $paceRttMaxMs ms"
+            paceSndBufMaxMs = 0; paceRetrans = 0; paceLost = 0; paceDropped = 0; paceRttMaxMs = 0
+            r
+        }
+
         private fun srtSample(s: LibSrtSocket, now: Long) {
             if (now - lastStatsMs < 1000) return
             lastStatsMs = now
             val st = try { s.bstats(true) } catch (e: Exception) { return }
             rttMs = st.msRTT.toInt()
+            synchronized(paceLock) {
+                paceSndBufMaxMs = maxOf(paceSndBufMaxMs, st.msSndBuf)
+                paceRetrans += st.pktRetrans.toLong()
+                paceLost += st.pktSndLoss.toLong()
+                paceDropped += st.pktSndDrop.toLong()
+                paceRttMaxMs = maxOf(paceRttMaxMs, st.msRTT.toInt())
+            }
             val sent = st.pktSent
             val lossPct = if (sent > 0) st.pktSndLoss * 100.0 / sent else 0.0
             // Lost and resent packets are SRT's normal work; the rate is too high when the losses grow (> 5 %), when
