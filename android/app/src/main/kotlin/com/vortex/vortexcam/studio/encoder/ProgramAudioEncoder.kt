@@ -40,8 +40,8 @@ class ProgramAudioEncoder(
         const val CHANNELS = 2
         const val BITRATE = 160_000
         private const val FRAME = 1024                                    // AAC frame
-        private const val PREBUFFER = SAMPLE_RATE * 40 / 1000             // start reading a ring at 40 ms
-        private const val MAX_LEVEL = SAMPLE_RATE * 250 / 1000            // > 250 ms queued → trim to PREBUFFER
+        private const val PREBUFFER = SAMPLE_RATE * 160 / 1000            // start reading a ring at 160 ms (the video hold, minus 20)
+        private const val MAX_LEVEL = SAMPLE_RATE * 380 / 1000           // > 380 ms queued → trim to PREBUFFER
     }
 
     /**

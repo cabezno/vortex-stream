@@ -154,6 +154,16 @@ class ProgramEncoder extends ChangeNotifier {
     } catch (_) {}
   }
 
+  /// This phone's speaker: off (default) or playing the on-air camera's sound (with headphones).
+  Future<void> setMonitorAudio(bool on) async {
+    try { if (!kIsWeb) await _channel.invokeMethod('setMonitorAudio', {'on': on}); } catch (_) {}
+  }
+
+  /// The switcher's own camera (its renderer's texture, null = off) and whether it is the front one.
+  Future<void> setLocalCamera(int? textureId, bool front) async {
+    try { if (!kIsWeb) await _channel.invokeMethod('setLocalCamera', {'textureId': textureId, 'front': front}); } catch (_) {}
+  }
+
   /// «Solo micrófono» phones: received audio track id → alignment delay (ms). Always mixed into the program.
   Future<void> setMicTracks(Map<String, int> tracks) async {
     try { if (!kIsWeb) await _channel.invokeMethod('setMicTracks', {'tracks': tracks}); } catch (_) {}

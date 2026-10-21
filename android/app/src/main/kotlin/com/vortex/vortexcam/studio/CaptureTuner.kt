@@ -123,8 +123,13 @@ class CaptureTuner(private val engine: FlutterEngine) {
      * [windows] windows of [WINDOW_MS], after a first second of settling.
      */
     private fun apply(trackId: String, s: Session, high: Boolean, windows: Int = 1, onRate: ((Double) -> Unit)?) {
-        val minFps = s.format.framerate.min / s.fpsUnit
         val maxFps = s.format.framerate.max / s.fpsUnit
+        // A steady rate (2026-10-20): WebRTC asks for e.g. 7-30 fps, and in a dim room the camera stretched the
+        // exposure and fell to ~15 fps - the program stuttered on that camera. Take the camera's range with the same
+        // top and a floor of at least 24 (24-30, else 30-30): a darker or noisier picture, but every frame.
+        val steady = s.chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
+            ?.filter { it.upper == maxFps && it.lower >= 24 }?.minByOrNull { it.lower }
+        val minFps = steady?.lower ?: (s.format.framerate.min / s.fpsUnit)
         val b = try { s.device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD) } catch (e: Exception) {
             Log.w(TAG, "createCaptureRequest: ${e.message}"); return
         }

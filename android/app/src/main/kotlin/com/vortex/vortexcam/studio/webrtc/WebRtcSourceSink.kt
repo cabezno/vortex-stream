@@ -27,12 +27,26 @@ class WebRtcSourceSink : VideoSink {
     /** Colour correction of this source in the program (ColorMatch); null = as it comes. */
     @Volatile var grade: ColorGrade? = null
 
+    /** Added to every frame's rotation (the switcher's own camera follows the phone's physical orientation). */
+    @Volatile var extraRotation: Int = 0
+
     // Keep a COPY, never the decoder's own frame. A decoded WebRTC frame is usually a texture of the decoder's
     // SurfaceTextureHelper, which has only ONE frame in flight: holding it until the next onFrame() starves the
     // decoder — it froze after ~1 frame (framesReceived kept growing, framesDecoded stuck; diagnosed 2026-09-29 and
     // again 2026-10-04 on a Galaxy A10). toI420() copies it (GPU readback, on the decoder thread where its EGL
     // context is current) and the original is released by the caller right after onFrame returns.
     override fun onFrame(frame: VideoFrame) {
+        val extra = extraRotation
+        if (extra != 0) {
+            frame.buffer.retain()
+            val f = VideoFrame(frame.buffer, (frame.rotation + extra) % 360, frame.timestampNs)
+            try { onFrameRotated(f) } finally { f.release() }
+            return
+        }
+        onFrameRotated(frame)
+    }
+
+    private fun onFrameRotated(frame: VideoFrame) {
         val copy: HeldFrame = gpuCopy(frame) ?: try {
             val cropped = coverBox?.let { cropFor(frame.buffer, frame.rotation, it) }
             val i420 = try { (cropped ?: frame.buffer).toI420() } finally { cropped?.release() }
@@ -185,11 +199,15 @@ class WebRtcSourceSink : VideoSink {
 
     companion object {
         /** ~0.6 s at 30 fps: the alignment is capped at 500 ms anyway. */
-        const val MAX_FRAMES = 18
+        const val MAX_FRAMES = 26
         const val MAX_BYTES = 64L * 1024 * 1024
-        const val MAX_GPU_BYTES = 128L * 1024 * 1024
-        /** Hold that absorbs Wi-Fi bursts (on top of the alignment delay). */
-        const val JITTER_MS = 60
+        const val MAX_GPU_BYTES = 160L * 1024 * 1024
+        /**
+         * Hold that absorbs Wi-Fi bursts and late frames (on top of the alignment delay). 60 ms until 2026-10-20: on a
+         * 2.4 GHz home network the cameras lost 2–4 % of packets and their retransmitted frames arrived 100–200 ms
+         * late — too late for the program, which stuttered. The program audio is held as much (ProgramAudioEncoder).
+         */
+        const val JITTER_MS = 180
         /** A frame this much later than the on-time transit = the stream restarted, not jitter. */
         const val RESYNC_NS = 1_000_000_000L
     }

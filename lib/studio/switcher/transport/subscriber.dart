@@ -16,6 +16,13 @@ class WebRtcSubscriber extends ChangeNotifier {
   final Map<String, RTCVideoRenderer> _renderers = {};
   String? _activeAudioPeerId;
 
+  /// A camera's ICE candidates that arrived before its offer was applied. A camera sends its offer and, right
+  /// behind it, a burst of candidates; they used to arrive while the switcher was still closing the old connection
+  /// or creating the new one (pc=false) and were dropped - with two cameras joining at once the camera's own
+  /// addresses were all lost and the connection never formed (camera «connected» with 0 bytes sent, black tile,
+  /// 2026-10-20). Held here and added once the offer is set.
+  final Map<String, List<RTCIceCandidate>> _earlyCandidates = {};
+
   WebRtcSubscriber({required this.roomHost}) {
     _setupRoomListeners();
   }
@@ -61,6 +68,8 @@ class WebRtcSubscriber extends ChangeNotifier {
   Future<void> _handleOffer(OfferMessage offer) async {
     final peerId = offer.from;
     debugPrint('[WebRtcSubscriber] Received offer from $peerId');
+    // From here until the offer is applied, this camera's candidates wait (see [_earlyCandidates]).
+    _earlyCandidates.putIfAbsent(peerId, () => []);
 
     // Clean up any existing connection for this peer
     await _closePeer(peerId);
@@ -98,7 +107,15 @@ class WebRtcSubscriber extends ChangeNotifier {
       );
     };
 
-    pc.onTrack = (RTCTrackEvent event) async {
+    // A camera's tracks are wired up (renderer, enabled, stream) only once its offer is applied. While the offer is
+    // being applied WebRTC announces each track from its signaling thread (flutter_webrtc's onAddTrack walks the
+    // connection's transceivers there), and wiring the first track right away made flutter_webrtc walk the same
+    // transceivers from the main thread (getTrackForId when the track is not registered yet): one disposed what the
+    // other was disposing — «RtpTransceiver has been disposed» in a JNI callback, SIGABRT of the whole switcher when a
+    // camera joined (2026-10-20).
+    final pendingTracks = <RTCTrackEvent>[];
+    var negotiating = true;
+    Future<void> handleTrack(RTCTrackEvent event) async {
       // Robusto: si el track llega SIN stream (típico del video por addTransceiver
       // con simulcast), igual lo montamos en un stream propio para poder renderizarlo.
       MediaStream stream;
@@ -125,17 +142,26 @@ class WebRtcSubscriber extends ChangeNotifier {
 
       debugPrint('[WebRtcSubscriber] Received track (${event.track.kind}, streams=${event.streams.length}) for $peerId');
       notifyListeners();
+    }
+    pc.onTrack = (RTCTrackEvent event) {
+      if (negotiating) { pendingTracks.add(event); } else { handleTrack(event); }
     };
 
     // Set Remote Description (the Camera's Offer)
     await pc.setRemoteDescription(RTCSessionDescription(offer.sdp, 'offer'));
+    final early = _earlyCandidates.remove(peerId) ?? const <RTCIceCandidate>[];
+    for (final c in early) {
+      try { await pc.addCandidate(c); } catch (e) { debugPrint('[WebRtcSubscriber] candidate from $peerId: $e'); }
+    }
+    if (early.isNotEmpty) debugPrint('[WebRtcSubscriber] ${early.length} early candidates from $peerId added');
 
     // Create SDP Answer (sin constraints legacy; unified-plan responde recvonly
     // automáticamente al offer sendonly de la cámara).
     final answer = await pc.createAnswer({});
     await pc.setLocalDescription(answer);
 
-    // Send Answer back to Camera
+    // The answer goes out at once, ahead of this switcher's own candidates (gathering starts with
+    // setLocalDescription): wiring the tracks first let the candidates reach the camera before its answer.
     roomHost.sendToPeer(
       peerId,
       AnswerMessage(
@@ -144,6 +170,12 @@ class WebRtcSubscriber extends ChangeNotifier {
         sdp: answer.sdp ?? '',
       ),
     );
+
+    negotiating = false;
+    for (final e in pendingTracks) {
+      await handleTrack(e);
+    }
+    pendingTracks.clear();
 
     // DIAGNÓSTICO: log de stats de recepción de video cada 3s
     Timer.periodic(const Duration(seconds: 3), (t) async {
@@ -201,20 +233,24 @@ class WebRtcSubscriber extends ChangeNotifier {
 
   /// Handles incoming remote ICE candidates
   Future<void> _handleCandidate(IceCandidateMessage msg) async {
+    final candMap = msg.candidate;
+    final cand = RTCIceCandidate(
+      candMap['candidate'] as String?,
+      candMap['sdpMid'] as String?,
+      candMap['sdpMLineIndex'] as int?,
+    );
+    final early = _earlyCandidates[msg.from];
     final pc = _peerConnections[msg.from];
-    debugPrint('[WebRtcSubscriber] remote candidate from ${msg.from} (pc=${pc != null})');
-    if (pc != null) {
-      final candMap = msg.candidate;
-      final cand = RTCIceCandidate(
-        candMap['candidate'] as String?,
-        candMap['sdpMid'] as String?,
-        candMap['sdpMLineIndex'] as int?,
-      );
-      await pc.addCandidate(cand);
+    if (early != null || pc == null) {
+      // The offer is still being applied (or has not arrived): keep it for then.
+      (early ?? (_earlyCandidates[msg.from] = [])).add(cand);
+      return;
     }
+    try { await pc.addCandidate(cand); } catch (e) { debugPrint('[WebRtcSubscriber] candidate from ${msg.from}: $e'); }
   }
 
   void _handlePeerLeft(String peerId) {
+    _earlyCandidates.remove(peerId);
     _closePeer(peerId);
   }
 
