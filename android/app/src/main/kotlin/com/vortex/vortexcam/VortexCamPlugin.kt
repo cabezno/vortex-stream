@@ -868,7 +868,7 @@ class VortexCamPlugin(
                 }
                 setupAudio()
 
-                srtSocket = SrtSocket(ip, port, latencyMs, sourceName).also { sk ->
+                srtSocket = SrtSocket(ip, port, latencyMs, srtStreamId(sourceName)).also { sk ->
                     sk.onReconnected = { downMs ->
                         requestIdr()   // the receiver must not wait for the next GOP
                         Thread { sendLogBytes("[srt] reconectado a $ip:$port por ${sk.mode} tras ${downMs} ms\n", "reconnect") }.start()
@@ -918,6 +918,23 @@ class VortexCamPlugin(
     // What SAMBA still has to turn the SRT picture (CVO 0..3): the camera's upright turn minus what the relay
     // already turned in pixels (landscape upside down). Portrait used to rely on KEY_ROTATION, which MPEG-TS
     // never carries → the phone held upright arrived sideways in SAMBA (2026-10-08).
+    /**
+     * SRT stream id, SRT Access Control style: «#!::r=<camera name>,u=<phone id>». SAMBA shows r= and tells phones
+     * apart by u=: two phones with the same name (same model → same default name) keep their own source and suffix
+     * whatever order they connect in (2026-10-21). u = 8 hex of SHA-256(ANDROID_ID): fixed per phone (and app
+     * signing key), survives reinstalls and reconnections, and does not expose the raw id. ',' would split the
+     * fields, so it becomes a space in the name.
+     */
+    private fun srtStreamId(name: String): String {
+        val raw = try {
+            android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID)
+        } catch (_: Exception) { null } ?: (Build.MANUFACTURER + Build.MODEL + Build.FINGERPRINT)
+        val id = java.security.MessageDigest.getInstance("SHA-256").digest(raw.toByteArray())
+            .take(4).joinToString("") { "%02x".format(it) }
+        val r = name.replace(',', ' ').trim().take(400)   // SRTO_STREAMID holds 512 bytes
+        return if (r.isEmpty()) "#!::u=$id" else "#!::r=$r,u=$id"
+    }
+
     private fun srtCvo(): Int = ((streamUprightDegrees() - (relay?.rotation ?: 0) + 360) % 360) / 90
 
     // Orientation tied to the FRAMES, not to the moment of the turn (2026-10-09). The video reaches SAMBA a few hundred
