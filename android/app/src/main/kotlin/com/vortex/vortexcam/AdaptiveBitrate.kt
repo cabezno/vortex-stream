@@ -48,9 +48,6 @@ class AdaptiveBitrate(
         set(maxOf(floorBps, minOf(currentBps / 2, measured)), now, "baja fuerte — $detail")
     }
 
-    /** Not lossy, not clean either (data in flight): no change, and the 8 s clean wait starts over. */
-    @Synchronized fun hold() { cleanSinceMs = System.currentTimeMillis() }
-
     private fun set(bps: Int, now: Long, why: String) {
         if (bps == currentBps) return
         currentBps = bps; lastChangeMs = now

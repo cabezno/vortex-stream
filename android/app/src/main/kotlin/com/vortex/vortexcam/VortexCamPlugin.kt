@@ -1720,6 +1720,7 @@ class VortexCamPlugin(
                 if (streamId.isNotEmpty()) opt(SockOpt.STREAMID, streamId)
                 s.connect(ip, port)
                 srt = s; mode = "SRT"; linkUp = true
+                srtUpAtMs = System.currentTimeMillis(); severeStreak = 0
                 Log.i(TAG, "SRT (UDP, libsrt) connected → $ip:$port, latency $latencyMs ms")
                 startReceive(s)
                 true
@@ -1808,6 +1809,8 @@ class VortexCamPlugin(
         }
 
         private var lastStatsMs = 0L
+        @Volatile private var srtUpAtMs = 0L     // when this SRT connection came up
+        private var severeStreak = 0             // consecutive 1 s samples with a queue over 2x the latency
         // Summed / maxed over the [pace] window (DT-293): what libsrt itself queued, resent and dropped.
         private val paceLock = Any()
         private var paceSndBufMaxMs = 0
@@ -1839,24 +1842,30 @@ class VortexCamPlugin(
             }
             val sent = st.pktSent
             val lossPct = if (sent > 0) st.pktSndLoss * 100.0 / sent else 0.0
-            // Lost and resent packets are SRT's normal work. The send queue (msSndBuf) is the signal (DT-302, 2026-10-21):
-            //  - packets dropped (they waited past the latency) or a queue over twice the latency window = the Wi-Fi is
-            //    far from carrying this rate: cut hard, toward what libsrt measured it delivered. A 4K start at 30 Mbps
-            //    on a 2.4 GHz Wi-Fi used to take ~10 s of 1 s queues and ~1500 drops per 2 s to come down by -30 % steps;
-            //  - queue over the latency or loss > 5 % = a bit too much: the usual -30 %;
-            //  - queue between RTT and the latency is SRT's normal in-flight data: hold, do not count as clean. Taking
-            //    it as «too much» (queue > 80 ms on 80 ms latency) kept the A10 bouncing on its 2 Mbps floor.
+            // Lost and resent packets are SRT's normal work. The send queue (msSndBuf, time span of unacknowledged data)
+            // is the signal, measured against latency + RTT - the data in flight on a slow link (DT-302/304, 2026-10-21):
+            //  - packets dropped (they waited past the latency), or a queue over 2x latency + RTT for 2 s in a row = the
+            //    Wi-Fi is far from carrying this rate: cut hard, toward what libsrt measured it delivered. A 4K start at
+            //    30 Mbps on a 2.4 GHz Wi-Fi used to take ~10 s of 1 s queues and ~1500 drops per 2 s to come down;
+            //  - queue over latency + RTT, or loss > 5 % = a bit too much: the usual -30 %;
+            //  - else clean (rises after 8 s). A clean 5 GHz link sits at a 25-60 ms queue: a «hold» tier at RTT + 20 ms
+            //    kept the Redmi stuck at 5 Mbps for minutes.
+            // The first 3 s of a connection only count drops: the encoder starts with a stall and a burst (and a 4K
+            // IDR), a 340 ms queue that is not congestion - it cut the Redmi 21 -> 10.5 -> 5 Mbps on a clean Wi-Fi.
             val q = st.msSndBuf
+            val rtt = st.msRTT.toInt()
             val detail = "SRT pérdida ${"%.1f".format(lossPct)} %, descartados ${st.pktSndDrop}, " +
-                "buffer $q ms, RTT ${st.msRTT.toInt()} ms"
+                "buffer $q ms, RTT $rtt ms"
+            val warmingUp = now - srtUpAtMs < 3000
+            severeStreak = if (q > 2 * latencyMs + rtt) severeStreak + 1 else 0
             val a = abr
             when {
-                st.pktSndDrop > 0 || q > 2 * latencyMs -> a?.reportSevere(st.mbpsSendRate, detail)
-                lossPct > 5.0 || q > latencyMs -> a?.report(true, detail)
-                q > maxOf(20, st.msRTT.toInt() + 20) -> a?.hold()
+                st.pktSndDrop > 0 || (!warmingUp && severeStreak >= 2) -> a?.reportSevere(st.mbpsSendRate, detail)
+                warmingUp -> {}
+                lossPct > 5.0 || q > latencyMs + rtt -> a?.report(true, detail)
                 else -> a?.report(false, detail)
             }
-            val lossy = st.pktSndDrop > 0 || lossPct > 5.0 || q > latencyMs
+            val lossy = st.pktSndDrop > 0 || lossPct > 5.0 || q > latencyMs + rtt
             if (lossy) Log.i(TAG, "SRT stats: sent $sent, lost ${st.pktSndLoss}, retrans ${st.pktRetrans}, " +
                 "dropped ${st.pktSndDrop}, sndBuf ${st.msSndBuf} ms, RTT ${st.msRTT} ms, bw ${"%.1f".format(st.mbpsBandwidth)} Mbps")
         }
