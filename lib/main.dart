@@ -11,6 +11,7 @@
 // Preview: RTCVideoView (WHIP) o Texture nativa (SRT/RTMP/SBL).
 // Tally:   pantalla pulsa roja cuando la fuente está al aire (ON AIR).
 // =============================================================================
+import 'services/third_party_licenses.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
@@ -41,6 +42,7 @@ void main() {
   // the PC — so a crash that closes the app still leaves its trail for analysis.
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    registerNativeLicenses();
     await LogService.instance.init();
     // Before anything touches WebRTC: the camera's sound mode picks the phone's audio engine (once per run).
     await CameraAudio.initEngine();
@@ -110,7 +112,12 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   bool              _connecting = false;  // guard against double-tap → duplicate POST
   bool              _showCtrl  = true;
 
-  final _deviceCtrl = TextEditingController(text: 'cam1');
+  final _deviceCtrl = TextEditingController();
+  /// The phone's own name (Android's device name, else its model): the camera name until the user writes another
+  /// one. It names the source in SAMBA (SRT stream id, SBL Hello, WHIP id, OMT) - «cam1» on every phone made the
+  /// SRT cameras indistinguishable (2026-10-21).
+  String _defaultName = 'cam1';
+  String get _camName => _deviceCtrl.text.trim().isEmpty ? _defaultName : _deviceCtrl.text.trim();
   final _logs       = <String>[];
 
   // WHIP preview renderer
@@ -200,11 +207,17 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   Future<void> _loadSaved() async {
     final p = await SharedPreferences.getInstance();
     final name = p.getString('device_name');
-    if (name != null) _deviceCtrl.text = name;
+    try {
+      final n = await _nativeChannel.invokeMethod<String>('deviceName');
+      if (n != null && n.trim().isNotEmpty) _defaultName = n.trim();
+    } catch (_) {}
+    // «cam1» was the old default, saved as-is on every phone: it now means «not chosen».
+    _deviceCtrl.text = (name == null || name.trim().isEmpty || name.trim() == 'cam1') ? _defaultName : name;
+    if (mounted) setState(() {});
     // Ship logs from the very start (before pairing) to the last PC we paired with.
     final lastHost = p.getString('last_engine_host');
     if (lastHost != null && lastHost.isNotEmpty && !LogService.instance.hasTarget) {
-      LogService.instance.configure(host: lastHost, device: _deviceCtrl.text.trim());
+      LogService.instance.configure(host: lastHost, device: _camName);
     }
   }
 
@@ -258,7 +271,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       _config    = cfg;
       _transport = chosen;
     });
-    LogService.instance.configure(host: cfg.host, device: _deviceCtrl.text.trim());
+    LogService.instance.configure(host: cfg.host, device: _camName);
     SharedPreferences.getInstance().then((p) => p.setString('last_engine_host', cfg.host));
 
     // Network layer: if the QR includes WiFi credentials (PC hotspot active),
@@ -404,7 +417,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       final parts = hp.split(':');
       final port = parts.length > 1 ? int.tryParse(parts[1]) ?? 8890 : 8890;
       cfg = ConnectionConfig.fromSblIp(parts[0], port: port,
-          sourceName: _deviceCtrl.text.trim().isEmpty ? 'SambaAir' : _deviceCtrl.text.trim());
+          sourceName: _camName);
       t   = Transport.sbl;
     } else if (proto == 'OMT') {
       // OMT: the phone LISTENS and SAMBA connects to it — the field is only the port to listen on.
@@ -415,7 +428,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       t   = Transport.whip;
     }
     setState(() { _config = cfg; _transport = t; });
-    LogService.instance.configure(host: cfg.host, device: _deviceCtrl.text.trim());
+    LogService.instance.configure(host: cfg.host, device: _camName);
     SharedPreferences.getInstance().then((p) => p.setString('last_engine_host', cfg.host));
     _log('Manual: $proto → $url');
   }
@@ -506,7 +519,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     try {
       // Extract IP + port from WHIP URL
       final uri  = Uri.parse(whip.url);
-      final devId = _deviceCtrl.text.trim().isEmpty ? 'cam1' : _deviceCtrl.text.trim();
+      final devId = _camName;
 
       await conn.connect(
         engineIp:    uri.host,
@@ -546,7 +559,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       height:  cfg.video.height,
       fps:     cfg.video.fps,
       quality: omtCfg?.quality ?? 2,
-      name:    _deviceCtrl.text.trim().isEmpty ? 'ZambaAir' : _deviceCtrl.text.trim(),
+      name:    _camName,
     );
 
     try {
@@ -567,7 +580,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
   }
 
   // -----------------------------------------------------------------------
-  // SRT — CameraX + MediaCodec H.265 → MPEG-TS → libsrt
+  // SRT — Camera2 + MediaCodec → MPEG-TS → SRT (libsrt, UDP; TCP when the SRT handshake fails)
   // -----------------------------------------------------------------------
   Future<void> _connectSrt(ConnectionConfig cfg) async {
     final srtCfg = cfg.srt;
@@ -588,10 +601,10 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       _nativeTexId = srt.textureId;
 
       _log('SRT: conectando a ${srtCfg.host}:${srtCfg.port}...');
-      await srt.connectTo(srtCfg.host, port: srtCfg.port);
+      await srt.connectTo(srtCfg.host, port: srtCfg.port, name: _camName);
       setState(() { _live = true; });
       _setKeepAlive(true);
-      _log('SRT conectado → ${srtCfg.host}:${srtCfg.port}');
+      _log('SRT conectado → ${srtCfg.host}:${srtCfg.port}${srt.link.isEmpty ? '' : ' por ${srt.link}'}');
 
       // Poll stats
       Timer.periodic(const Duration(seconds: 2), (t) {
@@ -658,7 +671,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       await sbl.connect(
         sblCfg.host,
         port:       sblCfg.port,
-        sourceName: _deviceCtrl.text.trim().isEmpty ? 'ZambaAir' : _deviceCtrl.text.trim(),
+        sourceName: _camName,
       );
       setState(() { _live = true; });
       _setKeepAlive(true);
@@ -827,9 +840,9 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
           TextField(
             controller: _deviceCtrl,
             style: SdText.bodyHi,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               labelText: 'Nombre de cámara',
-              hintText: 'cam1',
+              hintText: _defaultName,
               prefixIcon: Icon(SdIcons.videoCamera, size: 20),
             ),
           ),
@@ -1000,7 +1013,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
       Text('PROTOCOLOS', style: SdText.overline),
       const SizedBox(height: 8),
       _LegendRow(color: colorFor(Transport.sbl),  label: 'SBL',  desc: 'LAN · H.264 · protocolo propio de SAMBA'),
-      _LegendRow(color: colorFor(Transport.srt),  label: 'SRT',  desc: 'LAN · H.265 · baja latencia'),
+      _LegendRow(color: colorFor(Transport.srt),  label: 'SRT',  desc: 'LAN · UDP, reenvía lo perdido · baja latencia'),
       _LegendRow(color: colorFor(Transport.whip), label: 'WHIP', desc: 'LAN e internet · H.264 · WebRTC, se adapta a la red'),
       _LegendRow(color: colorFor(Transport.rtmp), label: 'RTMP', desc: 'LAN e internet · H.264 · compatible'),
       _LegendRow(color: colorFor(Transport.omt),  label: 'OMT',  desc: 'LAN · VMX 4:2:2 · máxima calidad'),
@@ -1041,6 +1054,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
     int    latency = 0;
     bool   onAir   = _onAir;
     bool   reconnecting = false;
+    String proto = _transportLabel;
 
     switch (_transport) {
       case Transport.whip:
@@ -1051,6 +1065,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
         final srt = context.watch<SrtConnectionService>();
         bitrate = srt.bitrateMbps;
         reconnecting = srt.reconnecting;
+        if (srt.link.isNotEmpty) proto = srt.link;   // «SRT» or «SRT (TCP)»
         latency = srt.latencyMs;
         onAir   = srt.isOnAir;
       case Transport.rtmp:
@@ -1139,7 +1154,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
           Positioned(
             top: 44,
             right: 16,
-            child: _statsBar(bitrate, latency, _transportLabel, _transportColor, reconnecting: reconnecting),
+            child: _statsBar(bitrate, latency, proto, _transportColor, reconnecting: reconnecting),
           ),
 
           // Log button

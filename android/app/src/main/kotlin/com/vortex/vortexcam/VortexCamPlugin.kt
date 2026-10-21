@@ -53,9 +53,24 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import com.vortex.vortexcam.studio.rtmp.RtmpStreamer
+import io.github.thibaultbee.srtdroid.core.Srt
+import io.github.thibaultbee.srtdroid.core.enums.SockOpt
+import io.github.thibaultbee.srtdroid.core.enums.SockStatus
+import io.github.thibaultbee.srtdroid.core.enums.Transtype
+import io.github.thibaultbee.srtdroid.core.models.SrtSocket as LibSrtSocket
 
 private const val TAG     = "VortexCam"
 private const val CHANNEL = "com.vortex.vortexcam/native"
+
+/** SRT payload: 7 MPEG-TS packets of 188 bytes, the size every SRT receiver expects. */
+private const val SRT_PAYLOAD = 1316
+
+/** libsrt (srtdroid), started once. Not ready (library missing on this ABI, startup failed) = TCP only. */
+private object SrtLib {
+    val ready: Boolean by lazy {
+        try { Srt.startUp(); true } catch (t: Throwable) { Log.w("VortexCam", "libsrt unavailable, TCP only: $t"); false }
+    }
+}
 
 class VortexCamPlugin(
     private val context:         Context,
@@ -226,6 +241,14 @@ class VortexCamPlugin(
             }
             // Changes when Android or the app is updated → the capability probe must run again.
             "capsStamp" -> result.success(DeviceCaps.stamp(context))
+            // The phone's own name, the app's default camera name (SAMBA names the source after it): the name the user
+            // sees in Android's «About phone» («Redmi Note 14 Pro+ 5G»), else Build.MODEL («SM-A105M»).
+            "deviceName" -> {
+                val n = try {
+                    android.provider.Settings.Global.getString(context.contentResolver, android.provider.Settings.Global.DEVICE_NAME)
+                } catch (_: Exception) { null }
+                result.success(n?.trim()?.takeIf { it.isNotEmpty() } ?: Build.MODEL)
+            }
             // What this phone can do (encoders, cameras, OMT speed) — the app offers only what works.
             "listCameras" -> result.success(DeviceCaps.listCameras(context))
             // Android 9 and older cannot join a Wi-Fi from an app: open the system's Wi-Fi list for the user.
@@ -286,6 +309,7 @@ class VortexCamPlugin(
                                   // false while SRT/RTMP is reconnecting by itself (the UI can say so)
                                   "linkUp" to (srtSocket?.linkUp ?: (rtmpClient?.isConnected ?: true)),
                                   "reconnects" to ((srtSocket?.reconnects ?: 0) + (rtmpClient?.reconnects ?: 0)),
+                                  "transport" to (srtSocket?.mode ?: ""),
                                   "targetMbps" to ((abr?.currentBps ?: encBitrate) / 1e6)))
 
             "startSbl"         -> startSbl(call, result)
@@ -303,6 +327,12 @@ class VortexCamPlugin(
             // the MediaCodec/AudioTrack — reopening those on every toggle would add an
             // audible gap and risks fighting the Camera2 session (see the freeze-fix
             // comment on encoder surface dimensions elsewhere in this file).
+            // SAMBA's tally for this phone (SBL, and SRT once SAMBA sends it back): known = heard in the last 6 s.
+            "getTally" -> {
+                val fresh = tallyAtMs > 0 && System.currentTimeMillis() - tallyAtMs < 6000
+                result.success(mapOf("known" to fresh, "pgm" to (fresh && tallyPgm), "prv" to (fresh && tallyPrv)))
+            }
+
             "setTalkbackMuted" -> {
                 talkbackMuted.set(call.argument<Boolean>("muted") ?: false)
                 result.success(null)
@@ -712,6 +742,7 @@ class VortexCamPlugin(
 
     private fun stopStream() {
         if (!streaming.getAndSet(false)) return
+        tallyAtMs = 0L; tallyPgm = false; tallyPrv = false
         encodeThread?.join(2000); encodeThread = null
         audioInThread?.join(1000);  audioInThread  = null
         audioOutThread?.join(1000); audioOutThread = null
@@ -827,6 +858,7 @@ class VortexCamPlugin(
         val keyframeMs  = call.argument<Int>("keyframeMs")    ?: 2000
         val latencyMs   = call.argument<Int>("srtLatencyMs")  ?: 80
         val codec       = call.argument<String>("codec")      ?: "h264"
+        val sourceName  = call.argument<String>("sourceName") ?: ""
 
         thread(name = "SrtStart") {
             try {
@@ -836,10 +868,10 @@ class VortexCamPlugin(
                 }
                 setupAudio()
 
-                srtSocket = SrtSocket(ip, port, latencyMs).also { sk ->
+                srtSocket = SrtSocket(ip, port, latencyMs, srtStreamId(sourceName)).also { sk ->
                     sk.onReconnected = { downMs ->
                         requestIdr()   // the receiver must not wait for the next GOP
-                        Thread { sendLogBytes("[srt] reconectado a $ip:$port tras ${downMs} ms\n", "reconnect") }.start()
+                        Thread { sendLogBytes("[srt] reconectado a $ip:$port por ${sk.mode} tras ${downMs} ms\n", "reconnect") }.start()
                     }
                 }
                 if (!srtSocket!!.connect()) throw Exception("SRT connect to $ip:$port failed")
@@ -859,7 +891,9 @@ class VortexCamPlugin(
                 }
 
                 result.success(null)
-                Log.i(TAG, "SRT streaming → $ip:$port ${width}x$height @${bitrate/1000}kbps $codec")
+                val how = srtSocket?.mode ?: "?"
+                Log.i(TAG, "SRT streaming → $ip:$port ${width}x$height @${bitrate/1000}kbps $codec por $how")
+                Thread { sendLogBytes("[srt] transporte: $how → $ip:$port (latencia $latencyMs ms)\n", "transport") }.start()
             } catch (e: Exception) {
                 Log.e(TAG, "startSrt failed: $e")
                 stopStream()
@@ -884,6 +918,23 @@ class VortexCamPlugin(
     // What SAMBA still has to turn the SRT picture (CVO 0..3): the camera's upright turn minus what the relay
     // already turned in pixels (landscape upside down). Portrait used to rely on KEY_ROTATION, which MPEG-TS
     // never carries → the phone held upright arrived sideways in SAMBA (2026-10-08).
+    /**
+     * SRT stream id, SRT Access Control style: «#!::r=<camera name>,u=<phone id>». SAMBA shows r= and tells phones
+     * apart by u=: two phones with the same name (same model → same default name) keep their own source and suffix
+     * whatever order they connect in (2026-10-21). u = 8 hex of SHA-256(ANDROID_ID): fixed per phone (and app
+     * signing key), survives reinstalls and reconnections, and does not expose the raw id. ',' would split the
+     * fields, so it becomes a space in the name.
+     */
+    private fun srtStreamId(name: String): String {
+        val raw = try {
+            android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID)
+        } catch (_: Exception) { null } ?: (Build.MANUFACTURER + Build.MODEL + Build.FINGERPRINT)
+        val id = java.security.MessageDigest.getInstance("SHA-256").digest(raw.toByteArray())
+            .take(4).joinToString("") { "%02x".format(it) }
+        val r = name.replace(',', ' ').trim().take(400)   // SRTO_STREAMID holds 512 bytes
+        return if (r.isEmpty()) "#!::u=$id" else "#!::r=$r,u=$id"
+    }
+
     private fun srtCvo(): Int = ((streamUprightDegrees() - (relay?.rotation ?: 0) + 360) % 360) / 90
 
     // Orientation tied to the FRAMES, not to the moment of the turn (2026-10-09). The video reaches SAMBA a few hundred
@@ -917,6 +968,11 @@ class VortexCamPlugin(
         var lastCvo = -1
         var lastCvoSentMs = 0L
         var lastCvoCheckMs = 0L
+        // Pacing, every 5 s (DT-293): to tell «the phone/encoder is late» from «the phone sends evenly and the network
+        // bunches it». Wall clock (nanoTime), video frames only; SAMBA measures the same on arrival.
+        var paceStartNs = System.nanoTime()
+        var lastOutNs = 0L; var lastSendNs = 0L; var lastPtsUs = -1L
+        var maxOutGapNs = 0L; var maxSendGapNs = 0L; var maxSendNs = 0L; var maxPtsGapUs = 0L; var paceFrames = 0
         resetCvo()
         while (streaming.get()) {
             // Orientation: a change is ARMED when the phone turns (checked every 250 ms) and sent with the first frame
@@ -941,7 +997,15 @@ class VortexCamPlugin(
             val buf = encoder!!.getOutputBuffer(idx) ?: run {
                 encoder!!.releaseOutputBuffer(idx, false); continue
             }
-            if ((info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0) {
+            val isFrame = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
+            if (isFrame) {
+                val tOut = System.nanoTime()
+                if (lastOutNs != 0L) maxOutGapNs = maxOf(maxOutGapNs, tOut - lastOutNs)
+                lastOutNs = tOut
+                if (lastPtsUs >= 0) maxPtsGapUs = maxOf(maxPtsGapUs, info.presentationTimeUs - lastPtsUs)
+                lastPtsUs = info.presentationTimeUs
+            }
+            if (isFrame) {
                 val cvo = cvoForFrame(info.presentationTimeUs)
                 if (cvo != lastCvo) {                    // right before the first frame shot with it
                     synchronized(sendLock) { for (p in muxer.muxRotation(cvo)) srtSocket?.send(p) }
@@ -958,8 +1022,28 @@ class VortexCamPlugin(
             if (pkts.isNotEmpty()) {
                 val joined = ByteArray(pkts.size * 188)
                 for ((i, pkt) in pkts.withIndex()) pkt.copyInto(joined, i * 188)
+                val t0 = System.nanoTime()
                 synchronized(sendLock) { srtSocket?.send(joined) }
+                if (isFrame) {
+                    val t1 = System.nanoTime()
+                    if (lastSendNs != 0L) maxSendGapNs = maxOf(maxSendGapNs, t0 - lastSendNs)
+                    lastSendNs = t0
+                    maxSendNs = maxOf(maxSendNs, t1 - t0)
+                    paceFrames++
+                }
                 bytesSent.addAndGet(joined.size.toLong())
+            }
+            val nowNs = System.nanoTime()
+            if (nowNs - paceStartNs >= 5_000_000_000L) {
+                val sock = srtSocket
+                val msg = "[pace] ${sock?.mode ?: "-"} · $paceFrames cuadros en 5 s · codificador: mayor salto " +
+                    "${maxOutGapNs / 1_000_000} ms (PTS ${maxPtsGapUs / 1000} ms) · envío: mayor salto " +
+                    "${maxSendGapNs / 1_000_000} ms, más largo ${maxSendNs / 1_000_000} ms" +
+                    (sock?.takePaceStats()?.let { " · $it" } ?: "") + "\n"
+                Log.i(TAG, msg.trim())
+                Thread { sendLogBytes(msg, "pace") }.start()
+                paceStartNs = nowNs
+                maxOutGapNs = 0L; maxSendGapNs = 0L; maxSendNs = 0L; maxPtsGapUs = 0L; paceFrames = 0
             }
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
@@ -1618,22 +1702,27 @@ class VortexCamPlugin(
     }
 
     // ====================================================================
-    // SrtSocket — plain TCP MPEG-TS transport.
-    // VortexEngine listens on TCP + UDP (SRT) on the same port.
-    // When libsrt.so is available it will be preferred (true SRT with FEC/CC).
-    // Until then, TCP delivers reliable MPEG-TS on LAN with ~1ms extra latency.
+    // SrtSocket — MPEG-TS to SAMBA over real SRT (libsrt through srtdroid: UDP, live mode), TCP as the fallback.
     // ====================================================================
-    // SRT over TCP that HEALS ITSELF. A dead link used to go unnoticed: send() swallowed every error and a write
-    // into a dead Wi-Fi could block for a minute (SAMBA cut the phone after 5 s; the phone noticed > 60 s later,
-    // 2026-10-03). Now:
-    //   - a failed write (receiver closed / reset) or a write blocked > 3 s marks the link DOWN at once;
-    //   - while down, packets are dropped (the camera and the encoder keep running) and a watchdog reconnects
-    //     every second; on success onReconnected asks the encoder for an IDR (PAT/PMT ride along with it).
-    private inner class SrtSocket(val ip: String, val port: Int, val latencyMs: Int) {
+    // Until 2026-10-20 this was plain TCP («SRT» in name only). On a lossy Wi-Fi TCP stalls every later byte until a
+    // lost one is resent (head-of-line): a Galaxy A10 on 2.4 GHz sending 15 Mbps averaged 30 fps in SAMBA but paused
+    // 260-390 ms every few seconds. SRT resends only what was lost, inside a fixed latency window, and drops what is
+    // too late instead of stalling the stream.
+    //   - SRT caller, live mode, latency = srtLatencyMs, 1316-byte messages (7 TS packets), 25 % overhead for resends.
+    //   - When the SRT handshake does not complete (~2 s: an older SAMBA, a busy listener) it falls back to TCP on the
+    //     same port, as before. The mode in use is in [mode] («SRT» / «SRT (TCP)»), on screen and in the logs.
+    // It HEALS ITSELF (2026-10-03): a failed write or one blocked > 3 s marks the link DOWN at once; while down,
+    // packets are dropped (camera and encoder keep running) and a watchdog reconnects every second, trying the mode
+    // that last worked first; on success onReconnected asks the encoder for an IDR.
+    private inner class SrtSocket(val ip: String, val port: Int, val latencyMs: Int, val streamId: String) {
+        @Volatile private var srt: LibSrtSocket? = null
         @Volatile private var tcpSocket: Socket? = null
         @Volatile private var out: OutputStream? = null
         @Volatile var linkUp = false; private set
         @Volatile var reconnects = 0; private set
+        /** «SRT» (UDP) or «SRT (TCP)» (fallback); empty before the first connection. */
+        @Volatile var mode = ""; private set
+        @Volatile private var rttMs = 0
         @Volatile private var writeStartMs = 0L        // > 0 while a write is in progress
         @Volatile private var maxWriteMs = 0L          // longest write since the last bitrate sample
         @Volatile private var closed = false
@@ -1641,17 +1730,63 @@ class VortexCamPlugin(
         private var watchdog: Thread? = null
         var onReconnected: ((downMs: Long) -> Unit)? = null
 
-        private fun open(): Boolean = try {
+        private fun openSrt(): Boolean {
+            if (!SrtLib.ready) return false
+            val s = try { LibSrtSocket() } catch (t: Throwable) { Log.w(TAG, "SRT socket: $t"); return false }
+            fun opt(o: SockOpt, v: Any) = try { s.setSockFlag(o, v) } catch (e: Exception) { Log.w(TAG, "SRT $o=$v: $e") }
+            return try {
+                s.setSockFlag(SockOpt.TRANSTYPE, Transtype.LIVE)
+                s.setSockFlag(SockOpt.LATENCY, latencyMs)
+                opt(SockOpt.PAYLOADSIZE, SRT_PAYLOAD)
+                opt(SockOpt.MAXBW, 0L)                 // 0 = input rate + OHEADBW (room for the resends)
+                opt(SockOpt.OHEADBW, 25)
+                opt(SockOpt.CONNTIMEO, 2000)
+                opt(SockOpt.PEERIDLETIMEO, 3000)       // SAMBA silent 3 s = link down (the default is 5 s)
+                if (streamId.isNotEmpty()) opt(SockOpt.STREAMID, streamId)
+                s.connect(ip, port)
+                srt = s; mode = "SRT"; linkUp = true
+                srtUpAtMs = System.currentTimeMillis(); severeStreak = 0
+                Log.i(TAG, "SRT (UDP, libsrt) connected → $ip:$port, latency $latencyMs ms")
+                startReceive(s)
+                true
+            } catch (e: Exception) {
+                Log.w(TAG, "SRT connect to $ip:$port failed: $e")
+                try { s.close() } catch (_: Exception) {}
+                false
+            }
+        }
+
+        /** What SAMBA sends back on this SRT connection (tally, return audio): see [processSrtReturn]. */
+        private fun startReceive(s: LibSrtSocket) {
+            thread(name = "SrtReceive", isDaemon = true) {
+                val buf = ByteArray(1500)
+                while (!closed && srt === s) {
+                    try {
+                        val n = s.recv(buf, 0, buf.size)
+                        if (n > 0) processSrtReturn(buf, n)
+                    } catch (e: Exception) {
+                        if (closed || srt !== s) break
+                        try { Thread.sleep(50) } catch (_: InterruptedException) { break }
+                    }
+                }
+            }
+        }
+
+        private fun openTcp(): Boolean = try {
             val sk = Socket()
             sk.tcpNoDelay = true; sk.keepAlive = true; sk.soTimeout = 0
             sk.connect(java.net.InetSocketAddress(ip, port), 2000)
-            tcpSocket = sk; out = sk.getOutputStream(); linkUp = true
-            Log.i(TAG, "SRT/TCP connected → $ip:$port")
+            tcpSocket = sk; out = sk.getOutputStream(); mode = "SRT (TCP)"; linkUp = true
+            Log.i(TAG, "SRT/TCP (fallback) connected → $ip:$port")
             true
         } catch (e: Exception) {
             Log.w(TAG, "SRT/TCP connect to $ip:$port failed: $e")
             false
         }
+
+        /** The mode that worked last goes first; SRT first on the first connection. */
+        private fun open(): Boolean =
+            if (mode == "SRT (TCP)") openTcp() || openSrt() else openSrt() || openTcp()
 
         fun connect(): Boolean {
             val ok = open()
@@ -1659,12 +1794,24 @@ class VortexCamPlugin(
             return ok
         }
 
+        /** [data] is whole 188-byte TS packets. SRT carries them as messages of up to 7 (1316 bytes). */
         fun send(data: ByteArray) {
-            val o = out ?: return
             if (!linkUp) return
             val t0 = System.currentTimeMillis()
             writeStartMs = t0
-            try { o.write(data) } catch (e: Exception) { markDown("write failed: $e") }
+            try {
+                val s = srt
+                if (s != null) {
+                    var off = 0
+                    while (off < data.size) {
+                        val n = minOf(SRT_PAYLOAD, data.size - off)
+                        s.send(data, off, n)
+                        off += n
+                    }
+                } else {
+                    (out ?: return).write(data)
+                }
+            } catch (e: Exception) { markDown("write failed: $e") }
             finally {
                 writeStartMs = 0L
                 val dt = System.currentTimeMillis() - t0
@@ -1676,9 +1823,76 @@ class VortexCamPlugin(
             if (!linkUp || closed) return
             linkUp = false
             downSinceMs = System.currentTimeMillis()
-            Log.w(TAG, "SRT/TCP link DOWN ($why) — reconnecting every 1 s")
-            try { tcpSocket?.close() } catch (_: Exception) {}   // unblocks a writer stuck in write()
-            tcpSocket = null; out = null
+            Log.w(TAG, "$mode link DOWN ($why) — reconnecting every 1 s")
+            dropTransport()   // unblocks a writer stuck in a write
+        }
+
+        private fun dropTransport() {
+            try { srt?.close() } catch (_: Exception) {}
+            try { tcpSocket?.close() } catch (_: Exception) {}
+            srt = null; tcpSocket = null; out = null
+        }
+
+        private var lastStatsMs = 0L
+        @Volatile private var srtUpAtMs = 0L     // when this SRT connection came up
+        private var severeStreak = 0             // consecutive 1 s samples with a queue over 2x the latency
+        // Summed / maxed over the [pace] window (DT-293): what libsrt itself queued, resent and dropped.
+        private val paceLock = Any()
+        private var paceSndBufMaxMs = 0
+        private var paceRetrans = 0L
+        private var paceLost = 0L
+        private var paceDropped = 0L
+        private var paceRttMaxMs = 0
+
+        /** libsrt's side of the [pace] line since the last call (empty on the TCP fallback), then reset. */
+        fun takePaceStats(): String? = synchronized(paceLock) {
+            if (srt == null) return@synchronized null
+            val r = "SRT: colchón de envío máx $paceSndBufMaxMs ms, reenviados $paceRetrans, perdidos $paceLost, " +
+                "descartados $paceDropped, RTT máx $paceRttMaxMs ms"
+            paceSndBufMaxMs = 0; paceRetrans = 0; paceLost = 0; paceDropped = 0; paceRttMaxMs = 0
+            r
+        }
+
+        private fun srtSample(s: LibSrtSocket, now: Long) {
+            if (now - lastStatsMs < 1000) return
+            lastStatsMs = now
+            val st = try { s.bstats(true) } catch (e: Exception) { return }
+            rttMs = st.msRTT.toInt()
+            synchronized(paceLock) {
+                paceSndBufMaxMs = maxOf(paceSndBufMaxMs, st.msSndBuf)
+                paceRetrans += st.pktRetrans.toLong()
+                paceLost += st.pktSndLoss.toLong()
+                paceDropped += st.pktSndDrop.toLong()
+                paceRttMaxMs = maxOf(paceRttMaxMs, st.msRTT.toInt())
+            }
+            val sent = st.pktSent
+            val lossPct = if (sent > 0) st.pktSndLoss * 100.0 / sent else 0.0
+            // Lost and resent packets are SRT's normal work. The send queue (msSndBuf, time span of unacknowledged data)
+            // is the signal, measured against latency + RTT - the data in flight on a slow link (DT-302/304, 2026-10-21):
+            //  - packets dropped (they waited past the latency), or a queue over 2x latency + RTT for 2 s in a row = the
+            //    Wi-Fi is far from carrying this rate: cut hard, toward what libsrt measured it delivered. A 4K start at
+            //    30 Mbps on a 2.4 GHz Wi-Fi used to take ~10 s of 1 s queues and ~1500 drops per 2 s to come down;
+            //  - queue over latency + RTT, or loss > 5 % = a bit too much: the usual -30 %;
+            //  - else clean (rises after 8 s). A clean 5 GHz link sits at a 25-60 ms queue: a «hold» tier at RTT + 20 ms
+            //    kept the Redmi stuck at 5 Mbps for minutes.
+            // The first 3 s of a connection only count drops: the encoder starts with a stall and a burst (and a 4K
+            // IDR), a 340 ms queue that is not congestion - it cut the Redmi 21 -> 10.5 -> 5 Mbps on a clean Wi-Fi.
+            val q = st.msSndBuf
+            val rtt = st.msRTT.toInt()
+            val detail = "SRT pérdida ${"%.1f".format(lossPct)} %, descartados ${st.pktSndDrop}, " +
+                "buffer $q ms, RTT $rtt ms"
+            val warmingUp = now - srtUpAtMs < 3000
+            severeStreak = if (q > 2 * latencyMs + rtt) severeStreak + 1 else 0
+            val a = abr
+            when {
+                st.pktSndDrop > 0 || (!warmingUp && severeStreak >= 2) -> a?.reportSevere(st.mbpsSendRate, detail)
+                warmingUp -> {}
+                lossPct > 5.0 || q > latencyMs + rtt -> a?.report(true, detail)
+                else -> a?.report(false, detail)
+            }
+            val lossy = st.pktSndDrop > 0 || lossPct > 5.0 || q > latencyMs + rtt
+            if (lossy) Log.i(TAG, "SRT stats: sent $sent, lost ${st.pktSndLoss}, retrans ${st.pktRetrans}, " +
+                "dropped ${st.pktSndDrop}, sndBuf ${st.msSndBuf} ms, RTT ${st.msRTT} ms, bw ${"%.1f".format(st.mbpsBandwidth)} Mbps")
         }
 
         private fun startWatchdog() {
@@ -1689,17 +1903,26 @@ class VortexCamPlugin(
                     val now = System.currentTimeMillis()
                     if (linkUp) {
                         val ws = writeStartMs
-                        if (ws > 0 && now - ws > 3000) markDown("write blocked ${now - ws} ms")
-                        // A write that waits > 150 ms = the TCP send buffer is full: the Wi-Fi does not carry this rate.
-                        val mw = maxOf(maxWriteMs, if (ws > 0) now - ws else 0L)
-                        maxWriteMs = 0L
-                        abr?.report(mw > 150, "escritura TCP trabada $mw ms")
+                        if (ws > 0 && now - ws > 3000) { markDown("write blocked ${now - ws} ms"); continue }
+                        val s = srt
+                        if (s != null) {
+                            val st = try { s.sockState } catch (_: Exception) { null }
+                            if (st == SockStatus.BROKEN || st == SockStatus.CLOSED || st == SockStatus.NONEXIST) {
+                                markDown("SRT $st"); continue
+                            }
+                            srtSample(s, now)
+                        } else {
+                            // A write that waits > 150 ms = the TCP send buffer is full: the Wi-Fi does not carry this rate.
+                            val mw = maxOf(maxWriteMs, if (ws > 0) now - ws else 0L)
+                            maxWriteMs = 0L
+                            abr?.report(mw > 150, "escritura TCP trabada $mw ms")
+                        }
                     } else if (!closed && now - lastTry >= 1000) {
                         lastTry = now
                         if (open()) {
                             reconnects++
                             val down = now - downSinceMs
-                            Log.i(TAG, "SRT/TCP reconnected after $down ms (#$reconnects)")
+                            Log.i(TAG, "$mode reconnected after $down ms (#$reconnects)")
                             onReconnected?.invoke(down)
                         }
                     }
@@ -1707,12 +1930,11 @@ class VortexCamPlugin(
             }
         }
 
-        fun getRttMs(): Int = 0  // TCP doesn't expose RTT; use 0
+        fun getRttMs(): Int = rttMs  // SRT measures it; TCP does not (0)
 
         fun close() {
             closed = true
-            try { tcpSocket?.close() } catch (_: Exception) {}
-            tcpSocket = null; out = null; linkUp = false
+            dropTransport(); linkUp = false
             watchdog?.interrupt(); watchdog = null
         }
     }
@@ -1721,31 +1943,36 @@ class VortexCamPlugin(
     // SBL AudioReturn — receive Opus packets from engine, decode, play
     // =========================================================================
 
+    /**
+     * The Opus decoder's format, built fresh for every decoder (configure reads the CSD buffers).
+     * csd-1 was an EMPTY buffer: Codec2's C2SoftOpusDec (Mi A3, Galaxy A10) takes csd-1 as the codec delay, an 8-byte
+     * time in ns, and rejects anything shorter ("Input sample size is too small") - the decoder died at once, was
+     * recreated every second and the return audio never played there (DT-301, 2026-10-21). The Redmi's decoder
+     * tolerated it. Pre-skip 312 samples = libopus' lookahead at 48 kHz (was 3840 = 80 ms of audio thrown away).
+     */
+    private fun opusReturnFormat(): android.media.MediaFormat {
+        val preSkip = 312
+        val opusHead = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN)
+        opusHead.put("OpusHead".toByteArray(Charsets.US_ASCII))  // magic (8)
+        opusHead.put(1.toByte())        // version
+        opusHead.put(1.toByte())        // channels = 1 (mono)
+        opusHead.putShort(preSkip.toShort())
+        opusHead.putInt(48000)          // input sample rate
+        opusHead.putShort(0)            // output gain
+        opusHead.put(0.toByte())        // channel mapping family
+        opusHead.flip()
+        fun ns(v: Long) = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(v).also { it.flip() }
+        val fmt = android.media.MediaFormat.createAudioFormat("audio/opus", 48000, 1)
+        fmt.setByteBuffer("csd-0", opusHead)
+        fmt.setByteBuffer("csd-1", ns(preSkip * 1_000_000_000L / 48000))   // codec delay, ns
+        fmt.setByteBuffer("csd-2", ns(80_000_000L))                        // seek pre-roll 80 ms, ns
+        return fmt
+    }
+
     private fun initReturnAudio() {
         try {
-            // OpusHead CSD-0 (19 bytes, little-endian fields)
-            val opusHead = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN)
-            opusHead.put("OpusHead".toByteArray(Charsets.US_ASCII))  // magic (8)
-            opusHead.put(1.toByte())        // version
-            opusHead.put(1.toByte())        // channels = 1 (mono)
-            opusHead.putShort(3840)         // pre-skip (little-endian)
-            opusHead.putInt(48000)          // input sample rate
-            opusHead.putShort(0)            // output gain
-            opusHead.put(0.toByte())        // channel mapping family
-            opusHead.flip()
-
-            // CSD-2: 80ms seek pre-roll in nanoseconds (little-endian int64)
-            val csd2 = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-            csd2.putLong(80_000_000L)
-            csd2.flip()
-
-            val fmt = android.media.MediaFormat.createAudioFormat("audio/opus", 48000, 1)
-            fmt.setByteBuffer("csd-0", opusHead)
-            fmt.setByteBuffer("csd-1", ByteBuffer.allocate(0))
-            fmt.setByteBuffer("csd-2", csd2)
-
-            returnFormat = fmt
-            returnDecoder = newReturnDecoder(fmt)
+            returnConfigured = true
+            returnDecoder = newReturnDecoder()
 
             val minBuf = AudioTrack.getMinBufferSize(
                 48000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -1763,7 +1990,7 @@ class VortexCamPlugin(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             returnTrack!!.play()
-            Log.i(TAG, "SBL AudioReturn: Opus decoder + AudioTrack ready")
+            Log.i(TAG, "AudioReturn: Opus decoder + AudioTrack ready")
         } catch (e: Exception) {
             Log.w(TAG, "SBL AudioReturn init failed: $e")
             returnDecoder?.release(); returnDecoder = null
@@ -1772,10 +1999,15 @@ class VortexCamPlugin(
     }
 
     private fun stopReturnAudio() {
+        srtReturnInit = false
         returnRunning.set(false)
         returnThread?.join(1000); returnThread = null
-        returnDecoder?.stop(); returnDecoder?.release(); returnDecoder = null
-        returnTrack?.stop();   returnTrack?.release();   returnTrack   = null
+        synchronized(returnLock) {
+            returnConfigured = false
+            try { returnDecoder?.stop() } catch (_: Exception) {}
+            returnDecoder?.release(); returnDecoder = null
+            returnTrack?.stop();   returnTrack?.release();   returnTrack   = null
+        }
     }
 
     private fun receiveLoop() {
@@ -1835,6 +2067,7 @@ class VortexCamPlugin(
         }
 
         val streamId = buf[5].toInt() and 0xFF
+        if ((buf[4].toInt() and 0xFF) == 0 && streamId == 4) { handleTallyFrame(buf, len); return }
         if (streamId != 3) return   // only AudioReturn (streamID=3)
         // SblPacketHeaderV3 is big-endian on the wire, like the rest of SBL v3.
         //
@@ -1852,15 +2085,82 @@ class VortexCamPlugin(
         decodeAndPlay(buf, 32, payloadLen)
     }
 
-    private var returnFormat: android.media.MediaFormat? = null
+    // ---- Tally from SAMBA (2026-10-20) --------------------------------------------------------------------------
+    // SblSource::setTally sends it every 2 s and on every change: a Metadata FRAME (packetType 0 Data, streamID 4),
+    // one fragment; payload = SblFrameHeader (32 B, codec 0xFF Raw) + MessagePack {"tally":{"pgm":bool,"prv":bool}}.
+    // pgm = this camera is in the scene on air; prv = in the studio-mode preview. It used to be dropped here (only
+    // streamID 3 went through), so the phone never showed it was on air.
+    @Volatile private var tallyPgm = false
+    @Volatile private var tallyPrv = false
+    @Volatile private var tallyAtMs = 0L
+
+    private fun handleTallyFrame(buf: ByteArray, len: Int) {
+        val payloadLen = ((buf[24].toInt() and 0xFF) shl 8) or (buf[25].toInt() and 0xFF)
+        val end = 32 + payloadLen
+        if (payloadLen <= 32 || end > len) return
+        val pgm = msgpackBool(buf, 64, end, "pgm") ?: return
+        val prv = msgpackBool(buf, 64, end, "prv") ?: false
+        if (tallyAtMs == 0L || pgm != tallyPgm || prv != tallyPrv) {
+            val msg = "[tally] SAMBA: ${if (pgm) "AL AIRE" else if (prv) "en vista previa" else "fuera del aire"}\n"
+            Log.i(TAG, msg.trim())
+            Thread { sendLogBytes(msg, "tally") }.start()
+        }
+        tallyPgm = pgm; tallyPrv = prv; tallyAtMs = System.currentTimeMillis()
+    }
+
+    /** The bool after the MessagePack key [key] (a fixstr) in buf[from, to), or null if it is not there. */
+    private fun msgpackBool(buf: ByteArray, from: Int, to: Int, key: String): Boolean? {
+        val k = key.toByteArray(Charsets.US_ASCII)
+        var i = from
+        while (i + 1 + k.size < to) {
+            if ((buf[i].toInt() and 0xFF) == 0xA0 + k.size &&
+                (k.indices).all { buf[i + 1 + it] == k[it] }) {
+                return when (buf[i + 1 + k.size].toInt() and 0xFF) { 0xC3 -> true; 0xC2 -> false; else -> null }
+            }
+            i++
+        }
+        return null
+    }
+
+    // ---- SAMBA → phone over the SRT connection -------------------------------------------------------------------
+    // SRT is two-way: SAMBA sends back, on the connection it accepted, the SAME SBL v3 packets it sends an SBL phone
+    // over UDP, one per SRT message - the tally (above) and the return audio (streamID 3, Opus), and maybe a keyframe
+    // request. Agreed with SAMBA 2026-10-20 (it lands there after several SRT callers per port); until then nothing
+    // arrives and nothing changes.
+    private var srtReturnInit = false
+    private fun processSrtReturn(buf: ByteArray, len: Int) {
+        if (len < 32) return
+        if (buf[0] != 0x53.toByte() || buf[1] != 0x42.toByte() || buf[2] != 0x4C.toByte()) return
+        val type = buf[4].toInt() and 0xFF
+        val streamId = buf[5].toInt() and 0xFF
+        when {
+            type == 0 && streamId == 4 -> handleTallyFrame(buf, len)
+            type == 7 -> {
+                val now = System.currentTimeMillis()
+                if (now - lastForcedIdrMs >= 1000) { lastForcedIdrMs = now; requestIdr() }
+            }
+            streamId == 3 -> {
+                val payloadLen = ((buf[24].toInt() and 0xFF) shl 8) or (buf[25].toInt() and 0xFF)
+                if (payloadLen <= 0 || 32 + payloadLen > len) return
+                if (!srtReturnInit) { srtReturnInit = true; initReturnAudio() }
+                decodeAndPlay(buf, 32, payloadLen)
+            }
+        }
+    }
+
+    private var returnConfigured = false
+    // The SRT receive thread decodes while stopStream releases the decoder ("releaseOutputBuffer() is valid only at
+    // Executing states; currently during stop()", Redmi 2026-10-21): both go through this lock.
+    private val returnLock = Any()
     private var returnPtsUs = 0L
     private var returnLastResetMs = 0L
     private var returnResets = 0
 
-    private fun newReturnDecoder(fmt: android.media.MediaFormat): MediaCodec =
-        MediaCodec.createDecoderByType("audio/opus").also { it.configure(fmt, null, null, 0); it.start() }
+    private fun newReturnDecoder(): MediaCodec =
+        MediaCodec.createDecoderByType("audio/opus").also { it.configure(opusReturnFormat(), null, null, 0); it.start() }
 
-    private fun decodeAndPlay(buf: ByteArray, offset: Int, length: Int) {
+    private fun decodeAndPlay(buf: ByteArray, offset: Int, length: Int) = synchronized(returnLock) {
+        if (!returnConfigured) return@synchronized
         try { decodeAndPlayOnce(buf, offset, length) } catch (e: Exception) {
             // Recreate the decoder (at most once a second) instead of leaving it dead.
             try { returnDecoder?.release() } catch (_: Exception) {}
@@ -1868,7 +2168,7 @@ class VortexCamPlugin(
             val now = System.currentTimeMillis()
             if (now - returnLastResetMs >= 1000) {
                 returnLastResetMs = now
-                returnDecoder = try { returnFormat?.let { newReturnDecoder(it) } } catch (e2: Exception) { null }
+                returnDecoder = try { newReturnDecoder() } catch (e2: Exception) { null }
                 if (returnResets++ < 5) {
                     val msg = "[retorno] decodificador Opus reiniciado (${e.javaClass.simpleName}: ${e.message})\n"
                     Log.w(TAG, msg.trim())

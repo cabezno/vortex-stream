@@ -139,6 +139,7 @@ class SblConnectionService extends ChangeNotifier {
 
       _state = SblState.streaming;
       notifyListeners();
+      _startTallyPolling();
     } catch (e) {
       LogService.instance.add('[SBL] error: $e');
       LogService.instance.shipToPc(reason: 'sbl_error');
@@ -201,6 +202,21 @@ class SblConnectionService extends ChangeNotifier {
     _isOnAir   = false;
     _textureId = null;
     notifyListeners();
+  }
+
+  /// SAMBA's tally, read from the native side twice a second while streaming (SAMBA sends it every 2 s and on every
+  /// change). Not heard for 6 s = off the air.
+  Timer? _tallyTimer;
+  void _startTallyPolling() {
+    _tallyTimer?.cancel();
+    _tallyTimer = Timer.periodic(const Duration(milliseconds: 500), (t) async {
+      if (_state != SblState.streaming) { t.cancel(); _tallyTimer = null; return; }
+      try {
+        final m = await _channel.invokeMethod<Map>('getTally');
+        final pgm = m?['pgm'] == true;
+        if (pgm != _isOnAir) setOnAir(pgm);
+      } catch (_) {}
+    });
   }
 
   void setOnAir(bool active) {

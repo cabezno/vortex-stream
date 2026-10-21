@@ -8,7 +8,8 @@ import 'log_service.dart';
 // SrtConnectionService — SRT transport with H.265 HW encoding
 //
 // Uses a native Android MethodChannel that wraps:
-//   Camera2 → MediaCodec H.265 HW encoder → MPEG-TS → libsrt
+//   Camera2 → MediaCodec HW encoder → MPEG-TS → SRT (libsrt via srtdroid, UDP live mode; TCP on the same port
+//   when the SRT handshake fails)
 //
 // Replaces WebRTC/WHIP for LAN use. Advantages vs WebRTC:
 //   - H.265 HW encode: 6-8 Mbps at 1080p vs H.264 8-12 Mbps
@@ -28,6 +29,7 @@ class SrtConnectionService extends ChangeNotifier {
   SrtState _state       = SrtState.idle;
   String   _engineIp    = '';
   int      _enginePort  = 8890;
+  String   _sourceName  = '';
   String   _errorMsg    = '';
   double   _bitrateMbps = 0.0;
   int      _latencyMs   = 0;
@@ -52,6 +54,9 @@ class SrtConnectionService extends ChangeNotifier {
   bool     _reconnecting = false;
   // true while the native side lost the link and is reconnecting by itself (SRT/RTMP/SBL)
   bool     get reconnecting => _reconnecting;
+  // «SRT» (UDP) or «SRT (TCP)» (fallback), as the native side reports it; empty until connected.
+  String   _link = '';
+  String   get link => _link;
   bool     get isOnAir         => _isOnAir;
   int      get width           => _width;
   int      get height          => _height;
@@ -124,7 +129,8 @@ class SrtConnectionService extends ChangeNotifier {
   }
 
   // Connect to a specific engine IP:port directly (skip mDNS).
-  Future<void> connectTo(String ip, {int port = 8890}) async {
+  Future<void> connectTo(String ip, {int port = 8890, String name = ''}) async {
+    _sourceName = name;
     _engineIp   = ip;
     _enginePort = port;
     _errorMsg   = '';
@@ -152,6 +158,7 @@ class SrtConnectionService extends ChangeNotifier {
       'bitrateBps':      _targetBitrateBps,
       'keyframeMs':      _keyframeIntervalS * 1000,
       'srtLatencyMs':    _srtLatencyMs,
+      'sourceName':      _sourceName,   // SRT stream id: SAMBA can name the camera
       // H.264 — VortexEngine SRT demuxer handles 0x1B (H.264) only.
       // H.265 (0x24) is silently discarded by the MPEG-TS parser.
       'codec':           'h264',
@@ -162,12 +169,19 @@ class SrtConnectionService extends ChangeNotifier {
     });
 
     _state = SrtState.streaming;
+    // Which transport the native side ended up on (SRT, or TCP when the SRT handshake failed).
+    try {
+      final st = await _channel.invokeMethod<Map>('getStats');
+      _link = st?['transport'] as String? ?? '';
+      if (_link.isNotEmpty) LogService.instance.add('[SRT] transporte: $_link → $_engineIp:$_enginePort');
+    } catch (_) {}
     notifyListeners();
     debugPrint('[VortexCam SRT] Streaming started → $_engineIp:$_enginePort '
                '${_width}x$_height @${_targetBitrateBps ~/ 1000}kbps H.265');
 
     // Start polling stats from native side
     _startStatsPolling();
+    _startTallyPolling();
   }
 
   void _startStatsPolling() {
@@ -179,6 +193,11 @@ class SrtConnectionService extends ChangeNotifier {
           _bitrateMbps = (stats['bitrateMbps'] as num?)?.toDouble() ?? 0.0;
           _latencyMs   = (stats['rttMs']       as num?)?.toInt()    ?? 0;
           _reconnecting = stats['linkUp'] == false;
+          final link = stats['transport'] as String? ?? '';
+          if (link.isNotEmpty && link != _link) {
+            _link = link;
+            LogService.instance.add('[SRT] transporte: $link → $_engineIp:$_enginePort');
+          }
           notifyListeners();
         }
       } catch (_) {}
@@ -191,8 +210,25 @@ class SrtConnectionService extends ChangeNotifier {
     _state    = SrtState.idle;
     _bitrateMbps = 0;
     _latencyMs   = 0;
+    _link        = '';
+    _isOnAir     = false;
     notifyListeners();
     debugPrint('[VortexCam SRT] Streaming stopped');
+  }
+
+  /// SAMBA's tally, read from the native side twice a second while streaming (SAMBA sends it every 2 s and on every
+  /// change). Not heard for 6 s = off the air.
+  Timer? _tallyTimer;
+  void _startTallyPolling() {
+    _tallyTimer?.cancel();
+    _tallyTimer = Timer.periodic(const Duration(milliseconds: 500), (t) async {
+      if (_state != SrtState.streaming) { t.cancel(); _tallyTimer = null; return; }
+      try {
+        final m = await _channel.invokeMethod<Map>('getTally');
+        final pgm = m?['pgm'] == true;
+        if (pgm != _isOnAir) setOnAir(pgm);
+      } catch (_) {}
+    });
   }
 
   void setOnAir(bool active) {
