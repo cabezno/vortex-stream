@@ -2230,6 +2230,7 @@ class VortexCamPlugin(
     private val retFrames = java.util.concurrent.atomic.AtomicLong()
     private val retSumSq = java.util.concurrent.atomic.AtomicLong()   // ≤ 2^30 per sample: no overflow in 5 s
     private val retSamples = java.util.concurrent.atomic.AtomicLong()
+    private val retDroppedSamples = java.util.concurrent.atomic.AtomicLong()   // left out to keep the delay short
     private var retLogAtMs = 0L
 
     private fun routeName(t: Int): String = when (t) {
@@ -2252,6 +2253,7 @@ class VortexCamPlugin(
         retLogAtMs = now
         val pk = retPkts.getAndSet(0); val by = retBytes.getAndSet(0); val fr = retFrames.getAndSet(0)
         val sq = retSumSq.getAndSet(0).toDouble(); val n = retSamples.getAndSet(0)
+        val droppedMs = retDroppedSamples.getAndSet(0) * 1000 / 48000
         val secs = dt / 1000.0
         val level = if (n > 0 && sq > 0) "%.0f dBFS".format(10 * Math.log10(sq / n / (32768.0 * 32768.0)))
                     else if (n > 0) "silencio" else "nada escrito"
@@ -2261,7 +2263,7 @@ class VortexCamPlugin(
         } catch (e: Exception) { "?" }
         val via = if (srtSocket != null) "SRT" else "SBL"
         val msg = "[retorno] $via · ${"%.0f".format(pk / secs)} paq/s · ${"%.1f".format(by / secs / 1000)} kB/s · " +
-            "$fr cuadros · $level · sale por: $route · botón: ${if (talkbackMuted.get()) "silenciado" else "activo"}\n"
+            "$fr cuadros · $level · descartado ${droppedMs} ms · sale por: $route · botón: ${if (talkbackMuted.get()) "silenciado" else "activo"}\n"
         Log.i(TAG, msg.trim())
         Thread { sendLogBytes(msg, "return_stats") }.start()
     }
@@ -2312,7 +2314,12 @@ class VortexCamPlugin(
             if (outBuf != null && info.size > 0 && !talkbackMuted.get()) {
                 val pcm = ShortArray(info.size / 2)
                 outBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(pcm)
-                track.write(pcm, 0, pcm.size)
+                // NON-BLOCKING: the return arrives in bursts on a bad Wi-Fi (the A10: 19-51 packets/s) and the track
+                // plays at real time, so a blocking write kept every stall as delay for good - the A10 heard the
+                // program ~20 s late (2026-10-21). What does not fit in the track's buffer now is dropped: the delay
+                // stays at that buffer (~0.2-0.3 s) and a burst costs a few skipped ms instead.
+                val w = track.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
+                if (w in 0 until pcm.size) retDroppedSamples.addAndGet((pcm.size - w).toLong())
                 var sq = 0L
                 for (v in pcm) sq += v.toLong() * v
                 retSumSq.addAndGet(sq); retSamples.addAndGet(pcm.size.toLong())
