@@ -925,8 +925,10 @@ class VortexCamPlugin(
         val mux  = srtMuxer  ?: return false
         if (!streaming.get()) return false
         return try {
-            val pkts = mux.muxLog(text.toByteArray(Charsets.UTF_8), reason)
-            synchronized(sendLock) { for (p in pkts) sock.send(p) }
+            // Built AND sent under the send lock: [pace], [retorno], [abr], [tally]... each go out on their own thread,
+            // and muxing two at once (or one with the orientation packet, same PID) broke the 0x1FF0 continuity counter.
+            val bytes = text.toByteArray(Charsets.UTF_8)
+            synchronized(sendLock) { for (p in mux.muxLog(bytes, reason)) sock.send(p) }
             true
         } catch (e: Exception) { Log.w(TAG, "sendLog: $e"); false }
     }
@@ -1859,7 +1861,10 @@ class VortexCamPlugin(
                     var off = 0
                     while (off < data.size) {
                         val n = minOf(SRT_PAYLOAD, data.size - off)
-                        s.send(data, off, n)
+                        // inOrder: SAMBA reads with TSBPD off (each message as soon as it is complete); a resent
+                        // message must not be handed over after the ones that followed it, or the TS comes out of
+                        // order and the video continuity counter «jumps» at every RTT spike (2026-10-21).
+                        s.send(data, off, n, -1, true)
                         off += n
                     }
                 } else {
