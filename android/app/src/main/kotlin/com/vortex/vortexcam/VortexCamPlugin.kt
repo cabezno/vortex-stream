@@ -241,6 +241,14 @@ class VortexCamPlugin(
             }
             // Changes when Android or the app is updated → the capability probe must run again.
             "capsStamp" -> result.success(DeviceCaps.stamp(context))
+            // The phone's own name, the app's default camera name (SAMBA names the source after it): the name the user
+            // sees in Android's «About phone» («Redmi Note 14 Pro+ 5G»), else Build.MODEL («SM-A105M»).
+            "deviceName" -> {
+                val n = try {
+                    android.provider.Settings.Global.getString(context.contentResolver, android.provider.Settings.Global.DEVICE_NAME)
+                } catch (_: Exception) { null }
+                result.success(n?.trim()?.takeIf { it.isNotEmpty() } ?: Build.MODEL)
+            }
             // What this phone can do (encoders, cameras, OMT speed) — the app offers only what works.
             "listCameras" -> result.success(DeviceCaps.listCameras(context))
             // Android 9 and older cannot join a Wi-Fi from an app: open the system's Wi-Fi list for the user.
