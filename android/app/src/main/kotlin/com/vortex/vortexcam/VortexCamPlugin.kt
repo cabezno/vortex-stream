@@ -351,6 +351,12 @@ class VortexCamPlugin(
         cameraFacing  = if (facingArg == "front") CameraCharacteristics.LENS_FACING_FRONT
                         else CameraCharacteristics.LENS_FACING_BACK
 
+        // Connecting again after «Detener» calls startCamera with the previous camera still open (Detener stops the
+        // stream, not the preview). Opening it twice made Android evict the old device, and its late onDisconnected
+        // cleared cameraDevice AFTER the new one had opened: the new capture session saw a «closed» camera and shut
+        // itself, the encoder got no frames and SAMBA no picture (Redmi, 2026-10-21). Close the old one first.
+        releaseCamera()
+
         cameraThread = HandlerThread("CameraThread").also { it.start() }
         cameraHandler = Handler(cameraThread!!.looper)
         cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -379,11 +385,12 @@ class VortexCamPlugin(
                 startPreviewSession()
                 result.success(mapOf("textureId" to flutterTexture!!.id()))
             }
+            // Only forget the camera if it is still THIS one: a callback of an older device must not clear a newer one.
             override fun onDisconnected(camera: CameraDevice) {
-                camera.close(); cameraDevice = null
+                camera.close(); if (cameraDevice === camera) cameraDevice = null
             }
             override fun onError(camera: CameraDevice, error: Int) {
-                camera.close(); cameraDevice = null
+                camera.close(); if (cameraDevice === camera) cameraDevice = null
                 result.error("CAMERA_ERROR", "Camera error: $error", null)   // no-op if already answered
                 Thread { sendLogBytes("[cámara] error $error (servicio de cámara caído o cámara ocupada)\n", "camera_error") }.start()
             }
@@ -434,14 +441,22 @@ class VortexCamPlugin(
 
     private fun stopCamera() {
         stopStream()
-        captureSession?.stopRepeating()
-        captureSession?.close(); captureSession = null
-        cameraDevice?.close();   cameraDevice  = null
+        releaseCamera()
+        Log.i(TAG, "Camera stopped")
+    }
+
+    /** Camera, preview texture and camera thread (not the stream). Safe to call with nothing open. */
+    private fun releaseCamera() {
+        try { captureSession?.stopRepeating() } catch (_: Exception) {}
+        try { captureSession?.close() } catch (_: Exception) {}
+        captureSession = null
+        val dev = cameraDevice
+        cameraDevice = null
+        try { dev?.close() } catch (_: Exception) {}
         previewSurface?.release(); previewSurface = null
         flutterTexture?.release(); flutterTexture = null
         cameraThread?.quitSafely()
         cameraThread = null; cameraHandler = null
-        Log.i(TAG, "Camera stopped")
     }
 
     private fun flipCamera(result: MethodChannel.Result) {
@@ -743,6 +758,7 @@ class VortexCamPlugin(
     private fun stopStream() {
         if (!streaming.getAndSet(false)) return
         tallyAtMs = 0L; tallyPgm = false; tallyPrv = false
+        retLogAtMs = 0L
         encodeThread?.join(2000); encodeThread = null
         audioInThread?.join(1000);  audioInThread  = null
         audioOutThread?.join(1000); audioOutThread = null
@@ -1042,6 +1058,7 @@ class VortexCamPlugin(
                     (sock?.takePaceStats()?.let { " · $it" } ?: "") + "\n"
                 Log.i(TAG, msg.trim())
                 Thread { sendLogBytes(msg, "pace") }.start()
+                maybeLogReturn(force = true)   // same 5 s window as [pace]
                 paceStartNs = nowNs
                 maxOutGapNs = 0L; maxSendGapNs = 0L; maxSendNs = 0L; maxPtsGapUs = 0L; paceFrames = 0
             }
@@ -1511,6 +1528,7 @@ class VortexCamPlugin(
             bytesSent.addAndGet(nalData.size.toLong())
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
+            maybeLogReturn()
             if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
         }
     }
@@ -1731,8 +1749,27 @@ class VortexCamPlugin(
         var onReconnected: ((downMs: Long) -> Unit)? = null
 
         private fun openSrt(): Boolean {
-            if (!SrtLib.ready) return false
-            val s = try { LibSrtSocket() } catch (t: Throwable) { Log.w(TAG, "SRT socket: $t"); return false }
+            val s = connectSrt() ?: return false
+            adoptSrt(s)
+            return true
+        }
+
+        /** The latency SRT agreed with SAMBA (the larger of both sides'): what the send queue is measured against. */
+        @Volatile private var effLatencyMs = latencyMs
+
+        private fun adoptSrt(s: LibSrtSocket) {
+            effLatencyMs = try { (s.getSockFlag(SockOpt.PEERLATENCY) as Number).toInt() } catch (_: Exception) { latencyMs }
+                .coerceAtLeast(latencyMs)
+            srt = s; mode = "SRT"; linkUp = true
+            srtUpAtMs = System.currentTimeMillis(); severeStreak = 0
+            Log.i(TAG, "SRT (UDP, libsrt) connected → $ip:$port, latency $latencyMs ms (acordada $effLatencyMs ms)")
+            startReceive(s)
+        }
+
+        /** A connected SRT socket, or null. */
+        private fun connectSrt(): LibSrtSocket? {
+            if (!SrtLib.ready) return null
+            val s = try { LibSrtSocket() } catch (t: Throwable) { Log.w(TAG, "SRT socket: $t"); return null }
             fun opt(o: SockOpt, v: Any) = try { s.setSockFlag(o, v) } catch (e: Exception) { Log.w(TAG, "SRT $o=$v: $e") }
             return try {
                 s.setSockFlag(SockOpt.TRANSTYPE, Transtype.LIVE)
@@ -1744,16 +1781,33 @@ class VortexCamPlugin(
                 opt(SockOpt.PEERIDLETIMEO, 3000)       // SAMBA silent 3 s = link down (the default is 5 s)
                 if (streamId.isNotEmpty()) opt(SockOpt.STREAMID, streamId)
                 s.connect(ip, port)
-                srt = s; mode = "SRT"; linkUp = true
-                srtUpAtMs = System.currentTimeMillis(); severeStreak = 0
-                Log.i(TAG, "SRT (UDP, libsrt) connected → $ip:$port, latency $latencyMs ms")
-                startReceive(s)
-                true
+                s
             } catch (e: Exception) {
                 Log.w(TAG, "SRT connect to $ip:$port failed: $e")
                 try { s.close() } catch (_: Exception) {}
-                false
+                null
             }
+        }
+
+        /**
+         * Back from the TCP fallback to real SRT. A reconnect while SAMBA was restarting found SRT not answering yet
+         * and TCP answering, and the camera stayed on TCP for good (2026-10-21). Every 10 s on TCP: connect SRT on the
+         * side and, if it answers, swap under the send lock (no frame goes half on each) and drop TCP.
+         */
+        private var lastUpgradeTryMs = 0L
+        private fun tryUpgradeToSrt(now: Long) {
+            if (now - lastUpgradeTryMs < 10_000) return
+            lastUpgradeTryMs = now
+            val s = connectSrt() ?: return
+            synchronized(sendLock) {
+                if (closed || !linkUp || srt != null) { try { s.close() } catch (_: Exception) {}; return }
+                try { tcpSocket?.close() } catch (_: Exception) {}
+                tcpSocket = null; out = null
+                adoptSrt(s)
+            }
+            reconnects++
+            Log.i(TAG, "SRT: vuelve de TCP a SRT real")
+            onReconnected?.invoke(0)
         }
 
         /** What SAMBA sends back on this SRT connection (tally, return audio): see [processSrtReturn]. */
@@ -1882,15 +1936,16 @@ class VortexCamPlugin(
             val detail = "SRT pérdida ${"%.1f".format(lossPct)} %, descartados ${st.pktSndDrop}, " +
                 "buffer $q ms, RTT $rtt ms"
             val warmingUp = now - srtUpAtMs < 3000
-            severeStreak = if (q > 2 * latencyMs + rtt) severeStreak + 1 else 0
+            val lat = effLatencyMs
+            severeStreak = if (q > 2 * lat + rtt) severeStreak + 1 else 0
             val a = abr
             when {
                 st.pktSndDrop > 0 || (!warmingUp && severeStreak >= 2) -> a?.reportSevere(st.mbpsSendRate, detail)
                 warmingUp -> {}
-                lossPct > 5.0 || q > latencyMs + rtt -> a?.report(true, detail)
+                lossPct > 5.0 || q > lat + rtt -> a?.report(true, detail)
                 else -> a?.report(false, detail)
             }
-            val lossy = st.pktSndDrop > 0 || lossPct > 5.0 || q > latencyMs + rtt
+            val lossy = st.pktSndDrop > 0 || lossPct > 5.0 || q > lat + rtt
             if (lossy) Log.i(TAG, "SRT stats: sent $sent, lost ${st.pktSndLoss}, retrans ${st.pktRetrans}, " +
                 "dropped ${st.pktSndDrop}, sndBuf ${st.msSndBuf} ms, RTT ${st.msRTT} ms, bw ${"%.1f".format(st.mbpsBandwidth)} Mbps")
         }
@@ -1916,6 +1971,7 @@ class VortexCamPlugin(
                             val mw = maxOf(maxWriteMs, if (ws > 0) now - ws else 0L)
                             maxWriteMs = 0L
                             abr?.report(mw > 150, "escritura TCP trabada $mw ms")
+                            tryUpgradeToSrt(now)
                         }
                     } else if (!closed && now - lastTry >= 1000) {
                         lastTry = now
@@ -1978,7 +2034,10 @@ class VortexCamPlugin(
                 48000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             returnTrack = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    // MEDIA, not VOICE_COMMUNICATION: that one plays through the call earpiece, audible only with the
+                    // phone against the ear (measured 2026-10-21). MEDIA goes to the loudspeaker, or to headphones /
+                    // Bluetooth when connected. The «Retorno» button mutes it.
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build())
                 .setAudioFormat(AudioFormat.Builder()
@@ -2159,7 +2218,51 @@ class VortexCamPlugin(
     private fun newReturnDecoder(): MediaCodec =
         MediaCodec.createDecoderByType("audio/opus").also { it.configure(opusReturnFormat(), null, null, 0); it.start() }
 
+    // ---- Return audio, measured (2026-10-21): one «[retorno]» line every 5 s, so whether it arrives and where it
+    // sounds does not depend on someone's ear. Counted on the receive thread, logged from the encode loop.
+    private val retPkts = java.util.concurrent.atomic.AtomicLong()
+    private val retBytes = java.util.concurrent.atomic.AtomicLong()
+    private val retFrames = java.util.concurrent.atomic.AtomicLong()
+    private val retSumSq = java.util.concurrent.atomic.AtomicLong()   // ≤ 2^30 per sample: no overflow in 5 s
+    private val retSamples = java.util.concurrent.atomic.AtomicLong()
+    private var retLogAtMs = 0L
+
+    private fun routeName(t: Int): String = when (t) {
+        android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "auricular de llamada"
+        android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "parlante"
+        android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET, android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "auriculares con cable"
+        android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth (llamada)"
+        android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth (música)"
+        android.media.AudioDeviceInfo.TYPE_USB_HEADSET, android.media.AudioDeviceInfo.TYPE_USB_DEVICE -> "USB"
+        26 /* TYPE_BLE_HEADSET */ -> "Bluetooth LE"
+        else -> "tipo $t"
+    }
+
+    /** Called from the encode loops; writes the line every 5 s while streaming ([force]: now, with the [pace] line). */
+    private fun maybeLogReturn(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (retLogAtMs == 0L) { retLogAtMs = now; return }
+        val dt = now - retLogAtMs
+        if (dt < (if (force) 1000 else 5000)) return
+        retLogAtMs = now
+        val pk = retPkts.getAndSet(0); val by = retBytes.getAndSet(0); val fr = retFrames.getAndSet(0)
+        val sq = retSumSq.getAndSet(0).toDouble(); val n = retSamples.getAndSet(0)
+        val secs = dt / 1000.0
+        val level = if (n > 0 && sq > 0) "%.0f dBFS".format(10 * Math.log10(sq / n / (32768.0 * 32768.0)))
+                    else if (n > 0) "silencio" else "nada escrito"
+        val route = try {
+            val d = returnTrack?.routedDevice
+            if (d == null) (if (returnTrack == null) "sin reproductor" else "sin ruta") else "${routeName(d.type)} (tipo ${d.type})"
+        } catch (e: Exception) { "?" }
+        val via = if (srtSocket != null) "SRT" else "SBL"
+        val msg = "[retorno] $via · ${"%.0f".format(pk / secs)} paq/s · ${"%.1f".format(by / secs / 1000)} kB/s · " +
+            "$fr cuadros · $level · sale por: $route · botón: ${if (talkbackMuted.get()) "silenciado" else "activo"}\n"
+        Log.i(TAG, msg.trim())
+        Thread { sendLogBytes(msg, "return_stats") }.start()
+    }
+
     private fun decodeAndPlay(buf: ByteArray, offset: Int, length: Int) = synchronized(returnLock) {
+        retPkts.incrementAndGet(); retBytes.addAndGet(length.toLong())
         if (!returnConfigured) return@synchronized
         try { decodeAndPlayOnce(buf, offset, length) } catch (e: Exception) {
             // Recreate the decoder (at most once a second) instead of leaving it dead.
@@ -2200,10 +2303,14 @@ class VortexCamPlugin(
             // Keep draining the decoder even while muted — skipping dequeueOutputBuffer
             // would back up MediaCodec's internal buffers and eventually stall input.
             // Just don't write the decoded PCM to the AudioTrack.
+            if (info.size > 0) retFrames.incrementAndGet()
             if (outBuf != null && info.size > 0 && !talkbackMuted.get()) {
                 val pcm = ShortArray(info.size / 2)
                 outBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(pcm)
                 track.write(pcm, 0, pcm.size)
+                var sq = 0L
+                for (v in pcm) sq += v.toLong() * v
+                retSumSq.addAndGet(sq); retSamples.addAndGet(pcm.size.toLong())
             }
             dec.releaseOutputBuffer(outIdx, false)
             outIdx = dec.dequeueOutputBuffer(info, 0)
