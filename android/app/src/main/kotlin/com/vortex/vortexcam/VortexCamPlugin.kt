@@ -351,6 +351,12 @@ class VortexCamPlugin(
         cameraFacing  = if (facingArg == "front") CameraCharacteristics.LENS_FACING_FRONT
                         else CameraCharacteristics.LENS_FACING_BACK
 
+        // Connecting again after «Detener» calls startCamera with the previous camera still open (Detener stops the
+        // stream, not the preview). Opening it twice made Android evict the old device, and its late onDisconnected
+        // cleared cameraDevice AFTER the new one had opened: the new capture session saw a «closed» camera and shut
+        // itself, the encoder got no frames and SAMBA no picture (Redmi, 2026-10-21). Close the old one first.
+        releaseCamera()
+
         cameraThread = HandlerThread("CameraThread").also { it.start() }
         cameraHandler = Handler(cameraThread!!.looper)
         cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -379,11 +385,12 @@ class VortexCamPlugin(
                 startPreviewSession()
                 result.success(mapOf("textureId" to flutterTexture!!.id()))
             }
+            // Only forget the camera if it is still THIS one: a callback of an older device must not clear a newer one.
             override fun onDisconnected(camera: CameraDevice) {
-                camera.close(); cameraDevice = null
+                camera.close(); if (cameraDevice === camera) cameraDevice = null
             }
             override fun onError(camera: CameraDevice, error: Int) {
-                camera.close(); cameraDevice = null
+                camera.close(); if (cameraDevice === camera) cameraDevice = null
                 result.error("CAMERA_ERROR", "Camera error: $error", null)   // no-op if already answered
                 Thread { sendLogBytes("[cámara] error $error (servicio de cámara caído o cámara ocupada)\n", "camera_error") }.start()
             }
@@ -434,14 +441,22 @@ class VortexCamPlugin(
 
     private fun stopCamera() {
         stopStream()
-        captureSession?.stopRepeating()
-        captureSession?.close(); captureSession = null
-        cameraDevice?.close();   cameraDevice  = null
+        releaseCamera()
+        Log.i(TAG, "Camera stopped")
+    }
+
+    /** Camera, preview texture and camera thread (not the stream). Safe to call with nothing open. */
+    private fun releaseCamera() {
+        try { captureSession?.stopRepeating() } catch (_: Exception) {}
+        try { captureSession?.close() } catch (_: Exception) {}
+        captureSession = null
+        val dev = cameraDevice
+        cameraDevice = null
+        try { dev?.close() } catch (_: Exception) {}
         previewSurface?.release(); previewSurface = null
         flutterTexture?.release(); flutterTexture = null
         cameraThread?.quitSafely()
         cameraThread = null; cameraHandler = null
-        Log.i(TAG, "Camera stopped")
     }
 
     private fun flipCamera(result: MethodChannel.Result) {
