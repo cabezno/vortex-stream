@@ -758,6 +758,7 @@ class VortexCamPlugin(
     private fun stopStream() {
         if (!streaming.getAndSet(false)) return
         tallyAtMs = 0L; tallyPgm = false; tallyPrv = false
+        retLogAtMs = 0L
         encodeThread?.join(2000); encodeThread = null
         audioInThread?.join(1000);  audioInThread  = null
         audioOutThread?.join(1000); audioOutThread = null
@@ -1057,6 +1058,7 @@ class VortexCamPlugin(
                     (sock?.takePaceStats()?.let { " · $it" } ?: "") + "\n"
                 Log.i(TAG, msg.trim())
                 Thread { sendLogBytes(msg, "pace") }.start()
+                maybeLogReturn(force = true)   // same 5 s window as [pace]
                 paceStartNs = nowNs
                 maxOutGapNs = 0L; maxSendGapNs = 0L; maxSendNs = 0L; maxPtsGapUs = 0L; paceFrames = 0
             }
@@ -1526,6 +1528,7 @@ class VortexCamPlugin(
             bytesSent.addAndGet(nalData.size.toLong())
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
+            maybeLogReturn()
             if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
         }
     }
@@ -2174,7 +2177,51 @@ class VortexCamPlugin(
     private fun newReturnDecoder(): MediaCodec =
         MediaCodec.createDecoderByType("audio/opus").also { it.configure(opusReturnFormat(), null, null, 0); it.start() }
 
+    // ---- Return audio, measured (2026-10-21): one «[retorno]» line every 5 s, so whether it arrives and where it
+    // sounds does not depend on someone's ear. Counted on the receive thread, logged from the encode loop.
+    private val retPkts = java.util.concurrent.atomic.AtomicLong()
+    private val retBytes = java.util.concurrent.atomic.AtomicLong()
+    private val retFrames = java.util.concurrent.atomic.AtomicLong()
+    private val retSumSq = java.util.concurrent.atomic.AtomicLong()   // ≤ 2^30 per sample: no overflow in 5 s
+    private val retSamples = java.util.concurrent.atomic.AtomicLong()
+    private var retLogAtMs = 0L
+
+    private fun routeName(t: Int): String = when (t) {
+        android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "auricular de llamada"
+        android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "parlante"
+        android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET, android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "auriculares con cable"
+        android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth (llamada)"
+        android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth (música)"
+        android.media.AudioDeviceInfo.TYPE_USB_HEADSET, android.media.AudioDeviceInfo.TYPE_USB_DEVICE -> "USB"
+        26 /* TYPE_BLE_HEADSET */ -> "Bluetooth LE"
+        else -> "tipo $t"
+    }
+
+    /** Called from the encode loops; writes the line every 5 s while streaming ([force]: now, with the [pace] line). */
+    private fun maybeLogReturn(force: Boolean = false) {
+        val now = System.currentTimeMillis()
+        if (retLogAtMs == 0L) { retLogAtMs = now; return }
+        val dt = now - retLogAtMs
+        if (dt < (if (force) 1000 else 5000)) return
+        retLogAtMs = now
+        val pk = retPkts.getAndSet(0); val by = retBytes.getAndSet(0); val fr = retFrames.getAndSet(0)
+        val sq = retSumSq.getAndSet(0).toDouble(); val n = retSamples.getAndSet(0)
+        val secs = dt / 1000.0
+        val level = if (n > 0 && sq > 0) "%.0f dBFS".format(10 * Math.log10(sq / n / (32768.0 * 32768.0)))
+                    else if (n > 0) "silencio" else "nada escrito"
+        val route = try {
+            val d = returnTrack?.routedDevice
+            if (d == null) (if (returnTrack == null) "sin reproductor" else "sin ruta") else "${routeName(d.type)} (tipo ${d.type})"
+        } catch (e: Exception) { "?" }
+        val via = if (srtSocket != null) "SRT" else "SBL"
+        val msg = "[retorno] $via · ${"%.0f".format(pk / secs)} paq/s · ${"%.1f".format(by / secs / 1000)} kB/s · " +
+            "$fr cuadros · $level · sale por: $route · botón: ${if (talkbackMuted.get()) "silenciado" else "activo"}\n"
+        Log.i(TAG, msg.trim())
+        Thread { sendLogBytes(msg, "return_stats") }.start()
+    }
+
     private fun decodeAndPlay(buf: ByteArray, offset: Int, length: Int) = synchronized(returnLock) {
+        retPkts.incrementAndGet(); retBytes.addAndGet(length.toLong())
         if (!returnConfigured) return@synchronized
         try { decodeAndPlayOnce(buf, offset, length) } catch (e: Exception) {
             // Recreate the decoder (at most once a second) instead of leaving it dead.
@@ -2215,10 +2262,14 @@ class VortexCamPlugin(
             // Keep draining the decoder even while muted — skipping dequeueOutputBuffer
             // would back up MediaCodec's internal buffers and eventually stall input.
             // Just don't write the decoded PCM to the AudioTrack.
+            if (info.size > 0) retFrames.incrementAndGet()
             if (outBuf != null && info.size > 0 && !talkbackMuted.get()) {
                 val pcm = ShortArray(info.size / 2)
                 outBuf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(pcm)
                 track.write(pcm, 0, pcm.size)
+                var sq = 0L
+                for (v in pcm) sq += v.toLong() * v
+                retSumSq.addAndGet(sq); retSamples.addAndGet(pcm.size.toLong())
             }
             dec.releaseOutputBuffer(outIdx, false)
             outIdx = dec.dequeueOutputBuffer(info, 0)
