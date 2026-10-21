@@ -1839,11 +1839,24 @@ class VortexCamPlugin(
             }
             val sent = st.pktSent
             val lossPct = if (sent > 0) st.pktSndLoss * 100.0 / sent else 0.0
-            // Lost and resent packets are SRT's normal work; the rate is too high when the losses grow (> 5 %), when
-            // packets arrive too late and are dropped, or when the send buffer holds more than the latency window.
-            val lossy = lossPct > 5.0 || st.pktSndDrop > 0 || st.msSndBuf > latencyMs
-            abr?.report(lossy, "SRT pérdida ${"%.1f".format(lossPct)} %, descartados ${st.pktSndDrop}, " +
-                "buffer ${st.msSndBuf} ms, RTT ${st.msRTT.toInt()} ms")
+            // Lost and resent packets are SRT's normal work. The send queue (msSndBuf) is the signal (DT-302, 2026-10-21):
+            //  - packets dropped (they waited past the latency) or a queue over twice the latency window = the Wi-Fi is
+            //    far from carrying this rate: cut hard, toward what libsrt measured it delivered. A 4K start at 30 Mbps
+            //    on a 2.4 GHz Wi-Fi used to take ~10 s of 1 s queues and ~1500 drops per 2 s to come down by -30 % steps;
+            //  - queue over the latency or loss > 5 % = a bit too much: the usual -30 %;
+            //  - queue between RTT and the latency is SRT's normal in-flight data: hold, do not count as clean. Taking
+            //    it as «too much» (queue > 80 ms on 80 ms latency) kept the A10 bouncing on its 2 Mbps floor.
+            val q = st.msSndBuf
+            val detail = "SRT pérdida ${"%.1f".format(lossPct)} %, descartados ${st.pktSndDrop}, " +
+                "buffer $q ms, RTT ${st.msRTT.toInt()} ms"
+            val a = abr
+            when {
+                st.pktSndDrop > 0 || q > 2 * latencyMs -> a?.reportSevere(st.mbpsSendRate, detail)
+                lossPct > 5.0 || q > latencyMs -> a?.report(true, detail)
+                q > maxOf(20, st.msRTT.toInt() + 20) -> a?.hold()
+                else -> a?.report(false, detail)
+            }
+            val lossy = st.pktSndDrop > 0 || lossPct > 5.0 || q > latencyMs
             if (lossy) Log.i(TAG, "SRT stats: sent $sent, lost ${st.pktSndLoss}, retrans ${st.pktRetrans}, " +
                 "dropped ${st.pktSndDrop}, sndBuf ${st.msSndBuf} ms, RTT ${st.msRTT} ms, bw ${"%.1f".format(st.mbpsBandwidth)} Mbps")
         }
@@ -1896,31 +1909,36 @@ class VortexCamPlugin(
     // SBL AudioReturn — receive Opus packets from engine, decode, play
     // =========================================================================
 
+    /**
+     * The Opus decoder's format, built fresh for every decoder (configure reads the CSD buffers).
+     * csd-1 was an EMPTY buffer: Codec2's C2SoftOpusDec (Mi A3, Galaxy A10) takes csd-1 as the codec delay, an 8-byte
+     * time in ns, and rejects anything shorter ("Input sample size is too small") - the decoder died at once, was
+     * recreated every second and the return audio never played there (DT-301, 2026-10-21). The Redmi's decoder
+     * tolerated it. Pre-skip 312 samples = libopus' lookahead at 48 kHz (was 3840 = 80 ms of audio thrown away).
+     */
+    private fun opusReturnFormat(): android.media.MediaFormat {
+        val preSkip = 312
+        val opusHead = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN)
+        opusHead.put("OpusHead".toByteArray(Charsets.US_ASCII))  // magic (8)
+        opusHead.put(1.toByte())        // version
+        opusHead.put(1.toByte())        // channels = 1 (mono)
+        opusHead.putShort(preSkip.toShort())
+        opusHead.putInt(48000)          // input sample rate
+        opusHead.putShort(0)            // output gain
+        opusHead.put(0.toByte())        // channel mapping family
+        opusHead.flip()
+        fun ns(v: Long) = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(v).also { it.flip() }
+        val fmt = android.media.MediaFormat.createAudioFormat("audio/opus", 48000, 1)
+        fmt.setByteBuffer("csd-0", opusHead)
+        fmt.setByteBuffer("csd-1", ns(preSkip * 1_000_000_000L / 48000))   // codec delay, ns
+        fmt.setByteBuffer("csd-2", ns(80_000_000L))                        // seek pre-roll 80 ms, ns
+        return fmt
+    }
+
     private fun initReturnAudio() {
         try {
-            // OpusHead CSD-0 (19 bytes, little-endian fields)
-            val opusHead = ByteBuffer.allocate(19).order(ByteOrder.LITTLE_ENDIAN)
-            opusHead.put("OpusHead".toByteArray(Charsets.US_ASCII))  // magic (8)
-            opusHead.put(1.toByte())        // version
-            opusHead.put(1.toByte())        // channels = 1 (mono)
-            opusHead.putShort(3840)         // pre-skip (little-endian)
-            opusHead.putInt(48000)          // input sample rate
-            opusHead.putShort(0)            // output gain
-            opusHead.put(0.toByte())        // channel mapping family
-            opusHead.flip()
-
-            // CSD-2: 80ms seek pre-roll in nanoseconds (little-endian int64)
-            val csd2 = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
-            csd2.putLong(80_000_000L)
-            csd2.flip()
-
-            val fmt = android.media.MediaFormat.createAudioFormat("audio/opus", 48000, 1)
-            fmt.setByteBuffer("csd-0", opusHead)
-            fmt.setByteBuffer("csd-1", ByteBuffer.allocate(0))
-            fmt.setByteBuffer("csd-2", csd2)
-
-            returnFormat = fmt
-            returnDecoder = newReturnDecoder(fmt)
+            returnConfigured = true
+            returnDecoder = newReturnDecoder()
 
             val minBuf = AudioTrack.getMinBufferSize(
                 48000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -1938,7 +1956,7 @@ class VortexCamPlugin(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
             returnTrack!!.play()
-            Log.i(TAG, "SBL AudioReturn: Opus decoder + AudioTrack ready")
+            Log.i(TAG, "AudioReturn: Opus decoder + AudioTrack ready")
         } catch (e: Exception) {
             Log.w(TAG, "SBL AudioReturn init failed: $e")
             returnDecoder?.release(); returnDecoder = null
@@ -1950,8 +1968,12 @@ class VortexCamPlugin(
         srtReturnInit = false
         returnRunning.set(false)
         returnThread?.join(1000); returnThread = null
-        returnDecoder?.stop(); returnDecoder?.release(); returnDecoder = null
-        returnTrack?.stop();   returnTrack?.release();   returnTrack   = null
+        synchronized(returnLock) {
+            returnConfigured = false
+            try { returnDecoder?.stop() } catch (_: Exception) {}
+            returnDecoder?.release(); returnDecoder = null
+            returnTrack?.stop();   returnTrack?.release();   returnTrack   = null
+        }
     }
 
     private fun receiveLoop() {
@@ -2092,15 +2114,19 @@ class VortexCamPlugin(
         }
     }
 
-    private var returnFormat: android.media.MediaFormat? = null
+    private var returnConfigured = false
+    // The SRT receive thread decodes while stopStream releases the decoder ("releaseOutputBuffer() is valid only at
+    // Executing states; currently during stop()", Redmi 2026-10-21): both go through this lock.
+    private val returnLock = Any()
     private var returnPtsUs = 0L
     private var returnLastResetMs = 0L
     private var returnResets = 0
 
-    private fun newReturnDecoder(fmt: android.media.MediaFormat): MediaCodec =
-        MediaCodec.createDecoderByType("audio/opus").also { it.configure(fmt, null, null, 0); it.start() }
+    private fun newReturnDecoder(): MediaCodec =
+        MediaCodec.createDecoderByType("audio/opus").also { it.configure(opusReturnFormat(), null, null, 0); it.start() }
 
-    private fun decodeAndPlay(buf: ByteArray, offset: Int, length: Int) {
+    private fun decodeAndPlay(buf: ByteArray, offset: Int, length: Int) = synchronized(returnLock) {
+        if (!returnConfigured) return@synchronized
         try { decodeAndPlayOnce(buf, offset, length) } catch (e: Exception) {
             // Recreate the decoder (at most once a second) instead of leaving it dead.
             try { returnDecoder?.release() } catch (_: Exception) {}
@@ -2108,7 +2134,7 @@ class VortexCamPlugin(
             val now = System.currentTimeMillis()
             if (now - returnLastResetMs >= 1000) {
                 returnLastResetMs = now
-                returnDecoder = try { returnFormat?.let { newReturnDecoder(it) } } catch (e2: Exception) { null }
+                returnDecoder = try { newReturnDecoder() } catch (e2: Exception) { null }
                 if (returnResets++ < 5) {
                     val msg = "[retorno] decodificador Opus reiniciado (${e.javaClass.simpleName}: ${e.message})\n"
                     Log.w(TAG, msg.trim())

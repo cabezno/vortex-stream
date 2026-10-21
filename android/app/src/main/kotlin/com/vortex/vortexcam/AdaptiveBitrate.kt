@@ -35,6 +35,22 @@ class AdaptiveBitrate(
         }
     }
 
+    /**
+     * The network is far from carrying this rate (SRT: packets dropped, or a send queue over twice the latency).
+     * Cut at once to 70 % of what actually got through ([sentMbps], libsrt's measured send rate), at least halving,
+     * at most every second - not -30 % every 1.5 s from a rate it never carried.
+     */
+    @Synchronized fun reportSevere(sentMbps: Double, detail: String = "") {
+        val now = System.currentTimeMillis()
+        cleanSinceMs = now
+        if (now - lastChangeMs < 1000 || currentBps <= floorBps) return
+        val measured = if (sentMbps > 0) (sentMbps * 1e6 * 0.7).toInt() else Int.MAX_VALUE
+        set(maxOf(floorBps, minOf(currentBps / 2, measured)), now, "baja fuerte — $detail")
+    }
+
+    /** Not lossy, not clean either (data in flight): no change, and the 8 s clean wait starts over. */
+    @Synchronized fun hold() { cleanSinceMs = System.currentTimeMillis() }
+
     private fun set(bps: Int, now: Long, why: String) {
         if (bps == currentBps) return
         currentBps = bps; lastChangeMs = now
