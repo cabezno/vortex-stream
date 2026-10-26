@@ -12,7 +12,7 @@ enum CameraFacing { back, front }
 // Resolution priority (highest wins):
 //   1. Engine-requested via requestResolution() from data channel
 //   2. Manual user selection via setResolution()
-//   3. Default: maximum camera resolution (ideal 4K, no minimum)
+//   3. Default: 1080p (_resolution), capped to the encoder and the camera
 // =============================================================================
 
 enum CameraResolution { r720p, r1080p, r4k }
@@ -109,15 +109,15 @@ class CameraService extends ChangeNotifier {
         'frameRate': {'ideal': 60, 'min': 30},
       };
     } else {
-      // No engine constraint and no manual selection: let the camera HAL pick
-      // the highest resolution it supports (16:9, up to 4K).
-      // Using 'ideal' without 'min' allows the HAL to go lower if 4K isn't
-      // available — the engine will request a specific resolution anyway once
-      // the data channel opens.
+      // No engine constraint: the resolution picked on screen (1080p by default), capped to the encoder and the
+      // camera. This branch used to ignore it and capture at the maximum (4K) while the screen said 1080p: WebRTC's
+      // quality scaler may scale the stream up to the CAPTURE size, so on a static scene (low QP) it went to
+      // 3840x2160 and the Mi A3's encoder stalled ~7 s on the re-init, then fell to 1080p (DT-313, 2026-10-26).
+      final selW = _resolutionWidth(), selH = _resolutionHeight();
       videoConstraints = {
         'facingMode': _facing == CameraFacing.back ? 'environment' : 'user',
-        'width':  capW,                    // number, not {'ideal'} (see above); capped to the encoder
-        'height': capH,
+        'width':  selW < capW ? selW : capW,   // number, not {'ideal'} (see above)
+        'height': selH < capH ? selH : capH,
         'frameRate': {'ideal': 60, 'min': 30},
         'aspectRatio': {'ideal': 1.7778},  // force 16:9 (not 4:3 native sensor)
       };
