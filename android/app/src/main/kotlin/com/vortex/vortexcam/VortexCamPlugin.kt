@@ -261,6 +261,11 @@ class VortexCamPlugin(
                 } catch (e: Exception) { result.success(false) }
             }
             "sdkInt" -> result.success(android.os.Build.VERSION.SDK_INT)
+            // «Sonido» of the camera → SAMBA (DT-315): «voz» / «auto» only when the phone has a noise suppressor.
+            "audioCaps" -> result.success(mapOf(
+                "noiseSuppressor" to MicProcessing.available(),
+                "echoCanceler" to (try { android.media.audiofx.AcousticEchoCanceler.isAvailable() } catch (_: Exception) { false })))
+            "setMicMode" -> { micProc.setMode(call.argument<String>("mode") ?: "natural"); result.success(null) }
             // NFC pairing (NfcPairing.kt): the switcher advertises its QR JSON as a card, a camera reads it.
             "nfcInfo" -> {
                 val a = activity?.get()
@@ -854,6 +859,7 @@ class VortexCamPlugin(
         sblMicThread?.join(1000)
         stopSblMicUplink()
         sblSps = null; sblPps = null   // re-captured on the next stream
+        micProc.release()
         try { audioRecord?.stop(); audioRecord?.release() } catch (_: Exception) {}
         audioRecord = null
         try { audioEncoder?.stop(); audioEncoder?.release() } catch (_: Exception) {}
@@ -896,7 +902,8 @@ class VortexCamPlugin(
                 MediaRecorder.AudioSource.MIC, audioSampleRate,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf * 4)
             audioRecord!!.startRecording()
-            Log.i(TAG, "Audio: ${audioSampleRate}Hz mono 128kbps AAC")
+            micProc.attach(audioRecord!!.audioSessionId, audioSampleRate)
+            Log.i(TAG, "Audio: ${audioSampleRate}Hz mono 128kbps AAC · sonido ${micProc.label()}")
         } catch (e: Exception) {
             Log.e(TAG, "Audio setup failed (stream continues without audio): $e")
             try { audioRecord?.release() } catch (_: Exception) {}
@@ -1386,6 +1393,7 @@ class VortexCamPlugin(
                 MediaRecorder.AudioSource.MIC, SBL_AUDIO_RATE,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf * 4)
             sblMicRecord!!.startRecording()
+            micProc.attach(sblMicRecord!!.audioSessionId, SBL_AUDIO_RATE)
 
             sblMicThread = thread(name = "SblMicUplink") { sblMicLoop() }
             Log.i(TAG, "SBL mic uplink: ${SBL_AUDIO_RATE}Hz mono Opus ${SBL_AUDIO_BITRATE/1000}kbps")
@@ -2358,6 +2366,8 @@ class VortexCamPlugin(
     private val micSamples = java.util.concurrent.atomic.AtomicLong()
     private val micPeak = java.util.concurrent.atomic.AtomicInteger()
     private val micPkts = java.util.concurrent.atomic.AtomicLong()
+    // Natural / voice / auto (MicProcessing.kt): the phone's noise suppressor on the mic's own session.
+    private val micProc = MicProcessing { msg -> Log.i(TAG, msg.trim()); Thread { sendLogBytes(msg, "mic_mode") }.start() }
 
     private fun noteMicPcm(pcm: ByteArray, n: Int) {
         var sq = 0L; var peak = 0
@@ -2368,6 +2378,7 @@ class VortexCamPlugin(
             i += 2
         }
         micSumSq.addAndGet(sq); micSamples.addAndGet((n / 2).toLong())
+        micProc.note(sq, n / 2)
         micPeak.accumulateAndGet(peak) { x, y -> maxOf(x, y) }
     }
 
@@ -2377,7 +2388,7 @@ class VortexCamPlugin(
         val level = if (n > 0 && sq > 0) "%.0f dBFS (pico %.0f)".format(
                         10 * Math.log10(sq / n / (32768.0 * 32768.0)), 20 * Math.log10(maxOf(peak, 1) / 32768.0))
                     else if (n > 0) "silencio digital" else "nada capturado"
-        return "[mic] $via · ${"%.0f".format(pk / secs)} paq/s enviados · $level\n"
+        return "[mic] $via · ${"%.0f".format(pk / secs)} paq/s enviados · $level · sonido ${micProc.label()}\n"
     }
 
     private fun routeName(t: Int): String = when (t) {

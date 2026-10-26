@@ -31,6 +31,7 @@ import 'services/omt_connection_service.dart';
 import 'services/sbl_connection_service.dart';
 import 'services/camera_service.dart';
 import 'services/device_capabilities.dart';
+import 'services/samba_mic.dart';
 import 'theme/samba_theme.dart';
 import 'services/log_service.dart';
 import 'screens/mode_picker.dart';
@@ -46,6 +47,7 @@ void main() {
     await LogService.instance.init();
     // Before anything touches WebRTC: the camera's sound mode picks the phone's audio engine (once per run).
     await CameraAudio.initEngine();
+    await SambaMic.load();   // «Sonido» of the camera → SAMBA, and whether this phone can offer voz / auto
 
     final prev = FlutterError.onError;
     FlutterError.onError = (details) {
@@ -847,6 +849,8 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
             ),
           ),
           const SizedBox(height: 16),
+          _buildSoundPicker(),
+          const SizedBox(height: 16),
 
           // Transport selector (only when several are offered)
           if (_config != null && _transportOptions.length > 1) ...[
@@ -900,6 +904,40 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
         ],
       )),
     );
+  }
+
+  // «Sonido» (DT-315): natural, voz or auto. Voz and auto only on phones with a noise suppressor: there they win when
+  // the place is noisy; elsewhere the choice would do nothing.
+  Widget _buildSoundPicker() {
+    final ok = SambaMic.voiceAvailable;
+    final hint = !ok
+        ? 'Este celular no tiene supresor de ruido: sonido natural.'
+        : switch (SambaMic.mode) {
+            SambaMicMode.natural => 'El lugar como suena, sin procesar.',
+            SambaMicMode.voice   => 'Quita el ruido de fondo; la voz suena menos natural.',
+            SambaMicMode.auto    => 'Natural, y pasa solo a voz mientras haya ruido de fondo.',
+          };
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        const Text('Sonido', style: SdText.bodyHi),
+        const SizedBox(width: 12),
+        Expanded(child: SegmentedButton<SambaMicMode>(
+          segments: [
+            const ButtonSegment(value: SambaMicMode.natural, label: Text('Natural')),
+            ButtonSegment(value: SambaMicMode.voice, label: const Text('Voz'), enabled: ok),
+            ButtonSegment(value: SambaMicMode.auto, label: const Text('Auto'), enabled: ok),
+          ],
+          selected: {SambaMic.mode},
+          showSelectedIcon: false,
+          onSelectionChanged: (_live || _connecting) ? null : (s) async {
+            await SambaMic.set(s.first);
+            if (mounted) setState(() {});
+          },
+        )),
+      ]),
+      const SizedBox(height: 4),
+      Text(hint, style: SdText.caption),
+    ]);
   }
 
   // Where the phone sends + the hotspot Wi-Fi it joins (only when the QR brought one).

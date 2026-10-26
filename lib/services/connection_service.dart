@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'camera_service.dart';
 import 'device_capabilities.dart';
+import 'samba_mic.dart';
 
 // =============================================================================
 // ConnectionService — manages WebRTC/WHIP connection to VortexEngine
@@ -51,6 +52,10 @@ class ConnectionService extends ChangeNotifier {
   Timer?              _statsTimer;
   int                 _statsTick = 0;
   int                 _lastMicBytes = 0;   // audio bytes sent at the previous mic line (DT-315)
+  // «Sonido» auto by WHIP (DT-315): mic level every 2 s (newest last, 20 s) and the track WebRTC processes now.
+  final List<double>  _micDb = [];
+  bool                _micSwitching = false;
+  MediaStreamTrack?   _micTrack;
   Timer?              _heartbeatTimer;
 
   // Return audio (talkback): the engine sends the program mix back over the
@@ -328,7 +333,11 @@ class ConnectionService extends ChangeNotifier {
       final v = stream.getVideoTracks().firstOrNull;
       final a = stream.getAudioTracks().firstOrNull;
       if (v != null && _videoSender != null) await _videoSender!.replaceTrack(v);
-      if (a != null && _audioSender != null) await _audioSender!.replaceTrack(a);
+      if (a != null && _audioSender != null) {
+        await _audioSender!.replaceTrack(a);
+        try { await _micTrack?.stop(); } catch (_) {}   // the «Sonido» auto track, if one was swapped in
+        _micTrack = null;
+      }
       _localStream = stream;
       debugPrint('[SambaAir] stream rebuilt → tracks replaced on senders');
     } catch (e) {
@@ -370,19 +379,24 @@ class ConnectionService extends ChangeNotifier {
     if (_statsTimer?.isActive ?? false) return;
     _statsTick = 0;
     _lastMicBytes = 0;
+    _micDb.clear();
     _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       if (_peerConnection == null) return;
       final stats = await _peerConnection!.getStats();
       // Microphone, measured (DT-315): by WHIP the engine decoded silence. The level WebRTC sees at the source and
       // the audio bytes that went out, on the same line as the video every 6 s.
-      double? micLevel; int? micBytes;
+      double? micLevel, retLevel; int? micBytes;
       for (final report in stats) {
         final v = report.values;
         if (report.type == 'media-source' && v['kind'] == 'audio') micLevel = (v['audioLevel'] as num?)?.toDouble();
+        if (report.type == 'inbound-rtp' && (v['mediaType'] == 'audio' || v['kind'] == 'audio')) {
+          retLevel = (v['audioLevel'] as num?)?.toDouble();   // the return (talkback), as it plays
+        }
         if (report.type == 'outbound-rtp' && (v['mediaType'] == 'audio' || v['kind'] == 'audio')) {
           micBytes = (v['bytesSent'] as num?)?.toInt();
         }
       }
+      if (micLevel != null) _noteMicForAuto(micLevel);
       for (final report in stats) {
         final v = report.values;
         if (report.type == 'outbound-rtp' && (v['mediaType'] == 'video' || v['kind'] == 'video')) {
@@ -407,16 +421,60 @@ class ConnectionService extends ChangeNotifier {
             debugPrint('[SambaAir] WHIP envío: ${v['frameWidth']}x${v['frameHeight']} '
                 '${v['framesPerSecond']} fps · objetivo ${((v['targetBitrate'] as num?) ?? 0) ~/ 1000} kbps · '
                 'límite=${v['qualityLimitationReason']} · encoder=${v['encoderImplementation']}');
-            final db = micLevel == null ? 'sin dato' : micLevel <= 0 ? 'silencio' :
-                '${(20 * math.log(micLevel) / math.ln10).toStringAsFixed(0)} dBFS';
+            String dbOf(double? l) => l == null ? 'sin dato' : l <= 0 ? 'silencio' :
+                '${(20 * math.log(l) / math.ln10).toStringAsFixed(0)} dBFS';
             final kbps = micBytes == null ? '?' : (((micBytes - _lastMicBytes) * 8) / 6000).toStringAsFixed(1);
             if (micBytes != null) _lastMicBytes = micBytes;
-            debugPrint('[SambaAir] WHIP mic: nivel $db · audio enviado $kbps kbps');
+            final mode = SambaMic.mode == SambaMicMode.auto
+                ? 'auto: ${SambaMic.autoVoice ? 'voz' : 'natural'}' : SambaMic.mode.name;
+            debugPrint('[SambaAir] WHIP mic: nivel ${dbOf(micLevel)} · audio enviado $kbps kbps · sonido $mode · '
+                'retorno ${dbOf(retLevel)}');
           }
           break;
         }
       }
     });
+  }
+
+  // ---- «Sonido» auto by WHIP (DT-315) ----
+  // The same rule as MicProcessing.kt on SRT/SBL, on WebRTC's mic level sampled every 2 s: voice after 10 s whose
+  // quietest sample is above −50 dBFS (steady background noise: speech has pauses), natural again after 20 s whose two
+  // halves both have a sample under −66 (lower: with voice on, what is measured is already partly cleaned).
+  void _noteMicForAuto(double level) {
+    if (SambaMic.mode != SambaMicMode.auto) { _micDb.clear(); return; }
+    _micDb.add(level <= 0 ? -120 : 20 * math.log(level) / math.ln10);
+    while (_micDb.length > 10) { _micDb.removeAt(0); }
+    double minOf(Iterable<double> l) => l.reduce(math.min);
+    if (!SambaMic.autoVoice && _micDb.length >= 5) {
+      final floor = minOf(_micDb.skip(_micDb.length - 5));
+      if (floor > -50) _switchMicProcessing(true, 'voz por ruido de fondo (piso ${floor.toStringAsFixed(0)} dBFS durante 10 s)');
+    } else if (SambaMic.autoVoice && _micDb.length >= 10) {
+      final floor = math.max(minOf(_micDb.take(5)), minOf(_micDb.skip(5)));
+      if (floor < -66) _switchMicProcessing(false, 'natural, se calmó (piso ${floor.toStringAsFixed(0)} dBFS durante 20 s)');
+    }
+  }
+
+  // WebRTC's processing is chosen when the mic track is opened: a new audio-only track with the other constraints,
+  // swapped onto the live sender (replaceTrack, no renegotiation). The video is untouched.
+  Future<void> _switchMicProcessing(bool voice, String why) async {
+    if (_micSwitching || _audioSender == null) return;
+    _micSwitching = true;
+    try {
+      final s = await navigator.mediaDevices.getUserMedia({'audio': SambaMic.constraints(voice: voice), 'video': false});
+      final t = s.getAudioTracks().firstOrNull;
+      if (t == null) return;
+      await _audioSender!.replaceTrack(t);
+      final old = _micTrack ?? _localStream?.getAudioTracks().firstOrNull;
+      _micTrack = t;
+      try { await old?.stop(); } catch (_) {}
+      SambaMic.autoVoice = voice;
+      _micDb.clear();
+      debugPrint('[SambaAir] [mic] modo → $why');
+    } catch (e) {
+      debugPrint('[SambaAir] [mic] cambio de sonido falló: $e');
+    } finally {
+      _micSwitching = false;
+    }
   }
 
   // ---- Heartbeat via data channel (latency + keep-alive) ----
@@ -478,6 +536,9 @@ class ConnectionService extends ChangeNotifier {
     await _peerConnection?.close();
     _peerConnection = null;
     _localStream    = null;
+    try { await _micTrack?.stop(); } catch (_) {}
+    _micTrack = null;
+    SambaMic.autoVoice = false;
     _videoSender    = null;
     _audioSender    = null;
     _remoteAudioTrack = null;

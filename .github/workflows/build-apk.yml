@@ -179,6 +179,10 @@ jobs:
       - name: WebRTC SDK for the Switcher mode
         run: python3 tool/add_webrtc_compileonly.py
 
+      # «Sonido natural» by WHIP: flutter_webrtc opens the mic in stereo, silent on one-mic phones (DT-315)
+      - name: WebRTC mic in mono
+        run: python3 tool/patch_webrtc_mono_input.py
+
       - name: Generate launcher icons
         run: flutter pub run flutter_launcher_icons
 
