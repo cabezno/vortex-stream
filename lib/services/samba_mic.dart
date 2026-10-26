@@ -1,0 +1,69 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// «Sonido» of the camera → SAMBA mic (DT-315, 2026-10-26).
+/// - natural: the place as it sounds (no processing).
+/// - voice: the phone's noise suppressor (SRT / SBL / RTMP) or WebRTC's voice processing (WHIP): wins when there is
+///   background noise, at the cost of a less natural sound.
+/// - auto: natural, and voice by itself while there is steady background noise (MicProcessing.kt; WHIP:
+///   ConnectionService).
+/// voice and auto are offered only when the phone has a noise suppressor ([voiceAvailable]).
+enum SambaMicMode { natural, voice, auto }
+
+class SambaMic {
+  static const _key = 'samba.micMode';
+  static const _ch = MethodChannel('com.vortex.vortexcam/native');
+  static SambaMicMode mode = SambaMicMode.natural;
+  static bool voiceAvailable = false;
+  /// WHIP in auto: voice processing on right now (decided by ConnectionService from the mic level).
+  static bool autoVoice = false;
+
+  static Future<void> load() async {
+    try {
+      final caps = await _ch.invokeMethod<Map>('audioCaps');
+      voiceAvailable = caps?['noiseSuppressor'] == true;
+    } catch (e) {
+      debugPrint('[SambaMic] audioCaps: $e');
+    }
+    try {
+      final s = (await SharedPreferences.getInstance()).getString(_key);
+      mode = SambaMicMode.values.firstWhere((m) => m.name == s, orElse: () => SambaMicMode.natural);
+    } catch (_) {}
+    if (!voiceAvailable) mode = SambaMicMode.natural;
+    await _push();
+  }
+
+  static Future<void> set(SambaMicMode m) async {
+    mode = voiceAvailable ? m : SambaMicMode.natural;
+    autoVoice = false;
+    try { (await SharedPreferences.getInstance()).setString(_key, mode.name); } catch (_) {}
+    await _push();
+  }
+
+  static Future<void> _push() async {
+    try { await _ch.invokeMethod('setMicMode', {'mode': mode.name}); } catch (_) {}
+  }
+
+  static bool get voiceNow => mode == SambaMicMode.voice || (mode == SambaMicMode.auto && autoVoice);
+
+  /// Before opening the WHIP camera: Android audio mode NORMAL (media), not flutter_webrtc's default IN_COMMUNICATION.
+  /// In «call» mode the Galaxy A10's audio HAL gated its mic to digital silence for seconds at a time even with the MIC
+  /// source and a tone playing (2026-10-26), while SRT/SBL — no call mode — carried it steadily. WebRTC's voice
+  /// processing (voz / auto) is its own software and works the same in normal mode; the return plays as media, on the
+  /// loudspeaker, as by SRT/SBL.
+  static Future<void> applyAudioMode() async {
+    try {
+      await Helper.setAndroidAudioConfiguration(AndroidAudioConfiguration.media);
+    } catch (e) {
+      debugPrint('[SambaMic] audio mode: $e');
+    }
+  }
+
+  /// getUserMedia audio constraints for WHIP (WebRTC's own processing).
+  static Map<String, dynamic> constraints({bool? voice}) {
+    final v = voice ?? voiceNow;
+    return {'echoCancellation': v, 'noiseSuppression': v, 'autoGainControl': v};
+  }
+}
