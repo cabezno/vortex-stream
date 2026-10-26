@@ -514,6 +514,7 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
 
     _log('WHIP: iniciando cámara...');
     final cam = context.read<CameraService>();
+    await SambaMic.applyAudioMode();   // normal audio mode, not «call»: the A10's mic gated to silence in call mode
     await cam.initialize();
     _renderer.srcObject = cam.stream;
 

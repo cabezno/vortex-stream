@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// «Sonido» of the camera → SAMBA mic (DT-315, 2026-10-26).
@@ -46,6 +47,19 @@ class SambaMic {
   }
 
   static bool get voiceNow => mode == SambaMicMode.voice || (mode == SambaMicMode.auto && autoVoice);
+
+  /// Before opening the WHIP camera: Android audio mode NORMAL (media), not flutter_webrtc's default IN_COMMUNICATION.
+  /// In «call» mode the Galaxy A10's audio HAL gated its mic to digital silence for seconds at a time even with the MIC
+  /// source and a tone playing (2026-10-26), while SRT/SBL — no call mode — carried it steadily. WebRTC's voice
+  /// processing (voz / auto) is its own software and works the same in normal mode; the return plays as media, on the
+  /// loudspeaker, as by SRT/SBL.
+  static Future<void> applyAudioMode() async {
+    try {
+      await Helper.setAndroidAudioConfiguration(AndroidAudioConfiguration.media);
+    } catch (e) {
+      debugPrint('[SambaMic] audio mode: $e');
+    }
+  }
 
   /// getUserMedia audio constraints for WHIP (WebRTC's own processing).
   static Map<String, dynamic> constraints({bool? voice}) {
