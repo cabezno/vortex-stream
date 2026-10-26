@@ -33,6 +33,7 @@ import android.net.nsd.NsdServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.PowerManager
 import android.util.Log
 import android.util.Size
 import io.flutter.embedding.android.FlutterActivity
@@ -646,8 +647,19 @@ class VortexCamPlugin(
     @Volatile private var encBitrate = 0
     // SBL / SRT bitrate that follows the network (AdaptiveBitrate.kt). null when not streaming one of them.
     @Volatile private var abr: AdaptiveBitrate? = null
+    private var abrLabel = ""
+
+    // Heat (DT-145, HeatGuard.kt). The encode threads hold [encLock] for each output buffer, so the encoder can be
+    // swapped for a 1080p one while streaming without a thread using the old one's buffer indices.
+    private val encLock = java.util.concurrent.locks.ReentrantLock()
+    private var encCodec = "h264"
+    private var encKeyframeMs = 2000
+    private var heat: HeatGuard? = null
+    @Volatile private var heatDownshifted = false
+    @Volatile private var thermalStatus = 0
 
     private fun startAbr(label: String) {
+        abrLabel = label
         abr = AdaptiveBitrate(encBitrate, label) { bps ->
             encoder?.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bps) })
             sblPaceBps = bps.toLong()            // SBL paces at 1.5x the bitrate: follow it down and up
@@ -658,7 +670,9 @@ class VortexCamPlugin(
     private fun setupEncoder(
         codec: String, width: Int, height: Int,
         bitrateBps: Int, keyframeMs: Int,
+        operatingRate: Int = 120,   // 0 = let the codec pick (hot phone: no clocks at the maximum)
     ): Boolean {
+        encCodec = codec; encKeyframeMs = keyframeMs
         val ladder = listOf(
             Triple(3840, 2160, 30_000_000),
             Triple(1920, 1080, 16_000_000),
@@ -672,7 +686,7 @@ class VortexCamPlugin(
             // First with the latency tuning, then plain: some encoders (Exynos on the Galaxy A10, 2026-10-02) reject
             // KEY_LOW_LATENCY with -22 at EVERY resolution, so nothing could stream on SRT/RTMP/SBL at all.
             for (tuned in listOf(true, false)) {
-                if (tryConfigureEncoder(codec, a.first, a.second, a.third, keyframeMs, tuned)) {
+                if (tryConfigureEncoder(codec, a.first, a.second, a.third, keyframeMs, tuned, operatingRate)) {
                     encWidth = a.first; encHeight = a.second; encBitrate = a.third
                     Log.i(TAG, "encoder @ ${a.first}x${a.second} @${a.third / 1000}kbps${if (tuned) "" else " (sin ajustes de latencia)"}")
                     return true
@@ -685,7 +699,7 @@ class VortexCamPlugin(
 
     private fun tryConfigureEncoder(
         codec: String, width: Int, height: Int,
-        bitrateBps: Int, keyframeMs: Int, tuned: Boolean,
+        bitrateBps: Int, keyframeMs: Int, tuned: Boolean, operatingRate: Int,
     ): Boolean {
         return try {
             val mime = if (codec == "hevc") MediaFormat.MIMETYPE_VIDEO_HEVC
@@ -706,7 +720,7 @@ class VortexCamPlugin(
                 setInteger(MediaFormat.KEY_BITRATE_MODE,     MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
                 if (tuned) {
                     setInteger(MediaFormat.KEY_PRIORITY,         0)
-                    setInteger(MediaFormat.KEY_OPERATING_RATE,   120)
+                    if (operatingRate > 0) setInteger(MediaFormat.KEY_OPERATING_RATE, operatingRate)
                     if (android.os.Build.VERSION.SDK_INT >= 30)
                         setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
                 }
@@ -749,6 +763,70 @@ class VortexCamPlugin(
         }
     }
 
+    // ====================================================================
+    // Heat (DT-145)
+    // ====================================================================
+    private fun startHeatGuard() {
+        heatDownshifted = false
+        heat?.stop()
+        heat = HeatGuard(context,
+            onStatus = { s -> onThermalStatus(s) },
+            onSlowEncoder = { fps -> heatDownshift("codificador a ${"%.1f".format(fps)} fps (sin dato térmico o antes de él)") },
+        ).also { it.start() }
+    }
+
+    // Android thermal status: from MODERATE the bitrate gets a ceiling (less work for the encoder and the radio);
+    // from SEVERE the picture goes down to 1080p. Back to normal only lifts the ceiling: the size stays at 1080p
+    // until the next stream, so a phone at the edge does not bounce between 4K and 1080p.
+    private fun onThermalStatus(s: Int) {
+        thermalStatus = s
+        val msg = "[calor] estado térmico ${HeatGuard.name(s)} · ${encWidth}x${encHeight}\n"
+        Log.i(TAG, msg.trim())
+        Thread { sendLogBytes(msg, "heat") }.start()
+        when {
+            s >= PowerManager.THERMAL_STATUS_SEVERE -> {
+                abr?.setHeatCeiling(0.6, "estado ${HeatGuard.name(s)}")
+                heatDownshift("estado térmico ${HeatGuard.name(s)}")
+            }
+            s >= PowerManager.THERMAL_STATUS_MODERATE -> abr?.setHeatCeiling(0.6, "estado ${HeatGuard.name(s)}")
+            else -> abr?.setHeatCeiling(1.0, "estado ${HeatGuard.name(s)}")
+        }
+    }
+
+    // Swap the encoder for a 1080p one without stopping the stream (once per stream). The encode thread holds
+    // encLock per buffer, so it never touches the old encoder after it is released. Each transport picks up the new
+    // parameter sets from INFO_OUTPUT_FORMAT_CHANGED (SRT: TS muxer, SBL: frame header + SPS/PPS, RTMP: new AVC
+    // sequence header); the new encoder starts with an IDR.
+    private fun heatDownshift(why: String) {
+        if (heatDownshifted || !streaming.get() || encWidth <= 1920) return
+        heatDownshifted = true
+        thread(name = "HeatDownshift") {
+            val from = "${encWidth}x${encHeight}"
+            var ok = false
+            encLock.lock()
+            try {
+                if (!streaming.get()) return@thread
+                releaseRelay()
+                try { encoder?.stop(); encoder?.release() } catch (_: Exception) {}
+                encoder = null
+                encoderSurface?.release(); encoderSurface = null
+                sblSps = null; sblPps = null
+                ok = setupEncoder(encCodec, 1920, 1080, 16_000_000, encKeyframeMs, operatingRate = 0)
+            } finally { encLock.unlock() }
+            val msg = if (ok) {
+                if (abrLabel.isNotEmpty() && abr != null) {
+                    startAbr(abrLabel)                                   // max = the new encoder's bitrate
+                    if (thermalStatus >= PowerManager.THERMAL_STATUS_MODERATE)
+                        abr?.setHeatCeiling(0.6, "estado ${HeatGuard.name(thermalStatus)}")
+                }
+                sblPaceBps = encBitrate.toLong()
+                "[calor] $why → baja de $from a ${encWidth}x${encHeight} @${encBitrate / 1000} kbps sin cortar\n"
+            } else "[calor] $why → no pudo rearmar el codificador ($lastEncoderError)\n"
+            if (ok) Log.w(TAG, msg.trim()) else Log.e(TAG, msg.trim())
+            Thread { sendLogBytes(msg, "heat") }.start()
+        }
+    }
+
     private fun requestIdr() {
         try {
             encoder?.setParameters(android.os.Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
@@ -757,6 +835,7 @@ class VortexCamPlugin(
 
     private fun stopStream() {
         if (!streaming.getAndSet(false)) return
+        heat?.stop(); heat = null
         tallyAtMs = 0L; tallyPgm = false; tallyPrv = false
         retLogAtMs = 0L
         encodeThread?.join(2000); encodeThread = null
@@ -905,6 +984,7 @@ class VortexCamPlugin(
                 encodeThread = thread(name = "SrtEncode") {
                     drainToSrt(muxer)
                 }
+                startHeatGuard()
 
                 result.success(null)
                 val how = srtSocket?.mode ?: "?"
@@ -1004,6 +1084,8 @@ class VortexCamPlugin(
                     lastCvoSentMs = nowMs
                 }
             }
+            encLock.lock()
+            try {
             val idx = encoder?.dequeueOutputBuffer(info, 10_000) ?: break
             when {
                 idx == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
@@ -1017,6 +1099,7 @@ class VortexCamPlugin(
             }
             val isFrame = (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) == 0
             if (isFrame) {
+                heat?.noteFrame(info.presentationTimeUs)
                 val tOut = System.nanoTime()
                 if (lastOutNs != 0L) maxOutGapNs = maxOf(maxOutGapNs, tOut - lastOutNs)
                 lastOutNs = tOut
@@ -1067,6 +1150,7 @@ class VortexCamPlugin(
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
             if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+            } finally { encLock.unlock() }
         }
     }
 
@@ -1100,6 +1184,7 @@ class VortexCamPlugin(
                 startAudioInputThread()
                 startRtmpAudioOutputThread(st)
                 encodeThread = thread(name = "RtmpEncode") { drainToRtmp(st) }
+                startHeatGuard()
 
                 result.success(null)
                 Log.i(TAG, "RTMP streaming → $url ${width}x$height @${bitrate/1000}kbps H.264, audio=$hasAudio")
@@ -1120,10 +1205,13 @@ class VortexCamPlugin(
         var headerSet = false
 
         while (streaming.get()) {
+            encLock.lock()
+            try {
             val idx = encoder?.dequeueOutputBuffer(info, 10_000) ?: break
             when {
                 idx == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
                 idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    headerSet = false            // a new encoder (heat → 1080p): new AVC sequence header
                     val fmt = encoder!!.outputFormat
                     spsData = fmt.getByteBuffer("csd-0")?.let { ByteArray(it.remaining()).also { a -> it.duplicate().get(a) } }
                     ppsData = fmt.getByteBuffer("csd-1")?.let { ByteArray(it.remaining()).also { a -> it.duplicate().get(a) } }
@@ -1145,12 +1233,14 @@ class VortexCamPlugin(
                 st.setSpsPps(all, all); headerSet = true
             }
             val isKey = (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+            heat?.noteFrame(info.presentationTimeUs)
             out.set(info.offset, info.size, streamClock.video.sessionUs(info.presentationTimeUs), info.flags)
             st.sendVideoData(buf, out, isKey)
             bytesSent.addAndGet(info.size.toLong())
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
             if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+            } finally { encLock.unlock() }
         }
     }
 
@@ -1230,7 +1320,8 @@ class VortexCamPlugin(
                 val w = encWidth; val h = encHeight
                 sblPaceBps = encBitrate.toLong()
                 startAbr("SBL")
-                encodeThread = thread(name = "SblEncode") { drainToSbl(w, h) }
+                encodeThread = thread(name = "SblEncode") { drainToSbl() }
+                startHeatGuard()
                 result.success(null)
                 Log.i(TAG, "SBL streaming → $host:$port ${w}x${h} @${encBitrate/1000}kbps (pedido ${width}x${height} @${bitrate/1000}kbps)")
             } catch (e: Exception) {
@@ -1474,7 +1565,7 @@ class VortexCamPlugin(
         }
     }
 
-    private fun drainToSbl(width: Int, height: Int) {
+    private fun drainToSbl() {
         val info = MediaCodec.BufferInfo()
         var keepaliveNs = System.nanoTime()
         var cvoCheckNs = 0L
@@ -1494,6 +1585,8 @@ class VortexCamPlugin(
                 }
                 if (!sblLinkUp) sendSblHello(sblSourceName)
             }
+            encLock.lock()
+            try {
             val idx = encoder?.dequeueOutputBuffer(info, 10_000) ?: break
             when {
                 idx == MediaCodec.INFO_TRY_AGAIN_LATER -> continue
@@ -1526,12 +1619,15 @@ class VortexCamPlugin(
             }
 
             sblFrameCvo = cvoForFrame(info.presentationTimeUs)
-            sendSblVideoFrame(nalData, isKey, streamClock.video.sessionUs(info.presentationTimeUs), width, height)
+            heat?.noteFrame(info.presentationTimeUs)
+            // encWidth/encHeight, not the size at start: heat can swap the encoder for a 1080p one (DT-145).
+            sendSblVideoFrame(nalData, isKey, streamClock.video.sessionUs(info.presentationTimeUs), encWidth, encHeight)
             bytesSent.addAndGet(nalData.size.toLong())
             encoder!!.releaseOutputBuffer(idx, false)
             updateStats()
             maybeLogReturn()
             if ((info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) break
+            } finally { encLock.unlock() }
         }
     }
 
