@@ -54,6 +54,8 @@ class ConnectionService extends ChangeNotifier {
   int                 _lastMicBytes = 0;   // audio bytes sent at the previous mic line (DT-315)
   // «Sonido» auto by WHIP (DT-315): mic level every 2 s (newest last, 20 s) and the track WebRTC processes now.
   final List<double>  _micDb = [];
+  final List<double?> _micRms = [];
+  double              _lastMicEnergy = 0, _lastMicDur = 0;
   bool                _micSwitching = false;
   MediaStreamTrack?   _micTrack;
   Timer?              _heartbeatTimer;
@@ -379,16 +381,19 @@ class ConnectionService extends ChangeNotifier {
     if (_statsTimer?.isActive ?? false) return;
     _statsTick = 0;
     _lastMicBytes = 0;
-    _micDb.clear();
+    _micDb.clear(); _micRms.clear(); _lastMicEnergy = 0; _lastMicDur = 0;
     _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       if (_peerConnection == null) return;
       final stats = await _peerConnection!.getStats();
       // Microphone, measured (DT-315): by WHIP the engine decoded silence. The level WebRTC sees at the source and
       // the audio bytes that went out, on the same line as the video every 6 s.
-      double? micLevel, retLevel; int? micBytes;
+      double? retLevel, micEnergy, micDur; int? micBytes;
       for (final report in stats) {
         final v = report.values;
-        if (report.type == 'media-source' && v['kind'] == 'audio') micLevel = (v['audioLevel'] as num?)?.toDouble();
+        if (report.type == 'media-source' && v['kind'] == 'audio') {
+          micEnergy = (v['totalAudioEnergy'] as num?)?.toDouble();
+          micDur    = (v['totalSamplesDuration'] as num?)?.toDouble();
+        }
         if (report.type == 'inbound-rtp' && (v['mediaType'] == 'audio' || v['kind'] == 'audio')) {
           retLevel = (v['audioLevel'] as num?)?.toDouble();   // the return (talkback), as it plays
         }
@@ -396,7 +401,16 @@ class ConnectionService extends ChangeNotifier {
           micBytes = (v['bytesSent'] as num?)?.toInt();
         }
       }
-      if (micLevel != null) _noteMicForAuto(micLevel);
+      // RMS of the last 2 s from the cumulative energy. audioLevel is one instant: on the A10 it read 0 between
+      // samples of a continuous tone and could not tell a short dip from seconds of silence.
+      double? micRms;
+      if (micEnergy != null && micDur != null && micDur > _lastMicDur) {
+        micRms = math.sqrt(math.max(0, micEnergy - _lastMicEnergy) / (micDur - _lastMicDur));
+        _lastMicEnergy = micEnergy; _lastMicDur = micDur;
+      }
+      _micRms.add(micRms);
+      while (_micRms.length > 3) { _micRms.removeAt(0); }
+      if (micRms != null) _noteMicForAuto(micRms);
       for (final report in stats) {
         final v = report.values;
         if (report.type == 'outbound-rtp' && (v['mediaType'] == 'video' || v['kind'] == 'video')) {
@@ -427,8 +441,8 @@ class ConnectionService extends ChangeNotifier {
             if (micBytes != null) _lastMicBytes = micBytes;
             final mode = SambaMic.mode == SambaMicMode.auto
                 ? 'auto: ${SambaMic.autoVoice ? 'voz' : 'natural'}' : SambaMic.mode.name;
-            debugPrint('[SambaAir] WHIP mic: nivel ${dbOf(micLevel)} · audio enviado $kbps kbps · sonido $mode · '
-                'retorno ${dbOf(retLevel)}');
+            debugPrint('[SambaAir] WHIP mic: RMS cada 2 s ${_micRms.map(dbOf).join(' / ')} · '
+                'audio enviado $kbps kbps · sonido $mode · retorno ${dbOf(retLevel)}');
           }
           break;
         }
@@ -438,8 +452,8 @@ class ConnectionService extends ChangeNotifier {
 
   // ---- «Sonido» auto by WHIP (DT-315) ----
   // The same rule as MicProcessing.kt on SRT/SBL, on WebRTC's mic level sampled every 2 s: voice after 10 s whose
-  // quietest sample is above −50 dBFS (steady background noise: speech has pauses), natural again after 20 s whose two
-  // halves both have a sample under −66 (lower: with voice on, what is measured is already partly cleaned).
+  // quietest sample is above −40 dBFS (steady background noise: speech has pauses), natural again after 20 s whose two
+  // halves both have a sample under −52 (lower: with voice on, what is measured is already partly cleaned).
   void _noteMicForAuto(double level) {
     if (SambaMic.mode != SambaMicMode.auto) { _micDb.clear(); return; }
     _micDb.add(level <= 0 ? -120 : 20 * math.log(level) / math.ln10);
@@ -447,10 +461,10 @@ class ConnectionService extends ChangeNotifier {
     double minOf(Iterable<double> l) => l.reduce(math.min);
     if (!SambaMic.autoVoice && _micDb.length >= 5) {
       final floor = minOf(_micDb.skip(_micDb.length - 5));
-      if (floor > -50) _switchMicProcessing(true, 'voz por ruido de fondo (piso ${floor.toStringAsFixed(0)} dBFS durante 10 s)');
+      if (floor > -40) _switchMicProcessing(true, 'voz por ruido de fondo (piso ${floor.toStringAsFixed(0)} dBFS durante 10 s)');
     } else if (SambaMic.autoVoice && _micDb.length >= 10) {
       final floor = math.max(minOf(_micDb.take(5)), minOf(_micDb.skip(5)));
-      if (floor < -66) _switchMicProcessing(false, 'natural, se calmó (piso ${floor.toStringAsFixed(0)} dBFS durante 20 s)');
+      if (floor < -52) _switchMicProcessing(false, 'natural, se calmó (piso ${floor.toStringAsFixed(0)} dBFS durante 20 s)');
     }
   }
 

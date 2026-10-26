@@ -849,8 +849,6 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
             ),
           ),
           const SizedBox(height: 16),
-          _buildSoundPicker(),
-          const SizedBox(height: 16),
 
           // Transport selector (only when several are offered)
           if (_config != null && _transportOptions.length > 1) ...[
@@ -891,6 +889,9 @@ class _HomePageState extends State<_HomePage> with WidgetsBindingObserver {
               label: const Text('Ingresar manualmente'),
             ),
           ),
+          // Below «Salir en vivo»: above it, it pushed the button off a landscape screen (Galaxy A10, 2026-10-26).
+          const SizedBox(height: 8),
+          _buildSoundPicker(),
           if (caps.isNotEmpty) ...[
             const SizedBox(height: 8),
             Row(children: [

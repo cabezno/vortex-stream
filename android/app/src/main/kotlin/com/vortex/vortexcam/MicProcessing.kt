@@ -10,7 +10,7 @@ import android.util.Log
  *
  * «auto» switches by itself: voice after [ENTER_MS] of steady background noise (the quietest 0.5 s block of the window
  * above [ENTER_DB] — speech has pauses, a fan or traffic does not), natural again after [EXIT_MS] with the quietest
- * block under [EXIT_DB]. The exit threshold is much lower than the entry one because what is measured comes AFTER the
+ * block under [EXIT_DB]. The exit threshold is lower than the entry one because what is measured comes AFTER the
  * suppressor while it is on: it takes off part of the noise, and without the gap the mode would bounce.
  */
 class MicProcessing(private val log: (String) -> Unit) {
@@ -87,8 +87,10 @@ class MicProcessing(private val log: (String) -> Unit) {
 
     companion object {
         private const val TAG = "MicProcessing"
-        const val ENTER_DB = -50.0
-        const val EXIT_DB = -66.0
+        // 2026-10-26, Mi A3 in a room with PC fans: steady floor −45/−48, which −50 already took for «noise» (always
+        // voice) and the suppressor barely moved. Voice is for noise that really bothers: −40 in, −52 out.
+        const val ENTER_DB = -40.0
+        const val EXIT_DB = -52.0
         const val ENTER_MS = 10_000L
         const val EXIT_MS = 20_000L
         fun available(): Boolean = try { NoiseSuppressor.isAvailable() } catch (_: Exception) { false }
