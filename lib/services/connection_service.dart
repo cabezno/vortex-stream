@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
@@ -49,6 +50,7 @@ class ConnectionService extends ChangeNotifier {
   RTCRtpSender?       _audioSender;
   Timer?              _statsTimer;
   int                 _statsTick = 0;
+  int                 _lastMicBytes = 0;   // audio bytes sent at the previous mic line (DT-315)
   Timer?              _heartbeatTimer;
 
   // Return audio (talkback): the engine sends the program mix back over the
@@ -367,9 +369,20 @@ class ConnectionService extends ChangeNotifier {
     // (8 s on the Redmi Note 14, 2026-10-15) — and greyed WHIP for good on a phone that streams fine.
     if (_statsTimer?.isActive ?? false) return;
     _statsTick = 0;
+    _lastMicBytes = 0;
     _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
       if (_peerConnection == null) return;
       final stats = await _peerConnection!.getStats();
+      // Microphone, measured (DT-315): by WHIP the engine decoded silence. The level WebRTC sees at the source and
+      // the audio bytes that went out, on the same line as the video every 6 s.
+      double? micLevel; int? micBytes;
+      for (final report in stats) {
+        final v = report.values;
+        if (report.type == 'media-source' && v['kind'] == 'audio') micLevel = (v['audioLevel'] as num?)?.toDouble();
+        if (report.type == 'outbound-rtp' && (v['mediaType'] == 'audio' || v['kind'] == 'audio')) {
+          micBytes = (v['bytesSent'] as num?)?.toInt();
+        }
+      }
       for (final report in stats) {
         final v = report.values;
         if (report.type == 'outbound-rtp' && (v['mediaType'] == 'video' || v['kind'] == 'video')) {
@@ -394,6 +407,11 @@ class ConnectionService extends ChangeNotifier {
             debugPrint('[SambaAir] WHIP envío: ${v['frameWidth']}x${v['frameHeight']} '
                 '${v['framesPerSecond']} fps · objetivo ${((v['targetBitrate'] as num?) ?? 0) ~/ 1000} kbps · '
                 'límite=${v['qualityLimitationReason']} · encoder=${v['encoderImplementation']}');
+            final db = micLevel == null ? 'sin dato' : micLevel <= 0 ? 'silencio' :
+                '${(20 * math.log(micLevel) / math.ln10).toStringAsFixed(0)} dBFS';
+            final kbps = micBytes == null ? '?' : (((micBytes - _lastMicBytes) * 8) / 6000).toStringAsFixed(1);
+            if (micBytes != null) _lastMicBytes = micBytes;
+            debugPrint('[SambaAir] WHIP mic: nivel $db · audio enviado $kbps kbps');
           }
           break;
         }

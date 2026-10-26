@@ -580,9 +580,18 @@ class VortexCamPlugin(
     // RTMP has no way to carry the orientation: the relay turns the picture upright itself (black bars when held
     // upright). SRT / SBL send the sensor frame + the orientation (SROT / frame header) and SAMBA turns it.
     @Volatile private var pillarboxPixels = false
+    private var lastRelayTurn = -1
     private fun updateRelayRotation() {
         val r = streamUprightDegrees()
-        relay?.rotation = if (r == 180) 180 else 0
+        val turn = if (r == 180) 180 else 0
+        // Landscape upside down is turned HERE, in pixels: SRT's SROT / SBL's header stay at 0, so without this line
+        // nothing showed that the phone had turned (DT-061, 2026-10-26).
+        if (relay != null && turn != lastRelayTurn) {
+            val msg = "[orientación] giro en píxeles ${turn}° (el celular ${if (turn == 180) "en horizontal invertido" else "derecho"})\n"
+            if (lastRelayTurn >= 0) { Log.i(TAG, msg.trim()); Thread { sendLogBytes(msg, "orientation") }.start() }
+            lastRelayTurn = turn
+        }
+        relay?.rotation = turn
         relay?.pillarbox = pillarboxPixels
         relay?.uprightTurn = (r - (relay?.rotation ?: 0) + 360) % 360
     }
@@ -594,6 +603,7 @@ class VortexCamPlugin(
         displayListener = null
         stopOrientationListener()
         relay?.release(); relay = null
+        lastRelayTurn = -1
     }
     // Returns the rotation angle (0/90/180/270) to apply to the encoder so that
     // VortexEngine receives upright video regardless of how the phone is held.
@@ -903,6 +913,7 @@ class VortexCamPlugin(
             while (streaming.get()) {
                 val n = rec.read(pcm, 0, pcm.size)
                 if (n <= 0) continue
+                noteMicPcm(pcm, n)
                 val inIdx = enc.dequeueInputBuffer(10_000)
                 if (inIdx >= 0) {
                     val inBuf = enc.getInputBuffer(inIdx) ?: continue
@@ -935,6 +946,7 @@ class VortexCamPlugin(
                     ?: run { enc.releaseOutputBuffer(idx, false); continue }
                 val pkts = muxer.muxAudio(buf, info, audioSampleRate, audioChannels)
                 for (pkt in pkts) synchronized(sendLock) { socket.send(pkt) }
+                micPkts.incrementAndGet()
                 enc.releaseOutputBuffer(idx, false)
                 if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
             }
@@ -1367,8 +1379,11 @@ class VortexCamPlugin(
 
             val minBuf = AudioRecord.getMinBufferSize(
                 SBL_AUDIO_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            // MIC, as SRT. VOICE_COMMUNICATION (the phone's call processing: echo cancelling, noise suppression) reached
+            // SAMBA as digital silence (−108 dB with a tone playing in the room, the return on the loudspeaker), while
+            // the same phone by SRT gave −30/−40 (DT-315, 2026-10-26).
             sblMicRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION, SBL_AUDIO_RATE,
+                MediaRecorder.AudioSource.MIC, SBL_AUDIO_RATE,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minBuf * 4)
             sblMicRecord!!.startRecording()
 
@@ -1402,6 +1417,7 @@ class VortexCamPlugin(
         while (streaming.get()) {
             val n = rec.read(pcm, 0, pcm.size)
             if (n > 0) {
+                noteMicPcm(pcm, n)
                 val inIdx = enc.dequeueInputBuffer(10_000)
                 if (inIdx >= 0) {
                     enc.getInputBuffer(inIdx)?.let { b ->
@@ -1418,6 +1434,7 @@ class VortexCamPlugin(
                         val frame = ByteArray(info.size)
                         out.position(info.offset); out.get(frame)
                         sendSblAudioFrame(frame, streamClock.audio.sessionUs(info.presentationTimeUs))
+                        micPkts.incrementAndGet()
                     }
                 }
                 enc.releaseOutputBuffer(outIdx, false)
@@ -2329,6 +2346,35 @@ class VortexCamPlugin(
     private val retDroppedSamples = java.util.concurrent.atomic.AtomicLong()   // left out to keep the delay short
     private var retLogAtMs = 0L
 
+    // ---- Microphone, measured (DT-315, 2026-10-26): by SBL and WHIP the mic reached SAMBA silent and nothing on the
+    // phone said so. One «[mic]» line with the [retorno] one: what was captured (level and peak) and the audio packets
+    // sent. Captured on the mic thread, logged from the encode loop.
+    private val micSumSq = java.util.concurrent.atomic.AtomicLong()
+    private val micSamples = java.util.concurrent.atomic.AtomicLong()
+    private val micPeak = java.util.concurrent.atomic.AtomicInteger()
+    private val micPkts = java.util.concurrent.atomic.AtomicLong()
+
+    private fun noteMicPcm(pcm: ByteArray, n: Int) {
+        var sq = 0L; var peak = 0
+        var i = 0
+        while (i + 1 < n) {
+            val v = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toInt()
+            sq += v.toLong() * v; val a = if (v < 0) -v else v; if (a > peak) peak = a
+            i += 2
+        }
+        micSumSq.addAndGet(sq); micSamples.addAndGet((n / 2).toLong())
+        micPeak.accumulateAndGet(peak) { x, y -> maxOf(x, y) }
+    }
+
+    private fun micLine(via: String, secs: Double): String {
+        val sq = micSumSq.getAndSet(0).toDouble(); val n = micSamples.getAndSet(0)
+        val peak = micPeak.getAndSet(0); val pk = micPkts.getAndSet(0)
+        val level = if (n > 0 && sq > 0) "%.0f dBFS (pico %.0f)".format(
+                        10 * Math.log10(sq / n / (32768.0 * 32768.0)), 20 * Math.log10(maxOf(peak, 1) / 32768.0))
+                    else if (n > 0) "silencio digital" else "nada capturado"
+        return "[mic] $via · ${"%.0f".format(pk / secs)} paq/s enviados · $level\n"
+    }
+
     private fun routeName(t: Int): String = when (t) {
         android.media.AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "auricular de llamada"
         android.media.AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "parlante"
@@ -2362,6 +2408,9 @@ class VortexCamPlugin(
             "$fr cuadros · $level · descartado ${droppedMs} ms · sale por: $route · botón: ${if (talkbackMuted.get()) "silenciado" else "activo"}\n"
         Log.i(TAG, msg.trim())
         Thread { sendLogBytes(msg, "return_stats") }.start()
+        val mic = micLine(via, secs)
+        Log.i(TAG, mic.trim())
+        Thread { sendLogBytes(mic, "mic_stats") }.start()
     }
 
     private fun decodeAndPlay(buf: ByteArray, offset: Int, length: Int) = synchronized(returnLock) {
