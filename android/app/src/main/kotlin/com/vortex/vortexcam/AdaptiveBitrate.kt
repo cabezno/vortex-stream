@@ -20,6 +20,8 @@ class AdaptiveBitrate(
     private val floorBps = maxOf(1_500_000, maxBps / 8)
     @Volatile var currentBps = maxBps
         private set
+    // Ceiling below maxBps while the phone is hot (DT-145): the network may carry more, the phone should not make it.
+    private var ceilingBps = maxBps
     private var lastChangeMs = 0L
     private var cleanSinceMs = System.currentTimeMillis()
 
@@ -30,9 +32,16 @@ class AdaptiveBitrate(
             cleanSinceMs = now
             if (now - lastChangeMs < 1500 || currentBps <= floorBps) return
             set(maxOf(floorBps, (currentBps * 0.7).toInt()), now, "baja — $detail")
-        } else if (currentBps < maxBps && now - cleanSinceMs >= 8000 && now - lastChangeMs >= 4000) {
-            set(minOf(maxBps, (currentBps * 1.15).toInt()), now, "sube — red limpia")
+        } else if (currentBps < ceilingBps && now - cleanSinceMs >= 8000 && now - lastChangeMs >= 4000) {
+            set(minOf(ceilingBps, (currentBps * 1.15).toInt()), now, "sube — red limpia")
         }
+    }
+
+    /** Heat ceiling as a fraction of the configured rate (1.0 = none). Lowers at once; raising is left to [report]. */
+    @Synchronized fun setHeatCeiling(fraction: Double, detail: String) {
+        ceilingBps = maxOf(floorBps, (maxBps * fraction).toInt())
+        if (currentBps > ceilingBps) set(ceilingBps, System.currentTimeMillis(), "calor — $detail")
+        else Log.i("AdaptiveBitrate", "$label: techo ${ceilingBps / 1000} kbps ($detail)")
     }
 
     /**
