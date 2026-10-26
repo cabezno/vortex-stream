@@ -1873,8 +1873,13 @@ class VortexCamPlugin(
                 s.setSockFlag(SockOpt.TRANSTYPE, Transtype.LIVE)
                 s.setSockFlag(SockOpt.LATENCY, latencyMs)
                 opt(SockOpt.PAYLOADSIZE, SRT_PAYLOAD)
-                opt(SockOpt.MAXBW, 0L)                 // 0 = input rate + OHEADBW (room for the resends)
-                opt(SockOpt.OHEADBW, 25)
+                // Fixed ceiling (bytes/s), 1.5x the configured video rate + 1 Mbps (DT-314). It used to be 0 = the input
+                // rate measured by libsrt + 25 %. The 4K start-up burst (22 Mbps for ~5 s on the Mi A3's 2.4 GHz)
+                // left seconds of video queued. Then the ABR cut the input to ~1 Mbps, and that cut the drain rate
+                // with it (input + 25 %): the queue grew to 19 s with the encoder at 1 Mbps, and SAMBA got video 19 s
+                // late (2026-10-26). With a ceiling tied to the configured rate, a backlog drains as fast as the link
+                // allows, whatever the ABR is doing.
+                opt(SockOpt.MAXBW, (encBitrate.toLong() * 3 / 2 + 1_000_000L) / 8)
                 opt(SockOpt.CONNTIMEO, 2000)
                 opt(SockOpt.PEERIDLETIMEO, 3000)       // SAMBA silent 3 s = link down (the default is 5 s)
                 if (streamId.isNotEmpty()) opt(SockOpt.STREAMID, streamId)
